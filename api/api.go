@@ -1,0 +1,212 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+)
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream"` // Set to true for streaming
+}
+
+type ChatResponse struct {
+	Model     string  `json:"model"`
+	CreatedAt string  `json:"created_at"`
+	Message   Message `json:"message"`
+	Done      bool    `json:"done"`
+}
+
+type GenerateRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Stream bool   `json:"stream"`
+}
+
+type GenerateResponse struct {
+	Model    string `json:"model"`
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
+}
+
+type ModelListResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+type VersionResponse struct {
+	Version string `json:"version"`
+}
+
+type Endpoint struct {
+	Path    string
+	Method  string
+	Version int
+}
+
+var ollamaCalls map[string]Endpoint = map[string]Endpoint{
+	"getModels": {
+		Path:   "/api/tags",
+		Method: "GET",
+	},
+	"getVersion": {
+		Path:   "/api/version",
+		Method: "GET",
+	},
+	"generateResponse": {
+		Path:   "/api/generate",
+		Method: "POST",
+	},
+	"chatResponse": {
+		Path:   "/api/chat",
+		Method: "POST",
+	},
+	"showModelDetails": {
+		Path:   "/api/show",
+		Method: "POST",
+	},
+	"pullModel": {
+		Path:   "/api/pull",
+		Method: "POST",
+	},
+	"runningModels": {
+		Path:   "/api/ps",
+		Method: "GET",
+	},
+	"getInputEmbedings": {
+		Path:   "/api/embed",
+		Method: "POST",
+	},
+}
+
+type OllamaHost struct {
+	uri string
+}
+
+func generatePath(call string, host OllamaHost) string {
+	callPath := ollamaCalls[call].Path
+	urlPath := fmt.Sprintf("%s%s", host.uri, callPath)
+	return urlPath
+}
+
+func (o *OllamaHost) SetURI(uri string) {
+	o.uri = uri
+}
+
+func (o OllamaHost) GetOllamaVersion() (string, error) {
+	urlPath := generatePath("getVersion", o)
+	resp, err := http.Get(urlPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to do call due to error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var versionResp VersionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&versionResp); err != nil {
+		return "", fmt.Errorf("failed to decode version response: %v", err)
+	}
+
+	return versionResp.Version, nil
+}
+
+func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
+	urlPath := generatePath("getModels", o)
+	resp, err := http.Get(urlPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var list ModelListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, fmt.Errorf("failed to decode model list: %v", err)
+	}
+
+	return &list, nil
+}
+
+func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, error) {
+	req.Stream = false
+
+	urlPath := generatePath("generateResponse", o)
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var genResp GenerateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	return &genResp, nil
+}
+
+func (o OllamaHost) ContinousChat(req ChatRequest) (<-chan ChatResponse, <-chan error) {
+	req.Stream = true
+
+	respChan := make(chan ChatResponse)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(respChan)
+		defer close(errChan)
+
+		urlPath := generatePath("chatResponse", o)
+		jsonData, err := json.Marshal(req)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to marshal chat request: %v", err)
+			return
+		}
+
+		resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+		if err != nil {
+			errChan <- fmt.Errorf("http POST request failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			errChan <- fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			return
+		}
+
+		decoder := json.NewDecoder(resp.Body)
+
+		for {
+			var chunk ChatResponse
+			err := decoder.Decode(&chunk)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				errChan <- fmt.Errorf("error decoding stream chunk: %v", err)
+				break
+			}
+
+			respChan <- chunk
+
+			if chunk.Done {
+				break
+			}
+		}
+	}()
+
+	return respChan, errChan
+}
