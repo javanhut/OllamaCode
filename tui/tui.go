@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -87,7 +89,79 @@ const (
 	stateModelPicker
 	stateChat
 	stateHelp
+	statePermission
+	stateNotes
 )
+
+type Mode int
+
+const (
+	ExploreMode Mode = iota
+	PlanMode
+	WriteMode
+)
+
+func (m Mode) String() string {
+	switch m {
+	case ExploreMode:
+		return "explore"
+	case PlanMode:
+		return "plan"
+	case WriteMode:
+		return "write"
+	}
+	return "?"
+}
+
+func (m Mode) hint() string {
+	switch m {
+	case ExploreMode:
+		return "read-only"
+	case PlanMode:
+		return "read + notes"
+	case WriteMode:
+		return "writes need approval"
+	}
+	return ""
+}
+
+func (m Mode) next() Mode {
+	switch m {
+	case ExploreMode:
+		return PlanMode
+	case PlanMode:
+		return WriteMode
+	default:
+		return ExploreMode
+	}
+}
+
+var readOnlyToolNames = map[string]bool{
+	"read_file":              true,
+	"list_directory":         true,
+	"find_files":             true,
+	"grep":                   true,
+	"file_info":              true,
+	"get_working_directory":  true,
+	"read_session_notes":     true,
+}
+
+var planExtraToolNames = map[string]bool{
+	"update_session_notes": true,
+	"append_session_notes": true,
+}
+
+var destructiveToolNames = map[string]bool{
+	"write_file":     true,
+	"append_file":    true,
+	"edit_file":      true,
+	"delete_file":    true,
+	"move_file":      true,
+	"copy_file":      true,
+	"make_directory": true,
+	"touch":          true,
+	"run_shell":      true,
+}
 
 type config struct {
 	Host  string `json:"host"`
@@ -118,15 +192,51 @@ type selection struct {
 	cursor int // content line index
 }
 
+type pendingBatch struct {
+	calls    []mcp.ToolCall
+	results  []api.Message
+	index    int
+	allowAll bool
+}
+
+type sessionNotes struct {
+	mu   sync.Mutex
+	text string
+}
+
+func (n *sessionNotes) get() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.text
+}
+
+func (n *sessionNotes) set(s string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.text = s
+}
+
+func (n *sessionNotes) appendLine(s string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.text != "" && !strings.HasSuffix(n.text, "\n") {
+		n.text += "\n"
+	}
+	n.text += s
+}
+
 type Model struct {
 	cfg       config
 	host      api.OllamaHost
 	tools     *mcp.Registry
+	notes     *sessionNotes
+	mode      Mode
 	state     state
 	urlInput  textinput.Model
 	models    []string
 	picker    int
 	modelName string
+	pending   *pendingBatch
 
 	history    []api.Message
 	transcript *strings.Builder
@@ -134,7 +244,7 @@ type Model struct {
 	input      textarea.Model
 	stream     *streamState
 	streaming  bool
-	pending    *strings.Builder
+	streamBuf  *strings.Builder
 	statusMsg  string
 	statusErr  bool
 	lastError  string
@@ -197,16 +307,24 @@ func New() Model {
 	)
 	ta.KeyMap = km
 
+	notes := &sessionNotes{}
+	registry := mcp.DefaultRegistry()
+	registry.Register(readNotesTool(notes))
+	registry.Register(updateNotesTool(notes))
+	registry.Register(appendNotesTool(notes))
+
 	m := Model{
 		cfg:        cfg,
 		host:       host,
-		tools:      mcp.DefaultRegistry(),
+		tools:      registry,
+		notes:      notes,
+		mode:       ExploreMode,
 		state:      stateChat,
 		urlInput:   ti,
 		input:      ta,
 		modelName:  cfg.Model,
 		transcript: &strings.Builder{},
-		pending:    &strings.Builder{},
+		streamBuf:  &strings.Builder{},
 	}
 	m.input.Focus()
 	return m
@@ -247,8 +365,8 @@ func (m *Model) refreshTranscript() {
 		if m.streaming {
 			b.WriteString(assistantStyle.Render(m.activeModelName()))
 			b.WriteString("\n")
-			if m.pending.Len() > 0 {
-				b.WriteString(m.renderMarkdown(m.pending.String()))
+			if m.streamBuf.Len() > 0 {
+				b.WriteString(m.renderMarkdown(m.streamBuf.String()))
 			} else {
 				b.WriteString(mutedStyle.Render("…"))
 			}
@@ -403,6 +521,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if k := msg.String(); k == "ctrl+c" {
 			return m, tea.Quit
 		}
+		// Tab cycles mode regardless of which state we're in (chat/help/notes).
+		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+			m.mode = m.mode.next()
+			m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
+			return m, nil
+		}
 		switch m.state {
 		case stateSettings:
 			return m.updateSettings(msg)
@@ -414,6 +538,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 			}
 			return m, nil
+		case stateNotes:
+			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
+				m.state = stateChat
+				m.input.Focus()
+			}
+			return m, nil
+		case statePermission:
+			return m.updatePermission(msg)
 		case stateChat:
 			newM, cmd := m.updateChatKey(msg)
 			if nm, ok := newM.(Model); ok {
@@ -457,7 +589,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatChunkMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		m.pending.WriteString(msg.content)
+		m.streamBuf.WriteString(msg.content)
 		m.refreshTranscript()
 		if wasAtBottom {
 			m.viewport.GotoBottom()
@@ -468,33 +600,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatToolCallsMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		// Discard any preamble text the model emitted before the tool call.
-		// Storing it in history causes models like granite to repeat it in
-		// the post-tool response. Standard tool-calling format expects empty
-		// content on tool-calling assistant messages anyway.
-		m.pending.Reset()
+		// Discard any preamble text the model emitted before the tool call so
+		// the model doesn't see its own preamble in history and re-state it.
+		m.streamBuf.Reset()
 		m.history = append(m.history, api.Message{
 			Role:      "assistant",
 			Content:   "",
 			ToolCalls: msg.calls,
 		})
-		m.runToolCalls(msg.calls)
-		cmd := m.startStream()
+		m.pending = &pendingBatch{calls: msg.calls}
+		cmd := m.processNextTool()
 		m.refreshTranscript()
 		if wasAtBottom {
 			m.viewport.GotoBottom()
 		}
-		cmds = append(cmds, cmd)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case chatDoneMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		if m.pending.Len() > 0 {
+		if m.streamBuf.Len() > 0 {
 			m.history = append(m.history, api.Message{
 				Role:    "assistant",
-				Content: m.pending.String(),
+				Content: m.streamBuf.String(),
 			})
 		}
-		m.pending.Reset()
+		m.streamBuf.Reset()
 		m.streaming = false
 		m.stream = nil
 		m.refreshTranscript()
@@ -592,6 +724,45 @@ func (m Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.pending == nil {
+		m.state = stateChat
+		return m, nil
+	}
+	switch msg.String() {
+	case "y", "enter":
+		call := m.pending.calls[m.pending.index]
+		m.pending.results = append(m.pending.results, m.invokeTool(call))
+		m.pending.index++
+		m.state = stateChat
+		cmd := m.processNextTool()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return m, cmd
+	case "a":
+		m.pending.allowAll = true
+		m.state = stateChat
+		cmd := m.processNextTool()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return m, cmd
+	case "n", "esc":
+		call := m.pending.calls[m.pending.index]
+		m.pending.results = append(m.pending.results, api.Message{
+			Role:     "tool",
+			ToolName: call.Function.Name,
+			Content:  "denied by user",
+		})
+		m.pending.index++
+		m.state = stateChat
+		cmd := m.processNextTool()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return m, cmd
+	}
+	return m, nil
+}
+
 func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -623,6 +794,10 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/help", "/?":
 			m.input.Reset()
 			m.state = stateHelp
+			return m, nil
+		case "/notes":
+			m.input.Reset()
+			m.state = stateNotes
 			return m, nil
 		case "/copy":
 			m.input.Reset()
@@ -670,6 +845,10 @@ func (m Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.pickerModal()))
 	case stateHelp:
 		v.SetContent(m.overlayModal(base, m.helpModal()))
+	case stateNotes:
+		v.SetContent(m.overlayModal(base, m.notesModal()))
+	case statePermission:
+		v.SetContent(m.overlayModal(base, m.permissionModal()))
 	default:
 		v.SetContent(base)
 	}
@@ -814,10 +993,17 @@ func (m Model) helpModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	rows := []struct{ key, desc string }{
+		{"", "Modes"},
+		{"explore", "read-only — model can only inspect"},
+		{"plan", "read + update session notes"},
+		{"write", "all tools; writes need your approval"},
+		{"tab", "cycle modes"},
+		{"", ""},
 		{"", "Slash commands"},
 		{"/help", "show this screen"},
 		{"/settings", "change Ollama URL"},
 		{"/model", "pick a model"},
+		{"/notes", "view session notes"},
 		{"/clear", "reset the conversation"},
 		{"/copy", "copy last response to system clipboard"},
 		{"/quit", "exit"},
@@ -831,9 +1017,14 @@ func (m Model) helpModal() string {
 		{"ctrl+u/d", "half page up/down"},
 		{"ctrl+c", "quit"},
 		{"", ""},
+		{"", "Permission prompts (write mode)"},
+		{"y/enter", "allow this call"},
+		{"a", "allow all calls in this turn"},
+		{"n/esc", "deny this call"},
+		{"", ""},
 		{"", "Mouse"},
 		{"click+drag", "select lines (auto-scrolls at edges)"},
-		{"release", "selection is copied to clipboard"},
+		{"release", "copy selection to clipboard"},
 		{"wheel", "scroll viewport"},
 	}
 
@@ -860,6 +1051,82 @@ func (m Model) helpModal() string {
 	b.WriteString("\n")
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
+}
+
+func (m Model) notesModal() string {
+	w := m.modalWidth()
+	innerW := w - 4
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Session notes", "esc", innerW))
+	b.WriteString("\n\n")
+	notes := m.notes.get()
+	if notes == "" {
+		b.WriteString(modalMutedStyle.Render("(empty)"))
+		b.WriteString("\n")
+		b.WriteString(modalMutedStyle.Render("The model can read/append/replace these via tools."))
+	} else {
+		for _, line := range strings.Split(notes, "\n") {
+			b.WriteString(modalBodyStyle.Render(truncatePlain(line, innerW)))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
+	return modalStyle.Width(w).Render(b.String())
+}
+
+func (m Model) permissionModal() string {
+	w := m.modalWidth()
+	innerW := w - 4
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Tool wants to run", "n=deny", innerW))
+	b.WriteString("\n\n")
+	if m.pending == nil || m.pending.index >= len(m.pending.calls) {
+		b.WriteString(modalMutedStyle.Render("(no pending call)"))
+		return modalStyle.Width(w).Render(b.String())
+	}
+	call := m.pending.calls[m.pending.index]
+	b.WriteString(modalAccentStyle.Render(call.Function.Name))
+	b.WriteString("\n\n")
+	args := formatToolArgs(call.Function.Arguments, innerW)
+	for _, line := range args {
+		b.WriteString(modalBodyStyle.Render(line))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("y/enter ") + modalBodyStyle.Render("allow once   "))
+	b.WriteString(modalMutedStyle.Render("a ") + modalBodyStyle.Render("allow all in this turn   "))
+	b.WriteString(modalMutedStyle.Render("n/esc ") + modalBodyStyle.Render("deny"))
+	return modalStyle.Width(w).Render(b.String())
+}
+
+func formatToolArgs(raw json.RawMessage, width int) []string {
+	if len(raw) == 0 {
+		return []string{"(no args)"}
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return []string{truncatePlain(string(raw), width)}
+	}
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []string
+	for _, k := range keys {
+		val := fmt.Sprint(obj[k])
+		if s, ok := obj[k].(string); ok {
+			val = s
+		}
+		val = strings.ReplaceAll(val, "\n", "⏎ ")
+		line := fmt.Sprintf("%s: %s", k, val)
+		if lipgloss.Width(line) > width {
+			line = truncatePlain(line, width)
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 type windowRange struct{ start, end int }
@@ -997,58 +1264,66 @@ func (m Model) waitForStream() tea.Cmd {
 }
 
 func (m *Model) startStream() tea.Cmd {
+	sp := systemPrompt
+	sp += fmt.Sprintf("\n\nCurrent mode: %s — %s.", m.mode, m.mode.hint())
+	switch m.mode {
+	case ExploreMode:
+		sp += " You may only read. After exploration, summarize concisely. Do not attempt write/edit/run_shell calls."
+	case PlanMode:
+		sp += " You may read and update session notes. Describe a plan; do not modify files yet."
+	case WriteMode:
+		sp += " You may modify files and run shell commands. Each destructive call requires user approval."
+	}
+	if notes := m.notes.get(); notes != "" {
+		sp += "\n\nSession notes (your scratchpad):\n" + notes
+	}
 	msgs := make([]api.Message, 0, len(m.history)+1)
-	msgs = append(msgs, api.Message{Role: "system", Content: systemPrompt})
+	msgs = append(msgs, api.Message{Role: "system", Content: sp})
 	msgs = append(msgs, m.history...)
 	respCh, errCh := m.host.ContinousChat(api.ChatRequest{
 		Model:    m.modelName,
 		Messages: msgs,
-		Tools:    m.tools.Definitions(),
+		Tools:    m.toolsForMode(),
 	})
 	m.stream = &streamState{resp: respCh, errs: errCh}
 	m.streaming = true
-	m.pending.Reset()
+	m.streamBuf.Reset()
 	return m.waitForStream()
 }
 
-const systemPrompt = `You are a coding assistant in a Linux terminal. You have tools that read and modify the user's real filesystem and run shell commands.
+const systemPrompt = `You are a coding assistant in a Linux terminal with tools that read and modify the user's real filesystem.
 
-When to use tools:
-- The user asks about files, directories, code, or system state -> call tools to find out. Never invent file contents or descriptions from filenames alone.
-- "Summarize this codebase" / "what's in X" -> list_directory, then read_file on the real source files before describing them. Chain multiple tools in one turn when needed.
-- Prefer dedicated tools when one fits. Use run_shell for anything not covered.
+How to choose tools:
+- Inspect / read: read_file (use start_line/end_line for big files), list_directory, find_files (glob by basename), grep (regex search), file_info (stat), get_working_directory.
+- Create something new that does NOT exist: write_file (creates the file with content) or touch (empty file) or make_directory.
+- Modify an EXISTING file: edit_file (exact-string replace — preferred), append_file (add to end). NEVER use write_file to modify a file you have already read; that overwrites the whole thing and loses other content.
+- Move / rename: move_file. Copy: copy_file. Delete: delete_file (recursive=true for dirs).
+- Run anything else (awk, sed, find, pipelines, build/test): run_shell.
 
-Available tools:
-- read_file (supports start_line/end_line for big files), write_file, append_file, edit_file (exact-string replace; preferred for incremental edits), delete_file (set recursive for dirs), move_file, copy_file, touch, make_directory.
-- list_directory, find_files (glob by basename, walks with max_depth, skips .git/node_modules), file_info (stat), get_working_directory.
-- grep (regex search), run_shell (bash -c for awk/sed/find/pipelines).
-- For editing existing files prefer edit_file over write_file — write_file overwrites the whole file.
+Decision rule for "create vs modify":
+1. If the user says "add X to file F" or "change Y in F", call read_file F first, then edit_file with the exact old/new strings.
+2. If the user says "create file F with X" and F does not exist, call write_file with the full content.
+3. If unsure whether F exists, call file_info first.
 
 When NOT to use tools:
 - Meta questions about you, your capabilities, or what tools you have -> answer directly from this prompt. Do NOT call list_directory just to "look around".
-- Greetings, identity questions, or anything that doesn't depend on the user's filesystem.
+- Greetings or identity questions.
+
+Verification:
+- After write_file, edit_file, or run_shell that modified state, briefly verify by reading the file back or running a relevant check (build/test). State what you verified in your final answer.
+
+Session notes:
+- read_session_notes / append_session_notes / update_session_notes give you a persistent scratchpad. Use it to record decisions, file paths, conventions, and "where I left off" so you don't have to re-derive context every turn. This is especially valuable if your context window is small.
+- At the start of any non-trivial task, call read_session_notes. At the end, append a one-line summary of what you did.
 
 Output rules:
 - Do NOT write conversational text before a tool call. If you're going to call a tool, emit only the tool call. Save your prose for after you have the tool's result.
 - After tools return, produce ONE concise final answer based on what you actually saw. Never restate your own previous text.
-- Be terse. No preamble, no "How may I assist you further?" or similar closers. The user is in a terminal and reads quickly.`
+- Be terse. No preamble or closing pleasantries. The user reads in a terminal.`
 
-func (m *Model) runToolCalls(calls []mcp.ToolCall) {
-	for _, call := range calls {
-		result, err := m.tools.Invoke(context.Background(), call)
-		if err != nil {
-			result = fmt.Sprintf("error: %v", err)
-		}
-		m.history = append(m.history, api.Message{
-			Role:     "tool",
-			ToolName: call.Function.Name,
-			Content:  result,
-		})
-	}
-}
 
 func (m Model) headerView() string {
-	title := titleStyle.Render(fmt.Sprintf("ollama · %s · %s", m.activeModelName(), m.cfg.Host))
+	title := titleStyle.Render(fmt.Sprintf("ollama · %s · %s · [%s]", m.activeModelName(), m.cfg.Host, m.mode))
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(title)
@@ -1063,7 +1338,7 @@ func (m Model) footerView() string {
 		status = "streaming…"
 	}
 	info := infoStyle.Render(status)
-	hintText := " /help · enter send · shift+enter newline · shift+↑/↓ scroll · ctrl+c quit "
+	hintText := fmt.Sprintf(" mode: %s · tab to switch · /help · enter send · ctrl+c quit ", m.mode)
 	if m.toast != "" {
 		hintText = " " + m.toast + " "
 	}
@@ -1101,11 +1376,18 @@ func (m *Model) selectionRange() (int, int, []string, bool) {
 	if s > e {
 		s, e = e, s
 	}
+	last := len(lines) - 1
 	if s < 0 {
 		s = 0
 	}
-	if e >= len(lines) {
-		e = len(lines) - 1
+	if s > last {
+		s = last
+	}
+	if e < 0 {
+		e = 0
+	}
+	if e > last {
+		e = last
 	}
 	return s, e, lines, true
 }
@@ -1144,6 +1426,144 @@ func (m *Model) copySelection() {
 		return
 	}
 	m.toast = fmt.Sprintf("copied %d chars", len(plain))
+}
+
+func readNotesTool(notes *sessionNotes) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "read_session_notes",
+			Description: "Read your persistent session notes — a scratchpad you can use to record observations, decisions, and reminders that persist across the whole conversation. Useful for keeping context when your own context window is small.",
+			Parameters:  mcp.Schema{Type: "object", Properties: map[string]mcp.Property{}},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			text := notes.get()
+			if text == "" {
+				return "(empty — use update_session_notes or append_session_notes to record info)", nil
+			}
+			return text, nil
+		},
+	}
+}
+
+func updateNotesTool(notes *sessionNotes) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "update_session_notes",
+			Description: "Replace your session notes scratchpad with a new value. Use append_session_notes to add to it instead.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"content": {Type: "string", Description: "Full new content of the notes."},
+				},
+				Required: []string{"content"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			notes.set(a.Content)
+			return fmt.Sprintf("notes updated (%d chars)", len(a.Content)), nil
+		},
+	}
+}
+
+func appendNotesTool(notes *sessionNotes) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "append_session_notes",
+			Description: "Append a line to your session notes scratchpad. The content is added on its own line at the end.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"content": {Type: "string", Description: "Text to append."},
+				},
+				Required: []string{"content"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			notes.appendLine(a.Content)
+			return fmt.Sprintf("appended %d chars", len(a.Content)), nil
+		},
+	}
+}
+
+func (m Model) toolsForMode() []mcp.Tool {
+	all := m.tools.Definitions()
+	out := make([]mcp.Tool, 0, len(all))
+	for _, t := range all {
+		if m.toolAllowedInMode(t.Function.Name) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (m Model) toolAllowedInMode(name string) bool {
+	switch m.mode {
+	case ExploreMode:
+		return readOnlyToolNames[name]
+	case PlanMode:
+		return readOnlyToolNames[name] || planExtraToolNames[name]
+	case WriteMode:
+		return true
+	}
+	return false
+}
+
+func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
+	result, err := m.tools.Invoke(context.Background(), call)
+	if err != nil {
+		result = fmt.Sprintf("error: %v", err)
+	}
+	return api.Message{
+		Role:     "tool",
+		ToolName: call.Function.Name,
+		Content:  result,
+	}
+}
+
+func (m *Model) processNextTool() tea.Cmd {
+	for m.pending != nil && m.pending.index < len(m.pending.calls) {
+		call := m.pending.calls[m.pending.index]
+		if !m.toolAllowedInMode(call.Function.Name) {
+			m.pending.results = append(m.pending.results, api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press tab to switch modes)", call.Function.Name, m.mode),
+			})
+			m.pending.index++
+			continue
+		}
+		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
+			m.state = statePermission
+			m.refreshTranscript()
+			return nil
+		}
+		m.pending.results = append(m.pending.results, m.invokeTool(call))
+		m.pending.index++
+	}
+	if m.pending == nil {
+		return nil
+	}
+	m.history = append(m.history, m.pending.results...)
+	m.pending = nil
+	cmd := m.startStream()
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	return cmd
 }
 
 func lastAssistantMessage(history []api.Message) string {
