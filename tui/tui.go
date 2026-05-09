@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,10 +14,12 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/mcp"
 )
 
 const DefaultHost = "http://localhost:11434"
@@ -83,6 +86,7 @@ const (
 	stateSettings state = iota
 	stateModelPicker
 	stateChat
+	stateHelp
 )
 
 type config struct {
@@ -93,6 +97,10 @@ type config struct {
 type chatChunkMsg struct{ content string }
 type chatDoneMsg struct{}
 type chatErrMsg struct{ err error }
+type chatToolCallsMsg struct {
+	content string
+	calls   []mcp.ToolCall
+}
 
 type modelsLoadedMsg struct {
 	models []string
@@ -104,9 +112,16 @@ type streamState struct {
 	errs <-chan error
 }
 
+type selection struct {
+	active bool
+	anchor int // content line index
+	cursor int // content line index
+}
+
 type Model struct {
 	cfg       config
 	host      api.OllamaHost
+	tools     *mcp.Registry
 	state     state
 	urlInput  textinput.Model
 	models    []string
@@ -123,6 +138,8 @@ type Model struct {
 	statusMsg  string
 	statusErr  bool
 	lastError  string
+	toast      string
+	sel        selection
 
 	mdRenderer *glamour.TermRenderer
 	mdWidth    int
@@ -183,6 +200,7 @@ func New() Model {
 	m := Model{
 		cfg:        cfg,
 		host:       host,
+		tools:      mcp.DefaultRegistry(),
 		state:      stateChat,
 		urlInput:   ti,
 		input:      ta,
@@ -200,22 +218,40 @@ func (m *Model) refreshTranscript() {
 		b.WriteString(m.welcomePanel())
 	} else {
 		for _, msg := range m.history {
-			if msg.Role == "user" {
+			switch msg.Role {
+			case "user":
 				b.WriteString(userStyle.Render("You"))
 				b.WriteString("\n")
 				b.WriteString(msg.Content)
 				b.WriteString("\n\n")
-			} else {
+			case "tool":
+				b.WriteString(renderToolResult(msg.ToolName, msg.Content))
+				b.WriteString("\n\n")
+			default:
+				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
+					continue
+				}
 				b.WriteString(assistantStyle.Render(m.activeModelName()))
 				b.WriteString("\n")
-				b.WriteString(m.renderMarkdown(msg.Content))
-				b.WriteString("\n\n")
+				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) != "" {
+					b.WriteString(m.renderMarkdown(msg.Content))
+					b.WriteString("\n")
+				}
+				for _, call := range msg.ToolCalls {
+					b.WriteString(renderToolCall(call))
+					b.WriteString("\n")
+				}
+				b.WriteString("\n")
 			}
 		}
 		if m.streaming {
 			b.WriteString(assistantStyle.Render(m.activeModelName()))
 			b.WriteString("\n")
-			b.WriteString(m.renderMarkdown(m.pending.String()))
+			if m.pending.Len() > 0 {
+				b.WriteString(m.renderMarkdown(m.pending.String()))
+			} else {
+				b.WriteString(mutedStyle.Render("…"))
+			}
 			b.WriteString("\n")
 		}
 	}
@@ -227,6 +263,40 @@ func (m *Model) refreshTranscript() {
 	m.transcript.Reset()
 	m.transcript.WriteString(b.String())
 	m.viewport.SetContent(m.transcript.String())
+	if m.sel.active {
+		m.applySelectionHighlight()
+	}
+}
+
+func renderToolCall(call mcp.ToolCall) string {
+	args := strings.TrimSpace(string(call.Function.Arguments))
+	if args == "" {
+		args = "{}"
+	}
+	args = truncatePlain(strings.ReplaceAll(args, "\n", " "), 200)
+	return mutedStyle.Render("› "+call.Function.Name+" ") + bodyStyle.Render(args)
+}
+
+func renderToolResult(name, content string) string {
+	const maxLines = 12
+	const maxWidth = 200
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	truncated := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+	var b strings.Builder
+	b.WriteString(mutedStyle.Render("← " + name))
+	b.WriteString("\n")
+	for _, line := range lines {
+		b.WriteString(mutedStyle.Render("  " + truncatePlain(line, maxWidth)))
+		b.WriteString("\n")
+	}
+	if truncated {
+		b.WriteString(mutedStyle.Render("  …"))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *Model) renderMarkdown(s string) string {
@@ -274,7 +344,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mdRenderer = nil
 		m.refreshTranscript()
 
+	case tea.MouseClickMsg:
+		if m.state == stateChat && msg.Button == tea.MouseLeft {
+			line := m.contentLineAt(msg.Y)
+			if line >= 0 {
+				m.toast = ""
+				m.sel = selection{active: true, anchor: line, cursor: line}
+				m.applySelectionHighlight()
+			}
+		}
+		return m, nil
+
+	case tea.MouseMotionMsg:
+		if m.state == stateChat && m.sel.active && msg.Button == tea.MouseLeft {
+			headerH := lipgloss.Height(m.headerView())
+			topY := headerH
+			botY := headerH + m.viewport.Height() - 1
+			if msg.Y <= topY && m.viewport.YOffset() > 0 {
+				m.viewport.ScrollUp(1)
+			} else if msg.Y >= botY {
+				m.viewport.ScrollDown(1)
+			}
+			line := m.contentLineAt(msg.Y)
+			switch line {
+			case -1:
+				m.sel.cursor = m.viewport.YOffset()
+			case -2:
+				m.sel.cursor = m.viewport.YOffset() + m.viewport.Height() - 1
+			default:
+				m.sel.cursor = line
+			}
+			m.applySelectionHighlight()
+		}
+		return m, nil
+
+	case tea.MouseReleaseMsg:
+		if m.state == stateChat && m.sel.active {
+			m.copySelection()
+			m.sel.active = false
+			m.viewport.SetHighlights(nil)
+		}
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if m.state == stateChat {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.KeyPressMsg:
+		// Any key clears an active selection
+		if m.sel.active {
+			m.sel.active = false
+			m.viewport.SetHighlights(nil)
+		}
 		if k := msg.String(); k == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -283,6 +408,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSettings(msg)
 		case stateModelPicker:
 			return m.updatePicker(msg)
+		case stateHelp:
+			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
+				m.state = stateChat
+				m.input.Focus()
+			}
+			return m, nil
 		case stateChat:
 			newM, cmd := m.updateChatKey(msg)
 			if nm, ok := newM.(Model); ok {
@@ -325,14 +456,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatChunkMsg:
+		wasAtBottom := m.viewport.AtBottom()
 		m.pending.WriteString(msg.content)
 		m.refreshTranscript()
-		m.viewport.GotoBottom()
+		if wasAtBottom {
+			m.viewport.GotoBottom()
+		}
 		if m.stream != nil {
 			cmds = append(cmds, m.waitForStream())
 		}
 
+	case chatToolCallsMsg:
+		wasAtBottom := m.viewport.AtBottom()
+		// Discard any preamble text the model emitted before the tool call.
+		// Storing it in history causes models like granite to repeat it in
+		// the post-tool response. Standard tool-calling format expects empty
+		// content on tool-calling assistant messages anyway.
+		m.pending.Reset()
+		m.history = append(m.history, api.Message{
+			Role:      "assistant",
+			Content:   "",
+			ToolCalls: msg.calls,
+		})
+		m.runToolCalls(msg.calls)
+		cmd := m.startStream()
+		m.refreshTranscript()
+		if wasAtBottom {
+			m.viewport.GotoBottom()
+		}
+		cmds = append(cmds, cmd)
+
 	case chatDoneMsg:
+		wasAtBottom := m.viewport.AtBottom()
 		if m.pending.Len() > 0 {
 			m.history = append(m.history, api.Message{
 				Role:    "assistant",
@@ -343,7 +498,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.stream = nil
 		m.refreshTranscript()
-		m.viewport.GotoBottom()
+		if wasAtBottom {
+			m.viewport.GotoBottom()
+		}
 
 	case chatErrMsg:
 		m.lastError = fmt.Sprintf("error: %v", msg.err)
@@ -442,6 +599,7 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		val := strings.TrimSpace(m.input.Value())
+		m.toast = ""
 		switch val {
 		case "/quit", "/exit":
 			return m, tea.Quit
@@ -462,6 +620,23 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			m.viewport.GotoTop()
 			return m, nil
+		case "/help", "/?":
+			m.input.Reset()
+			m.state = stateHelp
+			return m, nil
+		case "/copy":
+			m.input.Reset()
+			text := lastAssistantMessage(m.history)
+			if text == "" {
+				m.toast = "nothing to copy"
+				return m, nil
+			}
+			if err := clipboard.WriteAll(text); err != nil {
+				m.toast = fmt.Sprintf("clipboard error: %v", err)
+				return m, nil
+			}
+			m.toast = fmt.Sprintf("copied %d chars to clipboard", len(text))
+			return m, nil
 		}
 		if m.modelName == "" {
 			m.input.Reset()
@@ -481,6 +656,7 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
+	// We capture mouse so we can implement drag-selection that scrolls.
 	v.MouseMode = tea.MouseModeCellMotion
 	if !m.ready {
 		v.SetContent("\n  Initializing...")
@@ -492,6 +668,8 @@ func (m Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.settingsModal()))
 	case stateModelPicker:
 		v.SetContent(m.overlayModal(base, m.pickerModal()))
+	case stateHelp:
+		v.SetContent(m.overlayModal(base, m.helpModal()))
 	default:
 		v.SetContent(base)
 	}
@@ -632,6 +810,58 @@ func (m Model) pickerModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+func (m Model) helpModal() string {
+	w := m.modalWidth()
+	innerW := w - 4
+	rows := []struct{ key, desc string }{
+		{"", "Slash commands"},
+		{"/help", "show this screen"},
+		{"/settings", "change Ollama URL"},
+		{"/model", "pick a model"},
+		{"/clear", "reset the conversation"},
+		{"/copy", "copy last response to system clipboard"},
+		{"/quit", "exit"},
+		{"", ""},
+		{"", "Keys"},
+		{"enter", "send message"},
+		{"shift+enter", "newline in input"},
+		{"shift+↑/↓", "scroll one line"},
+		{"ctrl+↑/↓", "scroll one line (alt)"},
+		{"pgup/pgdn", "page up/down"},
+		{"ctrl+u/d", "half page up/down"},
+		{"ctrl+c", "quit"},
+		{"", ""},
+		{"", "Mouse"},
+		{"click+drag", "select lines (auto-scrolls at edges)"},
+		{"release", "selection is copied to clipboard"},
+		{"wheel", "scroll viewport"},
+	}
+
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Help", "esc", innerW))
+	b.WriteString("\n\n")
+	keyW := 14
+	for _, r := range rows {
+		if r.key == "" && r.desc == "" {
+			b.WriteString("\n")
+			continue
+		}
+		if r.key == "" {
+			b.WriteString(modalAccentStyle.Render(r.desc))
+			b.WriteString("\n")
+			continue
+		}
+		k := padCell(r.key, keyW)
+		b.WriteString(modalMutedStyle.Render(k))
+		b.WriteString(modalBodyStyle.Render(truncatePlain(r.desc, innerW-keyW)))
+		b.WriteString("\n")
+	}
+	hint := modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close")
+	b.WriteString("\n")
+	b.WriteString(hint)
+	return modalStyle.Width(w).Render(b.String())
+}
+
 type windowRange struct{ start, end int }
 
 func pickerWindow(total, cursor, size int) windowRange {
@@ -683,11 +913,15 @@ func (m *Model) layout() {
 			PageUp:       key.NewBinding(key.WithKeys("pgup")),
 			HalfPageDown: key.NewBinding(key.WithKeys("ctrl+d")),
 			HalfPageUp:   key.NewBinding(key.WithKeys("ctrl+u")),
-			Up:           empty,
-			Down:         empty,
+			Up:           key.NewBinding(key.WithKeys("shift+up", "ctrl+up")),
+			Down:         key.NewBinding(key.WithKeys("shift+down", "ctrl+down")),
 			Left:         empty,
 			Right:        empty,
 		}
+		m.viewport.HighlightStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("232")).
+			Background(lipgloss.Color("215"))
+		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 	} else {
 		m.viewport.SetWidth(m.width)
 		m.viewport.SetHeight(vpH)
@@ -723,17 +957,10 @@ func (m *Model) submit() tea.Cmd {
 	m.input.SetHeight(minInputLines)
 	m.layout()
 
-	respCh, errCh := m.host.ContinousChat(api.ChatRequest{
-		Model:    m.modelName,
-		Messages: append([]api.Message(nil), m.history...),
-	})
-	m.stream = &streamState{resp: respCh, errs: errCh}
-	m.streaming = true
-	m.pending.Reset()
+	cmd := m.startStream()
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
-
-	return m.waitForStream()
+	return cmd
 }
 
 func (m Model) waitForStream() tea.Cmd {
@@ -746,6 +973,12 @@ func (m Model) waitForStream() tea.Cmd {
 		case chunk, ok := <-s.resp:
 			if !ok {
 				return chatDoneMsg{}
+			}
+			if len(chunk.Message.ToolCalls) > 0 {
+				return chatToolCallsMsg{
+					content: chunk.Message.Content,
+					calls:   chunk.Message.ToolCalls,
+				}
 			}
 			if chunk.Done {
 				if chunk.Message.Content != "" {
@@ -760,6 +993,57 @@ func (m Model) waitForStream() tea.Cmd {
 			}
 			return chatErrMsg{err: err}
 		}
+	}
+}
+
+func (m *Model) startStream() tea.Cmd {
+	msgs := make([]api.Message, 0, len(m.history)+1)
+	msgs = append(msgs, api.Message{Role: "system", Content: systemPrompt})
+	msgs = append(msgs, m.history...)
+	respCh, errCh := m.host.ContinousChat(api.ChatRequest{
+		Model:    m.modelName,
+		Messages: msgs,
+		Tools:    m.tools.Definitions(),
+	})
+	m.stream = &streamState{resp: respCh, errs: errCh}
+	m.streaming = true
+	m.pending.Reset()
+	return m.waitForStream()
+}
+
+const systemPrompt = `You are a coding assistant in a Linux terminal. You have tools that read and modify the user's real filesystem and run shell commands.
+
+When to use tools:
+- The user asks about files, directories, code, or system state -> call tools to find out. Never invent file contents or descriptions from filenames alone.
+- "Summarize this codebase" / "what's in X" -> list_directory, then read_file on the real source files before describing them. Chain multiple tools in one turn when needed.
+- Prefer dedicated tools when one fits. Use run_shell for anything not covered.
+
+Available tools:
+- read_file (supports start_line/end_line for big files), write_file, append_file, edit_file (exact-string replace; preferred for incremental edits), delete_file (set recursive for dirs), move_file, copy_file, touch, make_directory.
+- list_directory, find_files (glob by basename, walks with max_depth, skips .git/node_modules), file_info (stat), get_working_directory.
+- grep (regex search), run_shell (bash -c for awk/sed/find/pipelines).
+- For editing existing files prefer edit_file over write_file — write_file overwrites the whole file.
+
+When NOT to use tools:
+- Meta questions about you, your capabilities, or what tools you have -> answer directly from this prompt. Do NOT call list_directory just to "look around".
+- Greetings, identity questions, or anything that doesn't depend on the user's filesystem.
+
+Output rules:
+- Do NOT write conversational text before a tool call. If you're going to call a tool, emit only the tool call. Save your prose for after you have the tool's result.
+- After tools return, produce ONE concise final answer based on what you actually saw. Never restate your own previous text.
+- Be terse. No preamble, no "How may I assist you further?" or similar closers. The user is in a terminal and reads quickly.`
+
+func (m *Model) runToolCalls(calls []mcp.ToolCall) {
+	for _, call := range calls {
+		result, err := m.tools.Invoke(context.Background(), call)
+		if err != nil {
+			result = fmt.Sprintf("error: %v", err)
+		}
+		m.history = append(m.history, api.Message{
+			Role:     "tool",
+			ToolName: call.Function.Name,
+			Content:  result,
+		})
 	}
 }
 
@@ -779,13 +1063,96 @@ func (m Model) footerView() string {
 		status = "streaming…"
 	}
 	info := infoStyle.Render(status)
-	hint := hintStyle.Render(" ? for shortcuts · enter send · shift+enter newline · /settings · /model · /clear · ctrl+c quit ")
+	hintText := " /help · enter send · shift+enter newline · shift+↑/↓ scroll · ctrl+c quit "
+	if m.toast != "" {
+		hintText = " " + m.toast + " "
+	}
+	hint := hintStyle.Render(hintText)
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(info) + lipgloss.Width(hint)
 	}
 	pad := max(0, width-lipgloss.Width(info)-lipgloss.Width(hint))
 	return lipgloss.JoinHorizontal(lipgloss.Center, hint, strings.Repeat(" ", pad), info)
+}
+
+func (m Model) contentLineAt(screenY int) int {
+	headerH := lipgloss.Height(m.headerView())
+	viewportY := screenY - headerH
+	if viewportY < 0 {
+		return -1
+	}
+	if viewportY >= m.viewport.Height() {
+		return -2
+	}
+	return m.viewport.YOffset() + viewportY
+}
+
+func (m *Model) selectionRange() (int, int, []string, bool) {
+	if !m.sel.active {
+		return 0, 0, nil, false
+	}
+	content := m.transcript.String()
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return 0, 0, nil, false
+	}
+	s, e := m.sel.anchor, m.sel.cursor
+	if s > e {
+		s, e = e, s
+	}
+	if s < 0 {
+		s = 0
+	}
+	if e >= len(lines) {
+		e = len(lines) - 1
+	}
+	return s, e, lines, true
+}
+
+func (m *Model) applySelectionHighlight() {
+	s, e, lines, ok := m.selectionRange()
+	if !ok {
+		m.viewport.SetHighlights(nil)
+		return
+	}
+	startByte := 0
+	for i := 0; i < s; i++ {
+		startByte += len(lines[i]) + 1
+	}
+	endByte := startByte
+	for i := s; i <= e; i++ {
+		endByte += len(lines[i])
+		if i < e {
+			endByte++
+		}
+	}
+	m.viewport.SetHighlights([][]int{{startByte, endByte}})
+}
+
+func (m *Model) copySelection() {
+	s, e, lines, ok := m.selectionRange()
+	if !ok {
+		return
+	}
+	plain := ansi.Strip(strings.Join(lines[s:e+1], "\n"))
+	if strings.TrimSpace(plain) == "" {
+		return
+	}
+	if err := clipboard.WriteAll(plain); err != nil {
+		m.toast = fmt.Sprintf("clipboard error: %v", err)
+		return
+	}
+	m.toast = fmt.Sprintf("copied %d chars", len(plain))
+}
+
+func lastAssistantMessage(history []api.Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
+			return history[i].Content
+		}
+	}
+	return ""
 }
 
 func (m Model) inputView() string {

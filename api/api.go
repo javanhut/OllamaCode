@@ -6,17 +6,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/javanhut/ollama_code/mcp"
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	ToolCalls []mcp.ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"` // Set to true for streaming
+	Model    string     `json:"model"`
+	Messages []Message  `json:"messages"`
+	Stream   bool       `json:"stream"` // Set to true for streaming
+	Tools    []mcp.Tool `json:"tools,omitempty"`
 }
 
 type ChatResponse struct {
