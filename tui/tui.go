@@ -172,6 +172,7 @@ var readOnlyToolNames = map[string]bool{
 	"git_status":            true,
 	"git_diff":              true,
 	"git_log":               true,
+	"hash_file":             true,
 }
 
 var planExtraToolNames = map[string]bool{}
