@@ -376,18 +376,36 @@ func ListEnvTool() Tool {
 	}
 }
 
+// Defaults for recursive read_file on directories.
+const (
+	readDirMaxTotalBytes = 2 * 1024 * 1024 // 2 MiB total cap
+	readDirMaxFileBytes  = 256 * 1024      // 256 KiB per file
+)
+
+// Directories skipped during recursive read_file. These are noisy build/VCS
+// artifacts that almost never carry useful source context.
+var readDirSkipDirs = map[string]bool{
+	".git": true, ".svn": true, ".hg": true, ".bzr": true,
+	"node_modules": true, "vendor": true, "target": true,
+	"dist": true, "build": true, "out": true, "bin": true, "obj": true,
+	"__pycache__": true, ".venv": true, "venv": true,
+	".idea": true, ".vscode": true,
+	".next": true, ".nuxt": true,
+	"coverage": true, ".cache": true, ".terraform": true,
+}
+
 func ReadFileTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
 			Name:        "read_file",
-			Description: "Read a file from disk. Optionally limit to a line range (1-indexed, inclusive). Returned text is prefixed with line numbers when a range is requested or the file has more than one line.",
+			Description: "Read a file from disk. If the path is a directory, read every text file under it recursively (skipping VCS, build, and vendor dirs) and concatenate the results with per-file headers. Use this tool — not list_directory — whenever you actually want file contents. Optional start_line/end_line apply only to single-file reads.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"path":       {Type: "string", Description: "Absolute or relative path to the file."},
-					"start_line": {Type: "number", Description: "First line to read (1-indexed). Optional."},
-					"end_line":   {Type: "number", Description: "Last line to read (1-indexed, inclusive). Optional."},
+					"path":       {Type: "string", Description: "Absolute or relative path. May be a file or a directory; directories are read recursively."},
+					"start_line": {Type: "number", Description: "First line to read (1-indexed). Single-file reads only."},
+					"end_line":   {Type: "number", Description: "Last line to read (1-indexed, inclusive). Single-file reads only."},
 				},
 				Required: []string{"path"},
 			},
@@ -403,6 +421,16 @@ func ReadFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			info, err := os.Stat(a.Path)
+			if err != nil {
+				return "", err
+			}
+			if info.IsDir() {
+				if a.StartLine != 0 || a.EndLine != 0 {
+					return "", fmt.Errorf("start_line/end_line are not supported when path is a directory")
+				}
+				return readDirRecursive(a.Path)
 			}
 			data, err := os.ReadFile(a.Path)
 			if err != nil {
@@ -430,6 +458,118 @@ func ReadFileTool() Tool {
 			return strings.TrimRight(b.String(), "\n"), nil
 		},
 	}
+}
+
+func readDirRecursive(root string) (string, error) {
+	var out strings.Builder
+	var (
+		filesRead    int
+		filesSkipped int
+		bytesRead    int
+		truncated    bool
+	)
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != root && readDirSkipDirs[name] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			filesSkipped++
+			return nil
+		}
+		if bytesRead >= readDirMaxTotalBytes {
+			truncated = true
+			return filepath.SkipAll
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			filesSkipped++
+			fmt.Fprintf(&out, "===== %s =====\n[error opening: %v]\n\n", rel, openErr)
+			return nil
+		}
+
+		remaining := readDirMaxTotalBytes - bytesRead
+		limit := readDirMaxFileBytes
+		if remaining < limit {
+			limit = remaining
+		}
+		buf := make([]byte, limit+1)
+		n, readErr := io.ReadFull(f, buf)
+		f.Close()
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			filesSkipped++
+			fmt.Fprintf(&out, "===== %s =====\n[error reading: %v]\n\n", rel, readErr)
+			return nil
+		}
+		chunk := buf[:n]
+
+		if isBinaryContent(chunk) {
+			filesSkipped++
+			fmt.Fprintf(&out, "===== %s =====\n[binary file, skipped]\n\n", rel)
+			return nil
+		}
+
+		fileTruncated := n > limit
+		if fileTruncated {
+			chunk = chunk[:limit]
+		}
+
+		fmt.Fprintf(&out, "===== %s =====\n", rel)
+		out.Write(chunk)
+		if len(chunk) == 0 || chunk[len(chunk)-1] != '\n' {
+			out.WriteByte('\n')
+		}
+		if fileTruncated {
+			fmt.Fprintf(&out, "[truncated after %d bytes]\n", limit)
+		}
+		out.WriteByte('\n')
+
+		filesRead++
+		bytesRead += len(chunk)
+		if bytesRead >= readDirMaxTotalBytes {
+			truncated = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil && err != filepath.SkipAll {
+		return "", err
+	}
+
+	var summary strings.Builder
+	fmt.Fprintf(&summary, "Recursive read of %s — %d files read, %d skipped, %d bytes",
+		root, filesRead, filesSkipped, bytesRead)
+	if truncated {
+		summary.WriteString(" (stopped at total byte cap)")
+	}
+	summary.WriteString("\n\n")
+	return summary.String() + out.String(), nil
+}
+
+func isBinaryContent(b []byte) bool {
+	n := len(b)
+	if n > 512 {
+		n = 512
+	}
+	for i := 0; i < n; i++ {
+		if b[i] == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func WriteFileTool() Tool {
@@ -475,7 +615,7 @@ func ListDirectoryTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "list_directory",
-			Description: "List the entries of a directory. Returns one entry per line, suffixing directories with '/'.",
+			Description: "List the immediate entries of a directory (non-recursive). One entry per line; directories are suffixed with '/'. Use ONLY when the user explicitly asks to list/inspect directory structure. If you actually want file contents, call read_file on the directory — it recurses automatically.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
