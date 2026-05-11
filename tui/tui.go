@@ -451,7 +451,7 @@ func (m *Model) refreshTranscript() {
 			if m.streamBuf.Len() > 0 {
 				b.WriteString(m.renderMarkdown(m.streamBuf.String()))
 			} else {
-				b.WriteString(mutedStyle.Render("…"))
+				b.WriteString(m.spinner.View() + mutedStyle.Render(" Thinking..."))
 			}
 			b.WriteString("\n")
 		}
