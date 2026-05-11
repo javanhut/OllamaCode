@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,7 +79,7 @@ var (
 
 const (
 	minInputLines = 1
-	maxInputLines = 8
+	maxInputLines = 20
 	appVersion    = "dev"
 )
 
@@ -136,6 +137,18 @@ func (m Mode) next() Mode {
 	}
 }
 
+func (m Mode) color() color.Color {
+	switch m {
+	case ExploreMode:
+		return lipgloss.Color("39") // Blue
+	case PlanMode:
+		return lipgloss.Color("220") // Yellow
+	case WriteMode:
+		return lipgloss.Color("196") // Red
+	}
+	return lipgloss.Color("39")
+}
+
 var readOnlyToolNames = map[string]bool{
 	"read_file":              true,
 	"list_directory":         true,
@@ -164,8 +177,17 @@ var destructiveToolNames = map[string]bool{
 }
 
 type config struct {
-	Host  string `json:"host"`
-	Model string `json:"model,omitempty"`
+	Host     string   `json:"host"`
+	Model    string   `json:"model,omitempty"`
+	Activity []string `json:"activity,omitempty"`
+}
+
+func (m *Model) logActivity(s string) {
+	m.cfg.Activity = append([]string{s}, m.cfg.Activity...)
+	if len(m.cfg.Activity) > 5 {
+		m.cfg.Activity = m.cfg.Activity[:5]
+	}
+	saveConfig(m.cfg)
 }
 
 type chatChunkMsg struct{ content string }
@@ -174,6 +196,11 @@ type chatErrMsg struct{ err error }
 type chatToolCallsMsg struct {
 	content string
 	calls   []mcp.ToolCall
+}
+
+type toolResultMsg struct {
+	index  int
+	result api.Message
 }
 
 type modelsLoadedMsg struct {
@@ -195,13 +222,30 @@ type selection struct {
 type pendingBatch struct {
 	calls    []mcp.ToolCall
 	results  []api.Message
+	started  []bool
+	done     int
 	index    int
 	allowAll bool
 }
 
+const notesFile = ".ollama_notes.md"
+
 type sessionNotes struct {
 	mu   sync.Mutex
 	text string
+}
+
+func (n *sessionNotes) load() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	data, err := os.ReadFile(notesFile)
+	if err == nil {
+		n.text = string(data)
+	}
+}
+
+func (n *sessionNotes) save() {
+	_ = os.WriteFile(notesFile, []byte(n.text), 0o644)
 }
 
 func (n *sessionNotes) get() string {
@@ -214,6 +258,7 @@ func (n *sessionNotes) set(s string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.text = s
+	n.save()
 }
 
 func (n *sessionNotes) appendLine(s string) {
@@ -223,6 +268,7 @@ func (n *sessionNotes) appendLine(s string) {
 		n.text += "\n"
 	}
 	n.text += s
+	n.save()
 }
 
 type Model struct {
@@ -254,12 +300,13 @@ type Model struct {
 	mdRenderer *glamour.TermRenderer
 	mdWidth    int
 
-	width  int
-	height int
-	ready  bool
+	showNotes bool
+	width     int
+	height    int
+	ready     bool
 }
 
-func New() Model {
+func New() *Model {
 	cfg := loadConfig()
 	if cfg.Host == "" {
 		if env := os.Getenv("OLLAMA_HOST"); env != "" {
@@ -290,7 +337,7 @@ func New() Model {
 	ta.SetHeight(minInputLines)
 	styles := ta.Styles()
 	styles.Focused.Base = lipgloss.NewStyle().Background(lipgloss.Color("238"))
-	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor).Background(lipgloss.Color("238"))
 	styles.Focused.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -308,12 +355,13 @@ func New() Model {
 	ta.KeyMap = km
 
 	notes := &sessionNotes{}
+	notes.load()
 	registry := mcp.DefaultRegistry()
 	registry.Register(readNotesTool(notes))
 	registry.Register(updateNotesTool(notes))
 	registry.Register(appendNotesTool(notes))
 
-	m := Model{
+	m := &Model{
 		cfg:        cfg,
 		host:       host,
 		tools:      registry,
@@ -349,7 +397,7 @@ func (m *Model) refreshTranscript() {
 				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
 					continue
 				}
-				b.WriteString(assistantStyle.Render(m.activeModelName()))
+				b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 				b.WriteString("\n")
 				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) != "" {
 					b.WriteString(m.renderMarkdown(msg.Content))
@@ -363,7 +411,7 @@ func (m *Model) refreshTranscript() {
 			}
 		}
 		if m.streaming {
-			b.WriteString(assistantStyle.Render(m.activeModelName()))
+			b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 			b.WriteString("\n")
 			if m.streamBuf.Len() > 0 {
 				b.WriteString(m.renderMarkdown(m.streamBuf.String()))
@@ -444,11 +492,11 @@ func (m *Model) renderMarkdown(s string) string {
 	return strings.TrimRight(out, "\n")
 }
 
-func (m Model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return nil
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -523,8 +571,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Tab cycles mode regardless of which state we're in (chat/help/notes).
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+			oldMode := m.mode
 			m.mode = m.mode.next()
+
+			// Update textarea prompt color
+			st := m.input.Styles()
+			st.Focused.Prompt = st.Focused.Prompt.Foreground(m.mode.color())
+			m.input.SetStyles(st)
+
 			m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
+
+			if oldMode == PlanMode && m.mode == WriteMode {
+				notes := m.notes.get()
+				if notes != "" {
+					m.history = append(m.history, api.Message{
+						Role:    "system",
+						Content: "Plan Summary from Session Notes:\n\n" + notes,
+					})
+					m.refreshTranscript()
+					m.viewport.GotoBottom()
+				}
+			}
+			m.layout()
 			return m, nil
 		}
 		switch m.state {
@@ -547,15 +615,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePermission:
 			return m.updatePermission(msg)
 		case stateChat:
-			newM, cmd := m.updateChatKey(msg)
-			if nm, ok := newM.(Model); ok {
-				m = nm
-			}
-			if cmd != nil {
-				return m, cmd
-			}
-			if m.state != stateChat {
-				return m, nil
+			if msg.String() == "enter" {
+				return m.updateChatKey(msg)
 			}
 		}
 
@@ -608,14 +669,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content:   "",
 			ToolCalls: msg.calls,
 		})
-		m.pending = &pendingBatch{calls: msg.calls}
-		cmd := m.processNextTool()
+		m.pending = &pendingBatch{
+			calls:   msg.calls,
+			results: make([]api.Message, len(msg.calls)),
+			started: make([]bool, len(msg.calls)),
+		}
+		cmd := m.processPendingTools()
 		m.refreshTranscript()
 		if wasAtBottom {
 			m.viewport.GotoBottom()
 		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+
+	case toolResultMsg:
+		wasAtBottom := m.viewport.AtBottom()
+		if m.pending != nil {
+			m.pending.results[msg.index] = msg.result
+			m.pending.done++
+			cmd := m.processPendingTools()
+			m.refreshTranscript()
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 
 	case chatDoneMsg:
@@ -664,7 +744,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.state = stateChat
@@ -687,7 +767,7 @@ func (m Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
 		if m.picker > 0 {
@@ -724,38 +804,34 @@ func (m Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pending == nil {
 		m.state = stateChat
 		return m, nil
 	}
 	switch msg.String() {
 	case "y", "enter":
-		call := m.pending.calls[m.pending.index]
-		m.pending.results = append(m.pending.results, m.invokeTool(call))
-		m.pending.index++
+		i := m.pending.index
+		call := m.pending.calls[i]
+		m.pending.started[i] = true
 		m.state = stateChat
-		cmd := m.processNextTool()
-		m.refreshTranscript()
-		m.viewport.GotoBottom()
-		return m, cmd
+		return m, m.invokeToolCmd(i, call)
 	case "a":
 		m.pending.allowAll = true
 		m.state = stateChat
-		cmd := m.processNextTool()
-		m.refreshTranscript()
-		m.viewport.GotoBottom()
-		return m, cmd
+		return m, m.processPendingTools()
 	case "n", "esc":
-		call := m.pending.calls[m.pending.index]
-		m.pending.results = append(m.pending.results, api.Message{
+		i := m.pending.index
+		call := m.pending.calls[i]
+		m.pending.results[i] = api.Message{
 			Role:     "tool",
 			ToolName: call.Function.Name,
 			Content:  "denied by user",
-		})
-		m.pending.index++
+		}
+		m.pending.started[i] = true
+		m.pending.done++
 		m.state = stateChat
-		cmd := m.processNextTool()
+		cmd := m.processPendingTools()
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
 		return m, cmd
@@ -763,7 +839,7 @@ func (m Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.streaming {
@@ -797,7 +873,8 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "/notes":
 			m.input.Reset()
-			m.state = stateNotes
+			m.showNotes = !m.showNotes
+			m.layout()
 			return m, nil
 		case "/copy":
 			m.input.Reset()
@@ -828,7 +905,7 @@ func (m Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() tea.View {
+func (m *Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
 	// We capture mouse so we can implement drag-selection that scrolls.
@@ -855,7 +932,7 @@ func (m Model) View() tea.View {
 	return v
 }
 
-func (m Model) overlayModal(base, modal string) string {
+func (m *Model) overlayModal(base, modal string) string {
 	if m.width <= 0 || m.height <= 0 {
 		return modal
 	}
@@ -893,7 +970,7 @@ func overlay(bg, fg string, col, row int) string {
 	return strings.Join(bgLines, "\n")
 }
 
-func (m Model) modalWidth() int {
+func (m *Model) modalWidth() int {
 	if m.width <= 0 {
 		return 60
 	}
@@ -910,14 +987,14 @@ func (m Model) modalWidth() int {
 	return w
 }
 
-func (m Model) modalHeader(title, hint string, innerW int) string {
+func (m *Model) modalHeader(title, hint string, innerW int) string {
 	t := modalTitleStyle.Render(title)
 	h := modalHintStyle.Render(hint)
 	pad := max(1, innerW-lipgloss.Width(t)-lipgloss.Width(h))
 	return t + modalBodyStyle.Render(strings.Repeat(" ", pad)) + h
 }
 
-func (m Model) settingsModal() string {
+func (m *Model) settingsModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	m.urlInput.SetWidth(innerW - 6)
@@ -942,7 +1019,7 @@ func (m Model) settingsModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
-func (m Model) pickerModal() string {
+func (m *Model) pickerModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	var b strings.Builder
@@ -989,7 +1066,7 @@ func (m Model) pickerModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
-func (m Model) helpModal() string {
+func (m *Model) helpModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	rows := []struct{ key, desc string }{
@@ -1053,7 +1130,7 @@ func (m Model) helpModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
-func (m Model) notesModal() string {
+func (m *Model) notesModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	var b strings.Builder
@@ -1075,7 +1152,7 @@ func (m Model) notesModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
-func (m Model) permissionModal() string {
+func (m *Model) permissionModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	var b strings.Builder
@@ -1147,14 +1224,50 @@ func pickerWindow(total, cursor, size int) windowRange {
 	return windowRange{start, end}
 }
 
-func (m Model) viewChat() string {
+func (m *Model) viewChat() string {
+	main := m.viewport.View()
+	if m.showNotes {
+		main = lipgloss.JoinHorizontal(lipgloss.Top, main, "  ", m.notesView())
+	}
 	return fmt.Sprintf(
 		"%s\n%s\n%s\n%s",
 		m.headerView(),
-		m.viewport.View(),
+		main,
 		m.inputView(),
 		m.footerView(),
 	)
+}
+
+func (m *Model) notesView() string {
+	w := 30
+	if m.width < 60 {
+		w = m.width / 2
+	}
+	innerW := w - 2
+	c := m.mode.color()
+
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c).
+		Padding(0, 1).
+		Width(w).
+		Height(m.viewport.Height())
+
+	notes := m.notes.get()
+	var content string
+	if notes == "" {
+		content = mutedStyle.Render("(empty)")
+	} else {
+		lines := strings.Split(notes, "\n")
+		var truncated []string
+		for _, line := range lines {
+			truncated = append(truncated, truncatePlain(line, innerW))
+		}
+		content = strings.Join(truncated, "\n")
+	}
+
+	title := headingStyle.Copy().Foreground(c).Render("Notes")
+	return style.Render(title + "\n\n" + content)
 }
 
 func (m *Model) layout() {
@@ -1169,9 +1282,22 @@ func (m *Model) layout() {
 	if vpH < 1 {
 		vpH = 1
 	}
+
+	vpW := m.width
+	if m.showNotes {
+		notesW := 30
+		if m.width < 60 {
+			notesW = m.width / 2
+		}
+		vpW -= (notesW + 2)
+	}
+	if vpW < 10 {
+		vpW = 10
+	}
+
 	if !m.ready {
 		m.viewport = viewport.New(
-			viewport.WithWidth(m.width),
+			viewport.WithWidth(vpW),
 			viewport.WithHeight(vpH),
 		)
 		empty := key.NewBinding(key.WithKeys())
@@ -1190,13 +1316,13 @@ func (m *Model) layout() {
 			Background(lipgloss.Color("215"))
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 	} else {
-		m.viewport.SetWidth(m.width)
+		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
 	}
 	m.input.SetWidth(m.width)
 }
 
-func (m Model) fetchModels() tea.Cmd {
+func (m *Model) fetchModels() tea.Cmd {
 	host := m.host
 	return func() tea.Msg {
 		list, err := host.GetModelList()
@@ -1218,6 +1344,7 @@ func (m *Model) submit() tea.Cmd {
 	}
 
 	m.history = append(m.history, api.Message{Role: "user", Content: value})
+	m.logActivity("Message: " + value)
 	m.lastError = ""
 
 	m.input.Reset()
@@ -1230,7 +1357,7 @@ func (m *Model) submit() tea.Cmd {
 	return cmd
 }
 
-func (m Model) waitForStream() tea.Cmd {
+func (m *Model) waitForStream() tea.Cmd {
 	s := m.stream
 	if s == nil {
 		return nil
@@ -1322,22 +1449,28 @@ Output rules:
 - Be terse. No preamble or closing pleasantries. The user reads in a terminal.`
 
 
-func (m Model) headerView() string {
-	title := titleStyle.Render(fmt.Sprintf("ollama · %s · %s · [%s]", m.activeModelName(), m.cfg.Host, m.mode))
+func (m *Model) headerView() string {
+	c := m.mode.color()
+	title := titleStyle.Copy().
+		BorderForeground(c).
+		Render(fmt.Sprintf("ollama · %s · %s · [%s]", m.activeModelName(), m.cfg.Host, m.mode))
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(title)
 	}
-	line := strings.Repeat("─", max(0, width-lipgloss.Width(title)))
+	line := borderStyle.Copy().Foreground(c).Render(strings.Repeat("─", max(0, width-lipgloss.Width(title))))
 	return lipgloss.JoinHorizontal(lipgloss.Center, title, line)
 }
 
-func (m Model) footerView() string {
+func (m *Model) footerView() string {
+	c := m.mode.color()
 	status := "ready"
 	if m.streaming {
 		status = "streaming…"
+	} else if m.pending != nil {
+		status = fmt.Sprintf("running tools (%d/%d)…", m.pending.done, len(m.pending.calls))
 	}
-	info := infoStyle.Render(status)
+	info := infoStyle.Copy().BorderForeground(c).Render(status)
 	hintText := fmt.Sprintf(" mode: %s · tab to switch · /help · enter send · ctrl+c quit ", m.mode)
 	if m.toast != "" {
 		hintText = " " + m.toast + " "
@@ -1351,7 +1484,7 @@ func (m Model) footerView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Center, hint, strings.Repeat(" ", pad), info)
 }
 
-func (m Model) contentLineAt(screenY int) int {
+func (m *Model) contentLineAt(screenY int) int {
 	headerH := lipgloss.Height(m.headerView())
 	viewportY := screenY - headerH
 	if viewportY < 0 {
@@ -1500,7 +1633,7 @@ func appendNotesTool(notes *sessionNotes) mcp.Tool {
 	}
 }
 
-func (m Model) toolsForMode() []mcp.Tool {
+func (m *Model) toolsForMode() []mcp.Tool {
 	all := m.tools.Definitions()
 	out := make([]mcp.Tool, 0, len(all))
 	for _, t := range all {
@@ -1511,7 +1644,7 @@ func (m Model) toolsForMode() []mcp.Tool {
 	return out
 }
 
-func (m Model) toolAllowedInMode(name string) bool {
+func (m *Model) toolAllowedInMode(name string) bool {
 	switch m.mode {
 	case ExploreMode:
 		return readOnlyToolNames[name]
@@ -1524,9 +1657,10 @@ func (m Model) toolAllowedInMode(name string) bool {
 }
 
 func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
+	m.logActivity("Tool: " + call.Function.Name)
 	result, err := m.tools.Invoke(context.Background(), call)
 	if err != nil {
-		result = fmt.Sprintf("error: %v", err)
+		result = fmt.Sprintf("error: %v. Please check the arguments and try again.", err)
 	}
 	return api.Message{
 		Role:     "tool",
@@ -1535,35 +1669,59 @@ func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
 	}
 }
 
-func (m *Model) processNextTool() tea.Cmd {
-	for m.pending != nil && m.pending.index < len(m.pending.calls) {
-		call := m.pending.calls[m.pending.index]
-		if !m.toolAllowedInMode(call.Function.Name) {
-			m.pending.results = append(m.pending.results, api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press tab to switch modes)", call.Function.Name, m.mode),
-			})
-			m.pending.index++
-			continue
-		}
-		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
-			m.state = statePermission
-			m.refreshTranscript()
-			return nil
-		}
-		m.pending.results = append(m.pending.results, m.invokeTool(call))
-		m.pending.index++
+func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
+	return func() tea.Msg {
+		return toolResultMsg{index: index, result: m.invokeTool(call)}
 	}
+}
+
+func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending == nil {
 		return nil
 	}
-	m.history = append(m.history, m.pending.results...)
-	m.pending = nil
-	cmd := m.startStream()
-	m.refreshTranscript()
-	m.viewport.GotoBottom()
-	return cmd
+
+	if m.pending.done >= len(m.pending.calls) {
+		m.history = append(m.history, m.pending.results...)
+		m.pending = nil
+		cmd := m.startStream()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return cmd
+	}
+
+	var cmds []tea.Cmd
+	for i, call := range m.pending.calls {
+		if m.pending.started[i] {
+			continue
+		}
+
+		if !m.toolAllowedInMode(call.Function.Name) {
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press tab to switch modes)", call.Function.Name, m.mode),
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+			continue
+		}
+
+		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
+			m.pending.index = i
+			m.state = statePermission
+			m.refreshTranscript()
+			break
+		}
+
+		m.pending.started[i] = true
+		cmds = append(cmds, m.invokeToolCmd(i, call))
+	}
+
+	if len(cmds) > 0 {
+		return tea.Batch(cmds...)
+	}
+
+	return nil
 }
 
 func lastAssistantMessage(history []api.Message) string {
@@ -1575,7 +1733,7 @@ func lastAssistantMessage(history []api.Message) string {
 	return ""
 }
 
-func (m Model) inputView() string {
+func (m *Model) inputView() string {
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(m.input.View())
@@ -1590,7 +1748,7 @@ func (m Model) inputView() string {
 	return line + "\n" + input
 }
 
-func (m Model) welcomePanel() string {
+func (m *Model) welcomePanel() string {
 	width := 100
 	if m.width > 0 {
 		width = clamp(m.width-4, 40, 100)
@@ -1628,7 +1786,7 @@ func (m Model) welcomePanel() string {
 	return b.String()
 }
 
-func (m Model) welcomeInfoRows(width int) []string {
+func (m *Model) welcomeInfoRows(width int) []string {
 	host := strings.TrimPrefix(strings.TrimPrefix(m.cfg.Host, "http://"), "https://")
 	modelLine := "Ask Ollama to explain code, draft tests, or plan a patch"
 	if m.modelName == "" {
@@ -1643,7 +1801,14 @@ func (m Model) welcomeInfoRows(width int) []string {
 		bodyStyle.Render(truncatePlain(modelLine, width)),
 		"",
 		headingStyle.Render("Recent activity"),
-		mutedStyle.Render("No recent activity"),
+	}
+
+	if len(m.cfg.Activity) == 0 {
+		rows = append(rows, mutedStyle.Render("No recent activity"))
+	} else {
+		for _, a := range m.cfg.Activity {
+			rows = append(rows, bodyStyle.Render(truncatePlain(a, width)))
+		}
 	}
 	return rows
 }
@@ -1759,7 +1924,7 @@ const ollamaLlamaASCII = `
    @@@@@@@@                                                                              @@@@@@@@@
 `
 
-func (m Model) activeModelName() string {
+func (m *Model) activeModelName() string {
 	if strings.TrimSpace(m.modelName) == "" {
 		return "no model selected"
 	}
