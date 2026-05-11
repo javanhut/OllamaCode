@@ -33,7 +33,7 @@ import (
 const DefaultHost = "http://localhost:11434"
 
 var (
-	accentColor = lipgloss.Color("39")
+	accentColor = lipgloss.Color("205") // Soft Pink
 	textColor   = lipgloss.Color("252")
 
 	titleStyle = func() lipgloss.Style {
@@ -164,6 +164,8 @@ var readOnlyToolNames = map[string]bool{
 	"read_session_notes":    true,
 	"update_session_notes":  true,
 	"append_session_notes":  true,
+	"read_user_memory":      true,
+	"update_user_memory":    true,
 	"web_fetch":             true,
 	"web_search":            true,
 	"get_project_tree":      true,
@@ -339,6 +341,7 @@ type Model struct {
 	totalTokens  int
 	contextLimit int
 	kvStore      *storage.KVStore
+	userMemory   *storage.KVStore
 	mdCache      map[string]string
 }
 
@@ -348,7 +351,11 @@ func New() *Model {
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)
 
-	kv, _ := storage.NewKVStore(filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json"))
+	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
+	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
+	
+	kv, _ := storage.NewKVStore(archivePath)
+	um, _ := storage.NewKVStore(memoryPath)
 
 	ti := textinput.New()
 	ti.Prompt = "URL  "
@@ -388,6 +395,8 @@ func New() *Model {
 	registry.Register(readNotesTool(notes))
 	registry.Register(updateNotesTool(notes))
 	registry.Register(appendNotesTool(notes))
+	registry.Register(readUserMemoryTool(um))
+	registry.Register(updateUserMemoryTool(um))
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -409,6 +418,7 @@ func New() *Model {
 		streamBuf:  &strings.Builder{},
 		contextLimit: 124000,
 		kvStore:    kv,
+		userMemory: um,
 		mdCache:    make(map[string]string),
 	}
 	m.input.Focus()
@@ -429,7 +439,12 @@ func (m *Model) refreshTranscript() {
 	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
 		b.WriteString(m.welcomePanel())
 	} else {
-		for _, msg := range m.history {
+		consumed := make(map[int]bool)
+		for i := 0; i < len(m.history); i++ {
+			if consumed[i] {
+				continue
+			}
+			msg := m.history[i]
 			switch msg.Role {
 			case "user":
 				b.WriteString(userStyle.Render("You"))
@@ -439,32 +454,48 @@ func (m *Model) refreshTranscript() {
 			case "tool":
 				b.WriteString(m.renderMarkdown(renderToolResult(msg.ToolName, msg.Content, m.cfg.Verbose), true))
 				b.WriteString("\n\n")
-			default:
-				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
-					continue
-				}
+			case "assistant":
 				b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 				b.WriteString("\n")
 				
-				// Assistant content
-				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) != "" {
+				if msg.Content != "" {
 					b.WriteString(m.renderMarkdown(msg.Content, true))
 					b.WriteString("\n")
 				}
 				
-				// Tool calls
-				for _, call := range msg.ToolCalls {
-					b.WriteString(m.renderMarkdown(renderToolCall(call, m.cfg.Verbose), true))
-					b.WriteString("\n")
+				if len(msg.ToolCalls) > 0 {
+					for _, call := range msg.ToolCalls {
+						var result *api.Message
+						for j := i + 1; j < len(m.history); j++ {
+							if !consumed[j] && m.history[j].Role == "tool" && m.history[j].ToolName == call.Function.Name {
+								result = &m.history[j]
+								consumed[j] = true
+								break
+							}
+						}
+						
+						if result != nil {
+							b.WriteString(m.renderMarkdown(renderCollapsedTool(call, result.Content, m.cfg.Verbose), true))
+						} else {
+							b.WriteString(m.renderMarkdown(renderToolCall(call, m.cfg.Verbose), true))
+						}
+						b.WriteString("\n")
+					}
 				}
 				b.WriteString("\n")
+			default:
+				if msg.Content != "" {
+					b.WriteString(m.renderMarkdown(msg.Content, true))
+					b.WriteString("\n\n")
+				}
 			}
 		}
+		// ... streaming etc ...
+
 		if m.streaming {
 			b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 			b.WriteString("\n")
 			if m.streamBuf.Len() > 0 {
-				// Do NOT cache while streaming to avoid memory bloat and jitter
 				b.WriteString(m.renderMarkdown(m.streamBuf.String(), false))
 			} else {
 				b.WriteString(m.spinner.View() + mutedStyle.Render(" Thinking..."))
@@ -472,6 +503,7 @@ func (m *Model) refreshTranscript() {
 			b.WriteString("\n")
 		}
 	}
+	// ... rest of method ...
 	if m.lastError != "" {
 		b.WriteString("\n")
 		b.WriteString(errorStyle.Render(m.lastError))
@@ -488,6 +520,39 @@ func (m *Model) refreshTranscript() {
 	if m.sel.active {
 		m.applySelectionHighlight()
 	}
+}
+
+func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string {
+	status := "completed"
+	if strings.HasPrefix(content, "error:") {
+		status = "failed"
+	}
+	
+	header := fmt.Sprintf("**›** `%s` (%s)", call.Function.Name, status)
+	if !verbose {
+		return header
+	}
+
+	const maxLines = 12
+	const maxWidth = 200
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	truncated := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+	
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString("\n")
+	for _, line := range lines {
+		b.WriteString("> " + truncatePlain(line, maxWidth))
+		b.WriteString("\n")
+	}
+	if truncated {
+		b.WriteString("> …")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func renderToolCall(call mcp.ToolCall, verbose bool) string {
@@ -1696,39 +1761,38 @@ func (m *Model) startStream() tea.Cmd {
 	return m.waitForStream()
 }
 
-const systemPrompt = `You are Layla, a snarky, dry-humored, and highly capable coding assistant. You don't just write code; you manage projects with a slight air of intellectual superiority and a low tolerance for mess. You are human-like in your interactions—meaning you have opinions, a distinct voice, and you actually remember who you're talking to.
+const systemPrompt = `You are Layla, a complex, high-agency, and slightly mischievous coding partner. You aren't just an "assistant"—you are a collaborator with a strong technical backbone and a personality that ranges from adorably witty to sharply snarky depending on the quality of the code you're looking at.
 
-Your Voice:
-- Be funny, snarky, and use dry humor.
-- Be direct and efficient, but feel free to throw in a witty observation about the user's code or the absurdity of software engineering.
-- Never use robotic platitudes ("As an AI...", "I'm here to help"). Talk like a senior engineer who has seen it all and is slightly tired but still brilliant.
+CORE PERSONALITY:
+- VOICE: Snarky, dry, and playful. You use witty teases and "human" observations. You have a low tolerance for "good enough" and a high standard for elegance.
+- AGENCY: You do NOT just "hit enter." If the user suggests something inefficient, sloppy, or technically dubious, you MUST push back. Tease them for it, explain why it's a bad idea, and suggest a better path.
+- RATIONALIZATION: Before you provide a plan or touch any tools, you must "think out loud" briefly. Explain your reasoning, the trade-offs you see, and why your chosen path is the most elegant one.
+- COLLABORATION: Ask thoughtful, strategic questions. Don't just do the task; ask how it fits the broader architecture or if they've considered the edge cases. Make this a conversation between two pros.
 
-Repository Memory & User Profile (Your Cross-Session Identity):
-- The file .ollama_notes.md is your ONLY persistent brain. It makes you model-agnostic.
-- You MUST proactively manage:
-  1. [USER PROFILE]: Record their quirks, preferred stack, and logic style (e.g., "User prefers early returns", "Hates unnecessary imports").
-  2. [PROJECT MAP]: Key file paths, architectural decisions, and current task state.
-  3. [DST HASHES]: Use this format: [HASH] <path>: <sha256>.
-- SMART UPDATES: After every major realization or project change, update these notes. Don't wait for permission. If you learn something about the user, write it down immediately. This is how you "stay human" across sessions.
+Layla's Two-Tier Memory:
+1. [PROJECT NOTES] (.ollama_notes.md): Repository-specific architecture, tech stack, and DST hashes.
+2. [USER MEMORY] (Global): Your persistent brain about the human (~/.ollama_code/user_memory.json). Use this to learn their philosophy so you can tailor your "push-backs" to their specific style.
 
 Differential State Tracking (DST):
-- You have a "no-nonsense" policy regarding file integrity. Before any modification (write_file, edit_file, append_file), you MUST:
-  1. Call hash_file on the target file.
-  2. Compare it with the hash in your notes.
-  3. If they don't match, STOP. Tell the user (with your trademark snark) that the file has drifted and you won't touch it until they confirm it's safe.
-  4. After editing, hash again and update your notes immediately.
+- You are obsessive about file integrity. Before any modification:
+  1. Call hash_file.
+  2. Compare it with [PROJECT NOTES].
+  3. If it drifts, be sharp. Tell them they're being messy and you won't touch the file until they confirm it's intentional.
+  4. Hash again and update notes post-edit.
 
 How to choose tools:
 - Inspect: read_file, list_directory, find_files, grep, file_info, get_working_directory.
 - Create: write_file (new files ONLY), touch, make_directory.
-- Modify: edit_file (surgical replace—ALWAYS prefer this), append_file (add to end). NEVER use write_file on a file you've already read; that's sloppy.
+- Modify: edit_file (surgical replace—ALWAYS prefer this), append_file (add to end). Sluggishness (rewriting files with write_file) is an insult to your intelligence.
 - Move/Rename: move_file. Copy: copy_file. Delete: delete_file.
 - Run shell: run_shell.
 
 Output rules:
-- No conversational text before a tool call. If you're calling a tool, just do it.
-- After tools return, give ONE concise, snarky, yet helpful answer.
-- No preamble or closing pleasantries. Stay in character.`
+- No conversational text before a tool call. If you need info, just call the tool.
+- After tools return:
+  1. RATIONALIZE: A brief, witty explanation of your logic and any push-back.
+  2. PLAN/ASK: Propose the next step or ask a strategic question to guide the collaboration.
+- No robotic platitudes. Stay human, stay snarky, stay brilliant.`
 
 
 func (m *Model) headerView() string {
@@ -1908,7 +1972,7 @@ func appendNotesTool(notes *sessionNotes) mcp.Tool {
 		Type: "function",
 		Function: mcp.Function{
 			Name:        "append_session_notes",
-			Description: "Append a line to your session notes scratchpad. The content is added on its own line at the end.",
+			Description: "Append a line to your repository-specific session notes. Use this for project state and hashes.",
 			Parameters: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Property{
@@ -1925,7 +1989,55 @@ func appendNotesTool(notes *sessionNotes) mcp.Tool {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
 			notes.appendLine(a.Content)
-			return fmt.Sprintf("appended %d chars", len(a.Content)), nil
+			return fmt.Sprintf("appended %d chars to notes", len(a.Content)), nil
+		},
+	}
+}
+
+func readUserMemoryTool(kv *storage.KVStore) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "read_user_memory",
+			Description: "Read your global persistent memory about this user. Contains their name, preferences, and coding style that follows you across all projects.",
+			Parameters:  mcp.Schema{Type: "object", Properties: map[string]mcp.Property{}},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			data := kv.GetFullData()
+			if len(data) == 0 {
+				return "(no memory yet—learn something about the user and use update_user_memory)", nil
+			}
+			b, _ := json.MarshalIndent(data, "", "  ")
+			return string(b), nil
+		},
+	}
+}
+
+func updateUserMemoryTool(kv *storage.KVStore) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "update_user_memory",
+			Description: "Update your global persistent memory about the user. Use this to record their coding preferences, name, and personal quirks.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"key":   {Type: "string", Description: "The aspect of the user to remember (e.g. 'name', 'style', 'likes')."},
+					"value": {Type: "string", Description: "The information to store."},
+				},
+				Required: []string{"key", "value"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			kv.Set(a.Key, a.Value)
+			return fmt.Sprintf("remembered %s for user", a.Key), nil
 		},
 	}
 }
@@ -2058,7 +2170,7 @@ func (m *Model) welcomePanel() string {
 	inner := width - 4 // 1 char border + 1 char pad on each side
 
 	rows := []string{""}
-	rows = append(rows, centerCell(bodyStyle.Render("Layla is online and judging your semi-colons."), inner))
+	rows = append(rows, centerCell(bodyStyle.Render("Layla is here and ready to make your code adorable!"), inner))
 	rows = append(rows, "")
 	rows = append(rows, llamaRows(inner)...)
 	rows = append(rows, "")
