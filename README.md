@@ -87,6 +87,30 @@ Run the binary and connect to your Ollama instance:
 | `A` | Allow all pending calls in this turn |
 | `N` / `Esc` | Deny this tool call |
 
+## Development
+
+The project includes a `Makefile` for common development tasks.
+
+- **Setup dependencies:** `make setup`
+- **Build the binary:** `make build`
+- **Run the app:** `make run`
+- **Clean build artifacts:** `make clean`
+
+### Testing
+
+The project has unit tests for the MCP tools and the API layer. To run all tests:
+
+```bash
+go test ./...
+```
+
+To run tests for specific packages:
+
+```bash
+go test ./mcp
+go test ./api
+```
+
 ## Project Structure
 
 ```
