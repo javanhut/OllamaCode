@@ -209,8 +209,9 @@ type modelsLoadedMsg struct {
 type connectErrMsg struct{ err error }
 
 type streamState struct {
-	resp <-chan api.ChatResponse
-	errs <-chan error
+	resp   <-chan api.ChatResponse
+	errs   <-chan error
+	cancel context.CancelFunc
 }
 
 type selection struct {
@@ -300,6 +301,9 @@ type Model struct {
 	mdRenderer *glamour.TermRenderer
 	mdWidth    int
 
+	notesViewport viewport.Model
+	queue         []string
+
 	showNotes bool
 	width     int
 	height    int
@@ -336,12 +340,12 @@ func New() *Model {
 	ta.CharLimit = 0
 	ta.SetHeight(minInputLines)
 	styles := ta.Styles()
-	styles.Focused.Base = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	styles.Focused.Base = lipgloss.NewStyle().Background(lipgloss.Color("238")).Padding(0, 2)
 	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor).Background(lipgloss.Color("238"))
 	styles.Focused.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("238"))
-	styles.Blurred.Base = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+	styles.Blurred.Base = lipgloss.NewStyle().Background(lipgloss.Color("238")).Padding(0, 2)
 	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	styles.Blurred.Text = lipgloss.NewStyle().Foreground(textColor).Background(lipgloss.Color("238"))
@@ -557,6 +561,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			cmds = append(cmds, cmd)
+
+			if m.showNotes {
+				m.notesViewport, cmd = m.notesViewport.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 		}
 		return m, tea.Batch(cmds...)
 
@@ -568,6 +577,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if k := msg.String(); k == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil {
+			m.stream.cancel()
+			m.toast = "stopped"
+			return m, nil
 		}
 		// Tab cycles mode regardless of which state we're in (chat/help/notes).
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
@@ -688,6 +702,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pending != nil {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
+
+			// Update notes viewport in case the tool modified them
+			notesText := m.notes.get()
+			if notesText == "" {
+				notesText = "(empty)"
+			}
+			m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
+
 			cmd := m.processPendingTools()
 			m.refreshTranscript()
 			if wasAtBottom {
@@ -714,12 +736,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		}
 
+		if len(m.queue) > 0 {
+			next := m.queue[0]
+			m.queue = m.queue[1:]
+			m.history = append(m.history, api.Message{Role: "user", Content: next})
+			m.logActivity("Message (dequeued): " + next)
+			cmds = append(cmds, m.startStream())
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+		}
+
 	case chatErrMsg:
 		m.lastError = fmt.Sprintf("error: %v", msg.err)
 		m.streaming = false
 		m.stream = nil
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
+
+		if len(m.queue) > 0 {
+			next := m.queue[0]
+			m.queue = m.queue[1:]
+			m.history = append(m.history, api.Message{Role: "user", Content: next})
+			m.logActivity("Message (dequeued): " + next)
+			cmds = append(cmds, m.startStream())
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+		}
 	}
 
 	switch m.state {
@@ -739,6 +781,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
+
+		if m.showNotes {
+			m.notesViewport, cmd = m.notesViewport.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -842,10 +889,22 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		if m.streaming {
+		val := strings.TrimSpace(m.input.Value())
+		if val == "" {
 			return m, nil
 		}
-		val := strings.TrimSpace(m.input.Value())
+
+		if m.streaming {
+			if strings.HasPrefix(val, "/") {
+				m.toast = "cannot use slash commands while streaming"
+				return m, nil
+			}
+			m.queue = append(m.queue, val)
+			m.input.Reset()
+			m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
+			return m, nil
+		}
+
 		m.toast = ""
 		switch val {
 		case "/quit", "/exit":
@@ -1238,13 +1297,34 @@ func (m *Model) viewChat() string {
 	)
 }
 
+func (m *Model) renderNotesMarkdown(s string, width int) string {
+	if strings.TrimSpace(s) == "" {
+		return s
+	}
+	wrap := width - 2
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return s
+	}
+	out, err := r.Render(s)
+	if err != nil {
+		return s
+	}
+	return strings.TrimRight(out, "\n")
+}
+
 func (m *Model) notesView() string {
+	if !m.showNotes {
+		return ""
+	}
+	c := m.mode.color()
 	w := 30
 	if m.width < 60 {
 		w = m.width / 2
 	}
-	innerW := w - 2
-	c := m.mode.color()
 
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1253,21 +1333,8 @@ func (m *Model) notesView() string {
 		Width(w).
 		Height(m.viewport.Height())
 
-	notes := m.notes.get()
-	var content string
-	if notes == "" {
-		content = mutedStyle.Render("(empty)")
-	} else {
-		lines := strings.Split(notes, "\n")
-		var truncated []string
-		for _, line := range lines {
-			truncated = append(truncated, truncatePlain(line, innerW))
-		}
-		content = strings.Join(truncated, "\n")
-	}
-
 	title := headingStyle.Copy().Foreground(c).Render("Notes")
-	return style.Render(title + "\n\n" + content)
+	return style.Render(title + "\n\n" + m.notesViewport.View())
 }
 
 func (m *Model) layout() {
@@ -1284,8 +1351,8 @@ func (m *Model) layout() {
 	}
 
 	vpW := m.width
+	notesW := 30
 	if m.showNotes {
-		notesW := 30
 		if m.width < 60 {
 			notesW = m.width / 2
 		}
@@ -1293,6 +1360,11 @@ func (m *Model) layout() {
 	}
 	if vpW < 10 {
 		vpW = 10
+	}
+
+	notesVH := vpH - 4 // subtract title and padding
+	if notesVH < 1 {
+		notesVH = 1
 	}
 
 	if !m.ready {
@@ -1315,11 +1387,25 @@ func (m *Model) layout() {
 			Foreground(lipgloss.Color("232")).
 			Background(lipgloss.Color("215"))
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
+
+		m.notesViewport = viewport.New(
+			viewport.WithWidth(notesW - 4), // account for border and padding
+			viewport.WithHeight(notesVH),
+		)
 	} else {
 		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
+		m.notesViewport.SetWidth(notesW - 4)
+		m.notesViewport.SetHeight(notesVH)
 	}
-	m.input.SetWidth(m.width)
+
+	notesText := m.notes.get()
+	if notesText == "" {
+		notesText = "(empty)"
+	}
+	m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
+
+	m.input.SetWidth(m.width - 4)
 }
 
 func (m *Model) fetchModels() tea.Cmd {
@@ -1407,12 +1493,13 @@ func (m *Model) startStream() tea.Cmd {
 	msgs := make([]api.Message, 0, len(m.history)+1)
 	msgs = append(msgs, api.Message{Role: "system", Content: sp})
 	msgs = append(msgs, m.history...)
-	respCh, errCh := m.host.ContinousChat(api.ChatRequest{
+	ctx, cancel := context.WithCancel(context.Background())
+	respCh, errCh := m.host.ContinuousChat(ctx, api.ChatRequest{
 		Model:    m.modelName,
 		Messages: msgs,
 		Tools:    m.toolsForMode(),
 	})
-	m.stream = &streamState{resp: respCh, errs: errCh}
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel}
 	m.streaming = true
 	m.streamBuf.Reset()
 	return m.waitForStream()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -163,7 +164,7 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 	return &genResp, nil
 }
 
-func (o OllamaHost) ContinousChat(req ChatRequest) (<-chan ChatResponse, <-chan error) {
+func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
 	req.Stream = true
 
 	respChan := make(chan ChatResponse)
@@ -180,10 +181,23 @@ func (o OllamaHost) ContinousChat(req ChatRequest) (<-chan ChatResponse, <-chan 
 			return
 		}
 
-		resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
 		if err != nil {
-			errChan <- fmt.Errorf("http POST request failed: %v", err)
+			errChan <- fmt.Errorf("failed to create http request: %v", err)
 			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				errChan <- fmt.Errorf("http request failed: %v", err)
+				return
+			}
 		}
 		defer resp.Body.Close()
 
@@ -195,20 +209,25 @@ func (o OllamaHost) ContinousChat(req ChatRequest) (<-chan ChatResponse, <-chan 
 		decoder := json.NewDecoder(resp.Body)
 
 		for {
-			var chunk ChatResponse
-			err := decoder.Decode(&chunk)
-			if err != nil {
-				if err == io.EOF {
-					break
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				var chunk ChatResponse
+				err := decoder.Decode(&chunk)
+				if err != nil {
+					if err == io.EOF {
+						return
+					}
+					errChan <- fmt.Errorf("error decoding stream chunk: %v", err)
+					return
 				}
-				errChan <- fmt.Errorf("error decoding stream chunk: %v", err)
-				break
-			}
 
-			respChan <- chunk
+				respChan <- chunk
 
-			if chunk.Done {
-				break
+				if chunk.Done {
+					return
+				}
 			}
 		}
 	}()
