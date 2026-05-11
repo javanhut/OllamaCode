@@ -338,6 +338,7 @@ type Model struct {
 	totalTokens  int
 	contextLimit int
 	kvStore      *storage.KVStore
+	mdCache      map[string]string
 }
 
 func New() *Model {
@@ -407,6 +408,7 @@ func New() *Model {
 		streamBuf:  &strings.Builder{},
 		contextLimit: 124000,
 		kvStore:    kv,
+		mdCache:    make(map[string]string),
 	}
 	m.input.Focus()
 	return m
@@ -434,7 +436,7 @@ func (m *Model) refreshTranscript() {
 				b.WriteString(msg.Content)
 				b.WriteString("\n\n")
 			case "tool":
-				b.WriteString(renderToolResult(msg.ToolName, msg.Content, m.cfg.Verbose))
+				b.WriteString(m.renderMarkdown(renderToolResult(msg.ToolName, msg.Content, m.cfg.Verbose), true))
 				b.WriteString("\n\n")
 			default:
 				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
@@ -442,12 +444,16 @@ func (m *Model) refreshTranscript() {
 				}
 				b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 				b.WriteString("\n")
+				
+				// Assistant content
 				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) != "" {
-					b.WriteString(m.renderMarkdown(msg.Content))
+					b.WriteString(m.renderMarkdown(msg.Content, true))
 					b.WriteString("\n")
 				}
+				
+				// Tool calls
 				for _, call := range msg.ToolCalls {
-					b.WriteString(renderToolCall(call, m.cfg.Verbose))
+					b.WriteString(m.renderMarkdown(renderToolCall(call, m.cfg.Verbose), true))
 					b.WriteString("\n")
 				}
 				b.WriteString("\n")
@@ -457,7 +463,8 @@ func (m *Model) refreshTranscript() {
 			b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 			b.WriteString("\n")
 			if m.streamBuf.Len() > 0 {
-				b.WriteString(m.renderMarkdown(m.streamBuf.String()))
+				// Do NOT cache while streaming to avoid memory bloat and jitter
+				b.WriteString(m.renderMarkdown(m.streamBuf.String(), false))
 			} else {
 				b.WriteString(m.spinner.View() + mutedStyle.Render(" Thinking..."))
 			}
@@ -469,34 +476,43 @@ func (m *Model) refreshTranscript() {
 		b.WriteString(errorStyle.Render(m.lastError))
 		b.WriteString("\n")
 	}
-	m.transcript.Reset()
-	m.transcript.WriteString(b.String())
-	m.viewport.SetContent(m.transcript.String())
+
+	content := b.String()
+	if content != m.transcript.String() {
+		m.transcript.Reset()
+		m.transcript.WriteString(content)
+		m.viewport.SetContent(content)
+	}
+	
 	if m.sel.active {
 		m.applySelectionHighlight()
 	}
 }
 
 func renderToolCall(call mcp.ToolCall, verbose bool) string {
+	name := fmt.Sprintf("**›** `%s`", call.Function.Name)
 	if !verbose {
-		return mutedStyle.Render("› " + call.Function.Name)
+		return name
 	}
 	args := strings.TrimSpace(string(call.Function.Arguments))
 	if args == "" {
 		args = "{}"
 	}
 	args = truncatePlain(strings.ReplaceAll(args, "\n", " "), 200)
-	return mutedStyle.Render("› "+call.Function.Name+" ") + bodyStyle.Render(args)
+	return name + " " + args
 }
 
 func renderToolResult(name, content string, verbose bool) string {
-	if !verbose {
-		status := "completed"
-		if strings.HasPrefix(content, "error:") {
-			status = "failed"
-		}
-		return mutedStyle.Render(fmt.Sprintf("← %s (%s)", name, status))
+	status := "completed"
+	if strings.HasPrefix(content, "error:") {
+		status = "failed"
 	}
+	
+	header := fmt.Sprintf("**←** `%s` (%s)", name, status)
+	if !verbose {
+		return header
+	}
+
 	const maxLines = 12
 	const maxWidth = 200
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
@@ -505,23 +521,31 @@ func renderToolResult(name, content string, verbose bool) string {
 		lines = lines[:maxLines]
 		truncated = true
 	}
+	
 	var b strings.Builder
-	b.WriteString(mutedStyle.Render("← " + name))
+	b.WriteString(header)
 	b.WriteString("\n")
 	for _, line := range lines {
-		b.WriteString(mutedStyle.Render("  " + truncatePlain(line, maxWidth)))
+		b.WriteString("> " + truncatePlain(line, maxWidth))
 		b.WriteString("\n")
 	}
 	if truncated {
-		b.WriteString(mutedStyle.Render("  …"))
+		b.WriteString("> …")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *Model) renderMarkdown(s string) string {
+func (m *Model) renderMarkdown(s string, useCache bool) string {
 	if strings.TrimSpace(s) == "" {
 		return s
 	}
+
+	if useCache {
+		if cached, ok := m.mdCache[s]; ok {
+			return cached
+		}
+	}
+
 	width := m.viewport.Width()
 	if width <= 4 {
 		width = 80
@@ -537,12 +561,18 @@ func (m *Model) renderMarkdown(s string) string {
 		}
 		m.mdRenderer = r
 		m.mdWidth = wrap
+		// Invalidate cache if width changes
+		m.mdCache = make(map[string]string)
 	}
 	out, err := m.mdRenderer.Render(s)
 	if err != nil {
 		return s
 	}
-	return strings.TrimRight(out, "\n")
+	res := strings.TrimRight(out, "\n")
+	if useCache {
+		m.mdCache[s] = res
+	}
+	return res
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -566,6 +596,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ready = true
 		}
 		m.mdRenderer = nil
+		m.mdCache = make(map[string]string)
 		m.refreshTranscript()
 
 	case tea.MouseClickMsg:
@@ -1408,14 +1439,19 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 		return s
 	}
 	wrap := width - 2
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
-		glamour.WithWordWrap(wrap),
-	)
-	if err != nil {
-		return s
+	if m.mdRenderer == nil || m.mdWidth != wrap {
+		r, err := glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(wrap),
+		)
+		if err != nil {
+			return s
+		}
+		m.mdRenderer = r
+		m.mdWidth = wrap
+		m.mdCache = make(map[string]string)
 	}
-	out, err := r.Render(s)
+	out, err := m.mdRenderer.Render(s)
 	if err != nil {
 		return s
 	}
