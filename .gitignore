@@ -1,0 +1,18 @@
+# Binaries
+ollama_code
+ollama-code
+
+# Session Data
+.ollama_notes.md
+
+# Go
+go.sum
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

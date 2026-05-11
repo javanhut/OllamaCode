@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +114,12 @@ func DefaultRegistry() *Registry {
 	r.Register(GetWorkingDirectoryTool())
 	r.Register(GrepTool())
 	r.Register(RunShellTool())
+	r.Register(WebFetchTool())
+	r.Register(WebSearchTool())
+	r.Register(GetProjectTreeTool())
+	r.Register(FindSymbolTool())
+	r.Register(AskUserTool())
+	r.Register(ApplyDiffTool())
 	return r
 }
 
@@ -825,6 +833,252 @@ func GetWorkingDirectoryTool() Tool {
 				return "", err
 			}
 			return cwd, nil
+		},
+	}
+}
+
+func WebFetchTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "web_fetch",
+			Description: "Fetch the content of a web page as plain text. Useful for reading documentation or raw code from URLs.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"url": {Type: "string", Description: "The URL to fetch."},
+				},
+				Required: []string{"url"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			resp, err := http.Get(a.URL)
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 20000))
+			if err != nil {
+				return "", err
+			}
+			return string(body), nil
+		},
+	}
+}
+
+func GetProjectTreeTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "get_project_tree",
+			Description: "Return an ASCII tree representation of the current project directory.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path": {Type: "string", Description: "Root directory to map. Defaults to '.'."},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Path string `json:"path"`
+			}
+			json.Unmarshal(args, &a)
+			root := a.Path
+			if root == "" {
+				root = "."
+			}
+			var b strings.Builder
+			err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				name := d.Name()
+				if d.IsDir() && (name == ".git" || name == "node_modules" || name == "vendor" || name == "build") {
+					return filepath.SkipDir
+				}
+				rel, _ := filepath.Rel(root, path)
+				if rel == "." {
+					return nil
+				}
+				depth := strings.Count(rel, string(os.PathSeparator))
+				b.WriteString(strings.Repeat("  ", depth))
+				b.WriteString("├── ")
+				b.WriteString(name)
+				b.WriteString("\n")
+				return nil
+			})
+			if err != nil {
+				return "", err
+			}
+			return b.String(), nil
+		},
+	}
+}
+
+func AskUserTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "ask_user",
+			Description: "Pause execution and ask the user a clarifying question.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"question": {Type: "string", Description: "The question to ask the user."},
+				},
+				Required: []string{"question"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Question string `json:"question"`
+			}
+			json.Unmarshal(args, &a)
+			return "I have paused execution to ask the user: \"" + a.Question + "\". Please wait for their response.", nil
+		},
+	}
+}
+
+func ApplyDiffTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "apply_diff",
+			Description: "Apply a surgical change to a file by searching for a specific block of text and replacing it with another.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path":    {Type: "string", Description: "Path to the file."},
+					"search":  {Type: "string", Description: "The exact block of text to search for."},
+					"replace": {Type: "string", Description: "The text to replace it with."},
+				},
+				Required: []string{"path", "search", "replace"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Path    string `json:"path"`
+				Search  string `json:"search"`
+				Replace string `json:"replace"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			data, err := os.ReadFile(a.Path)
+			if err != nil {
+				return "", err
+			}
+			content := string(data)
+			if !strings.Contains(content, a.Search) {
+				return "", fmt.Errorf("search block not found in file")
+			}
+			if strings.Count(content, a.Search) > 1 {
+				return "", fmt.Errorf("search block is ambiguous (multiple occurrences)")
+			}
+			newContent := strings.Replace(content, a.Search, a.Replace, 1)
+			if err := os.WriteFile(a.Path, []byte(newContent), 0o644); err != nil {
+				return "", err
+			}
+			return "successfully applied diff to " + a.Path, nil
+		},
+	}
+}
+
+func WebSearchTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "web_search",
+			Description: "Search the web for a query. Returns a list of result snippets and URLs.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"query": {Type: "string", Description: "The search query."},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			// Using DuckDuckGo HTML version for simple scraping
+			url := "https://html.duckduckgo.com/html/?q=" + strings.ReplaceAll(a.Query, " ", "+")
+			resp, err := http.Get(url)
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 30000))
+			content := string(body)
+
+			// Simple heuristic to extract results from DDG HTML
+			var results []string
+			lines := strings.Split(content, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, "result__snippet") || strings.Contains(line, "result__url") {
+					// Strip HTML tags roughly
+					clean := strings.Map(func(r rune) rune {
+						if r == '<' || r == '>' {
+							return -1
+						}
+						return r
+					}, line)
+					results = append(results, strings.TrimSpace(clean))
+				}
+				if len(results) > 15 {
+					break
+				}
+			}
+			if len(results) == 0 {
+				return "no results found", nil
+			}
+			return strings.Join(results, "\n"), nil
+		},
+	}
+}
+
+func FindSymbolTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "find_symbol",
+			Description: "Search for a symbol definition (function, class, etc.) across the project using regex patterns.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"symbol": {Type: "string", Description: "The name of the symbol to find."},
+				},
+				Required: []string{"symbol"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Symbol string `json:"symbol"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			// Common regex for "func Symbol", "class Symbol", "Symbol =" etc.
+			pattern := fmt.Sprintf(`(func|class|type|var|const|def|interface)\s+%s`, a.Symbol)
+			argv := []string{"-rnE", "--exclude-dir={.git,node_modules,build}", pattern, "."}
+			cmd := exec.CommandContext(ctx, "grep", argv...)
+			out, _ := cmd.CombinedOutput()
+			text := strings.TrimSpace(string(out))
+			if text == "" {
+				return "symbol not found", nil
+			}
+			return text, nil
 		},
 	}
 }

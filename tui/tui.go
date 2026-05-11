@@ -150,13 +150,18 @@ func (m Mode) color() color.Color {
 }
 
 var readOnlyToolNames = map[string]bool{
-	"read_file":              true,
-	"list_directory":         true,
-	"find_files":             true,
-	"grep":                   true,
-	"file_info":              true,
-	"get_working_directory":  true,
-	"read_session_notes":     true,
+	"read_file":             true,
+	"list_directory":        true,
+	"find_files":            true,
+	"grep":                  true,
+	"file_info":             true,
+	"get_working_directory": true,
+	"read_session_notes":    true,
+	"web_fetch":             true,
+	"web_search":            true,
+	"get_project_tree":      true,
+	"find_symbol":           true,
+	"ask_user":              true,
 }
 
 var planExtraToolNames = map[string]bool{
@@ -174,6 +179,7 @@ var destructiveToolNames = map[string]bool{
 	"make_directory": true,
 	"touch":          true,
 	"run_shell":      true,
+	"apply_diff":     true,
 }
 
 type config struct {
