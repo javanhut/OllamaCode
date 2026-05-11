@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"image/color"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
@@ -191,6 +193,7 @@ type config struct {
 	Host     string   `json:"host"`
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
+	Verbose  bool     `json:"verbose,omitempty"`
 }
 
 func (m *Model) logActivity(s string) {
@@ -313,6 +316,8 @@ type Model struct {
 	mdWidth    int
 
 	notesViewport viewport.Model
+	spinner       spinner.Model
+	gitBranch     string
 	queue         []string
 
 	showNotes bool
@@ -376,6 +381,10 @@ func New() *Model {
 	registry.Register(updateNotesTool(notes))
 	registry.Register(appendNotesTool(notes))
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	m := &Model{
 		cfg:        cfg,
 		host:       host,
@@ -386,11 +395,22 @@ func New() *Model {
 		urlInput:   ti,
 		input:      ta,
 		modelName:  cfg.Model,
+		spinner:    s,
+		gitBranch:  getGitBranch(),
 		transcript: &strings.Builder{},
 		streamBuf:  &strings.Builder{},
 	}
 	m.input.Focus()
 	return m
+}
+
+func getGitBranch() string {
+	cmd := exec.Command("git", "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (m *Model) refreshTranscript() {
@@ -406,7 +426,7 @@ func (m *Model) refreshTranscript() {
 				b.WriteString(msg.Content)
 				b.WriteString("\n\n")
 			case "tool":
-				b.WriteString(renderToolResult(msg.ToolName, msg.Content))
+				b.WriteString(renderToolResult(msg.ToolName, msg.Content, m.cfg.Verbose))
 				b.WriteString("\n\n")
 			default:
 				if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
@@ -419,7 +439,7 @@ func (m *Model) refreshTranscript() {
 					b.WriteString("\n")
 				}
 				for _, call := range msg.ToolCalls {
-					b.WriteString(renderToolCall(call))
+					b.WriteString(renderToolCall(call, m.cfg.Verbose))
 					b.WriteString("\n")
 				}
 				b.WriteString("\n")
@@ -449,7 +469,10 @@ func (m *Model) refreshTranscript() {
 	}
 }
 
-func renderToolCall(call mcp.ToolCall) string {
+func renderToolCall(call mcp.ToolCall, verbose bool) string {
+	if !verbose {
+		return mutedStyle.Render("› " + call.Function.Name)
+	}
 	args := strings.TrimSpace(string(call.Function.Arguments))
 	if args == "" {
 		args = "{}"
@@ -458,7 +481,14 @@ func renderToolCall(call mcp.ToolCall) string {
 	return mutedStyle.Render("› "+call.Function.Name+" ") + bodyStyle.Render(args)
 }
 
-func renderToolResult(name, content string) string {
+func renderToolResult(name, content string, verbose bool) string {
+	if !verbose {
+		status := "completed"
+		if strings.HasPrefix(content, "error:") {
+			status = "failed"
+		}
+		return mutedStyle.Render(fmt.Sprintf("← %s (%s)", name, status))
+	}
 	const maxLines = 12
 	const maxWidth = 200
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
@@ -508,13 +538,18 @@ func (m *Model) renderMarkdown(s string) string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return nil
+	return m.spinner.Tick
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1549,9 +1584,13 @@ Output rules:
 
 func (m *Model) headerView() string {
 	c := m.mode.color()
+	branch := ""
+	if m.gitBranch != "" {
+		branch = fmt.Sprintf(" · %s", m.gitBranch)
+	}
 	title := titleStyle.Copy().
 		BorderForeground(c).
-		Render(fmt.Sprintf("ollama · %s · %s · [%s]", m.activeModelName(), m.cfg.Host, m.mode))
+		Render(fmt.Sprintf("ollama · %s · %s%s · [%s]", m.activeModelName(), m.cfg.Host, branch, m.mode))
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(title)
@@ -1564,7 +1603,7 @@ func (m *Model) footerView() string {
 	c := m.mode.color()
 	status := "ready"
 	if m.streaming {
-		status = "streaming…"
+		status = m.spinner.View() + " streaming…"
 	} else if m.pending != nil {
 		status = fmt.Sprintf("running tools (%d/%d)…", m.pending.done, len(m.pending.calls))
 	}
