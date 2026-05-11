@@ -1,10 +1,10 @@
 # Binaries
 ollama_code
 ollama-code
-
+./ollama_code
 # Session Data
 .ollama_notes.md
-
+PLAN.md
 # Go
 go.sum
 

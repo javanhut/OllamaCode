@@ -120,6 +120,11 @@ func DefaultRegistry() *Registry {
 	r.Register(FindSymbolTool())
 	r.Register(AskUserTool())
 	r.Register(ApplyDiffTool())
+	r.Register(GitStatusTool())
+	r.Register(GitDiffTool())
+	r.Register(GitLogTool())
+	r.Register(GitAddTool())
+	r.Register(GitCommitTool())
 	return r
 }
 
@@ -987,6 +992,150 @@ func ApplyDiffTool() Tool {
 				return "", err
 			}
 			return "successfully applied diff to " + a.Path, nil
+		},
+	}
+}
+
+func GitStatusTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "git_status",
+			Description: "Show the current status of the git repository (git status -s).",
+			Parameters:  Schema{Type: "object", Properties: map[string]Property{}},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			cmd := exec.CommandContext(ctx, "git", "status", "-s")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return "", err
+			}
+			return string(out), nil
+		},
+	}
+}
+
+func GitDiffTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "git_diff",
+			Description: "Show the current diff of the git repository.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"staged": {Type: "boolean", Description: "If true, show diff of staged changes."},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Staged bool `json:"staged"`
+			}
+			json.Unmarshal(args, &a)
+			argv := []string{"diff"}
+			if a.Staged {
+				argv = append(argv, "--staged")
+			}
+			cmd := exec.CommandContext(ctx, "git", argv...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return "", err
+			}
+			return string(out), nil
+		},
+	}
+}
+
+func GitLogTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "git_log",
+			Description: "Show the recent git commit log.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"count": {Type: "number", Description: "Number of commits to show. Defaults to 5."},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Count int `json:"count"`
+			}
+			json.Unmarshal(args, &a)
+			if a.Count <= 0 {
+				a.Count = 5
+			}
+			cmd := exec.CommandContext(ctx, "git", "log", "-n", fmt.Sprint(a.Count), "--oneline")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return "", err
+			}
+			return string(out), nil
+		},
+	}
+}
+
+func GitAddTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "git_add",
+			Description: "Add file contents to the git index (git add).",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"paths": {Type: "string", Description: "File or directory paths to add. Use '.' for all."},
+				},
+				Required: []string{"paths"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Paths string `json:"paths"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			cmd := exec.CommandContext(ctx, "git", "add", a.Paths)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return string(out), err
+			}
+			return "added " + a.Paths, nil
+		},
+	}
+}
+
+func GitCommitTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "git_commit",
+			Description: "Record changes to the git repository (git commit).",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"message": {Type: "string", Description: "The commit message."},
+				},
+				Required: []string{"message"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			cmd := exec.CommandContext(ctx, "git", "commit", "-m", a.Message)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return string(out), err
+			}
+			return string(out), nil
 		},
 	}
 }

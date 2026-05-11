@@ -162,6 +162,9 @@ var readOnlyToolNames = map[string]bool{
 	"get_project_tree":      true,
 	"find_symbol":           true,
 	"ask_user":              true,
+	"git_status":            true,
+	"git_diff":              true,
+	"git_log":               true,
 }
 
 var planExtraToolNames = map[string]bool{
@@ -180,6 +183,8 @@ var destructiveToolNames = map[string]bool{
 	"touch":          true,
 	"run_shell":      true,
 	"apply_diff":     true,
+	"git_add":        true,
+	"git_commit":     true,
 }
 
 type config struct {
