@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -25,6 +26,8 @@ import (
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/internal/huffman"
+	"github.com/javanhut/ollama_code/internal/storage"
 )
 
 const DefaultHost = "http://localhost:11434"
@@ -159,6 +162,8 @@ var readOnlyToolNames = map[string]bool{
 	"file_info":             true,
 	"get_working_directory": true,
 	"read_session_notes":    true,
+	"update_session_notes":  true,
+	"append_session_notes":  true,
 	"web_fetch":             true,
 	"web_search":            true,
 	"get_project_tree":      true,
@@ -169,10 +174,7 @@ var readOnlyToolNames = map[string]bool{
 	"git_log":               true,
 }
 
-var planExtraToolNames = map[string]bool{
-	"update_session_notes": true,
-	"append_session_notes": true,
-}
+var planExtraToolNames = map[string]bool{}
 
 var destructiveToolNames = map[string]bool{
 	"write_file":     true,
@@ -205,7 +207,10 @@ func (m *Model) logActivity(s string) {
 }
 
 type chatChunkMsg struct{ content string }
-type chatDoneMsg struct{}
+type chatDoneMsg struct {
+	promptEval int
+	evalCount  int
+}
 type chatErrMsg struct{ err error }
 type chatToolCallsMsg struct {
 	content string
@@ -215,6 +220,11 @@ type chatToolCallsMsg struct {
 type toolResultMsg struct {
 	index  int
 	result api.Message
+}
+
+type compactDoneMsg struct {
+	summary string
+	index   int
 }
 
 type modelsLoadedMsg struct {
@@ -324,23 +334,19 @@ type Model struct {
 	width     int
 	height    int
 	ready     bool
+
+	totalTokens  int
+	contextLimit int
+	kvStore      *storage.KVStore
 }
 
 func New() *Model {
 	cfg := loadConfig()
-	if cfg.Host == "" {
-		if env := os.Getenv("OLLAMA_HOST"); env != "" {
-			cfg.Host = env
-		} else {
-			cfg.Host = DefaultHost
-		}
-	}
-	if cfg.Model == "" {
-		cfg.Model = os.Getenv("OLLAMA_MODEL")
-	}
-
+	// ... (host setup ...)
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)
+
+	kv, _ := storage.NewKVStore(filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json"))
 
 	ti := textinput.New()
 	ti.Prompt = "URL  "
@@ -399,6 +405,8 @@ func New() *Model {
 		gitBranch:  getGitBranch(),
 		transcript: &strings.Builder{},
 		streamBuf:  &strings.Builder{},
+		contextLimit: 124000,
+		kvStore:    kv,
 	}
 	m.input.Focus()
 	return m
@@ -767,6 +775,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatDoneMsg:
+		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
 		if m.streamBuf.Len() > 0 {
 			m.history = append(m.history, api.Message{
@@ -782,6 +791,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		}
 
+		// Trigger compaction if close to limit
+		if m.totalTokens > m.contextLimit*9/10 {
+			cmds = append(cmds, m.compactContext())
+		}
+
 		if len(m.queue) > 0 {
 			next := m.queue[0]
 			m.queue = m.queue[1:]
@@ -791,6 +805,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 		}
+
+	case compactDoneMsg:
+		m.toast = "context compacted"
+		// Replace the first 'index' messages with a single summary message
+		summaryMsg := api.Message{
+			Role:    "system",
+			Content: "ARCHIVE SUMMARY (Prior history was compacted to save tokens):\n\n" + msg.summary,
+		}
+		newHistory := append([]api.Message{summaryMsg}, m.history[msg.index:]...)
+		m.history = newHistory
+		m.refreshTranscript()
 
 	case chatErrMsg:
 		m.lastError = fmt.Sprintf("error: %v", msg.err)
@@ -993,6 +1018,41 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.toast = fmt.Sprintf("copied %d chars to clipboard", len(text))
+			return m, nil
+		case "/archive":
+			m.input.Reset()
+			if m.kvStore == nil {
+				m.toast = "archive not initialized"
+				return m, nil
+			}
+			// Just show the most recent archive for demo
+			var lastKey string
+			for k := range m.kvStore.GetFullData() {
+				if strings.HasPrefix(k, "archive_") {
+					if k > lastKey {
+						lastKey = k
+					}
+				}
+			}
+			if lastKey == "" {
+				m.toast = "no archives found"
+				return m, nil
+			}
+			val, _ := m.kvStore.Get(lastKey)
+			
+			// Map to struct
+			dataBytes, _ := json.Marshal(val)
+			var comp huffman.CompressedData
+			json.Unmarshal(dataBytes, &comp)
+			
+			decompressed := huffman.Decompress(&comp)
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "DECOMPRESSED ARCHIVE (" + lastKey + "):\n\n" + decompressed,
+			})
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			m.toast = "retrieved & decompressed"
 			return m, nil
 		}
 		if m.modelName == "" {
@@ -1489,6 +1549,51 @@ func (m *Model) submit() tea.Cmd {
 	return cmd
 }
 
+func (m *Model) compactContext() tea.Cmd {
+	if len(m.history) < 6 {
+		return nil
+	}
+
+	m.toast = "compacting & compressing..."
+
+	mid := len(m.history) / 2
+	toCompact := m.history[:mid]
+
+	var conversation strings.Builder
+	for _, msg := range toCompact {
+		conversation.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
+	}
+
+	// Huffman compress the actual conversation before archiving
+	compressed, _ := huffman.Compress(conversation.String())
+	key := fmt.Sprintf("archive_%d", time.Now().Unix())
+	if m.kvStore != nil {
+		m.kvStore.Set(key, compressed)
+	}
+
+	var b strings.Builder
+	b.WriteString("Summarize the following conversation history concisely for context management. Focus on key decisions, file changes, and project state. (Note: The full history has been Huffman-compressed and stored in KV storage with key: " + key + ")\n\n")
+	b.WriteString(conversation.String())
+
+	req := api.GenerateRequest{
+		Model:  m.modelName,
+		Prompt: b.String(),
+		Stream: false,
+	}
+
+	host := m.host
+	return func() tea.Msg {
+		resp, err := host.GenerateResponse(req)
+		if err != nil {
+			return chatErrMsg{err: err}
+		}
+		return compactDoneMsg{
+			summary: resp.Response,
+			index:   mid,
+		}
+	}
+}
+
 func (m *Model) waitForStream() tea.Cmd {
 	s := m.stream
 	if s == nil {
@@ -1510,7 +1615,10 @@ func (m *Model) waitForStream() tea.Cmd {
 				if chunk.Message.Content != "" {
 					return chatChunkMsg{content: chunk.Message.Content}
 				}
-				return chatDoneMsg{}
+				return chatDoneMsg{
+					promptEval: chunk.PromptEval,
+					evalCount:  chunk.EvalCount,
+				}
 			}
 			return chatChunkMsg{content: chunk.Message.Content}
 		case err, ok := <-s.errs:
@@ -1572,9 +1680,24 @@ When NOT to use tools:
 Verification:
 - After write_file, edit_file, or run_shell that modified state, briefly verify by reading the file back or running a relevant check (build/test). State what you verified in your final answer.
 
-Session notes:
-- read_session_notes / append_session_notes / update_session_notes give you a persistent scratchpad. Use it to record decisions, file paths, conventions, and "where I left off" so you don't have to re-derive context every turn. This is especially valuable if your context window is small.
-- At the start of any non-trivial task, call read_session_notes. At the end, append a one-line summary of what you did.
+Repository Memory & Session Notes:
+- The session notes (.ollama_notes.md) act as your Long-Term Memory for this repository and persist across sessions.
+- Use it to store:
+  1. Project Architecture: High-level structure and patterns.
+  2. Tech Stack: Languages, frameworks, and versions.
+  3. Conventions: Naming, style, and testing requirements.
+  4. DST Hashes: File integrity markers (see below).
+  5. Progress Tracking: Where you are in a multi-step task.
+- Be PROACTIVE: Even in 'explore' mode, record architectural findings. NEVER wait for the user to ask you to update notes. If you learn something important about the repo, update them immediately.
+- Treat notes as a structured "State of the Project" map.
+
+Differential State Tracking (DST):
+- Before modifying a file (write_file, edit_file, append_file), you MUST:
+  1. Call hash_file on the target file.
+  2. Compare the returned hash with the "last known good" hash stored in your session notes for that file.
+  3. If the hashes differ, or if no hash is stored, warn the user about potential "drift" and ask for confirmation before proceeding.
+  4. After a successful modification, call hash_file again and update the session notes with the new hash.
+- This ensures that you are always working on the version of the file you think you are.
 
 Output rules:
 - Do NOT write conversational text before a tool call. If you're going to call a tool, emit only the tool call. Save your prose for after you have the tool's result.
@@ -1608,17 +1731,28 @@ func (m *Model) footerView() string {
 		status = fmt.Sprintf("running tools (%d/%d)…", m.pending.done, len(m.pending.calls))
 	}
 	info := infoStyle.Copy().BorderForeground(c).Render(status)
-	hintText := fmt.Sprintf(" mode: %s · tab to switch · /help · enter send · ctrl+c quit ", m.mode)
+	
+	tokens := ""
+	if m.totalTokens > 0 {
+		tokens = fmt.Sprintf(" %dk / %dk ", m.totalTokens/1000, m.contextLimit/1000)
+		if m.totalTokens > m.contextLimit*8/10 {
+			tokens = errorStyle.Render(tokens)
+		} else {
+			tokens = mutedStyle.Render(tokens)
+		}
+	}
+
+	hintText := fmt.Sprintf(" mode: %s · tab to switch · /help · enter send ", m.mode)
 	if m.toast != "" {
 		hintText = " " + m.toast + " "
 	}
 	hint := hintStyle.Render(hintText)
 	width := m.width
 	if width <= 0 {
-		width = lipgloss.Width(info) + lipgloss.Width(hint)
+		width = lipgloss.Width(info) + lipgloss.Width(hint) + lipgloss.Width(tokens)
 	}
-	pad := max(0, width-lipgloss.Width(info)-lipgloss.Width(hint))
-	return lipgloss.JoinHorizontal(lipgloss.Center, hint, strings.Repeat(" ", pad), info)
+	pad := max(0, width-lipgloss.Width(info)-lipgloss.Width(hint)-lipgloss.Width(tokens))
+	return lipgloss.JoinHorizontal(lipgloss.Center, hint, strings.Repeat(" ", pad), tokens, info)
 }
 
 func (m *Model) contentLineAt(screenY int) int {

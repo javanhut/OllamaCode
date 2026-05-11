@@ -26,10 +26,13 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Model     string  `json:"model"`
-	CreatedAt string  `json:"created_at"`
-	Message   Message `json:"message"`
-	Done      bool    `json:"done"`
+	Model      string  `json:"model"`
+	CreatedAt  string  `json:"created_at"`
+	Message    Message `json:"message"`
+	Done       bool    `json:"done"`
+	Total      int64   `json:"total_duration,omitempty"`
+	PromptEval int     `json:"prompt_eval_count,omitempty"`
+	EvalCount  int     `json:"eval_count,omitempty"`
 }
 
 type GenerateRequest struct {

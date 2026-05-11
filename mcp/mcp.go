@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -133,10 +135,59 @@ func DefaultRegistry() *Registry {
 	r.Register(CodeHoverTool())
 	r.Register(WebCrawlTool())
 	r.Register(WebSearchAPITool())
+	r.Register(HashFileTool())
 	return r
 }
 
 // ----- built-in tools -----
+
+// calculateHash computes the SHA-256 hash of a file's content.
+func calculateHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func HashFileTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "hash_file",
+			Description: "Calculate the SHA-256 hash of a file. Used for Differential State Tracking to detect drift before modification.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path": {Type: "string", Description: "Path to the file."},
+				},
+				Required: []string{"path"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", err
+			}
+			if a.Path == "" {
+				return "", fmt.Errorf("path is required")
+			}
+			hash, err := calculateHash(a.Path)
+			if err != nil {
+				return "", err
+			}
+			return hash, nil
+		},
+	}
+}
 
 func WebCrawlTool() Tool {
 	return Tool{
@@ -1437,3 +1488,4 @@ func joinLines(s []string) string {
 	}
 	return out
 }
+
