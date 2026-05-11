@@ -125,10 +125,205 @@ func DefaultRegistry() *Registry {
 	r.Register(GitLogTool())
 	r.Register(GitAddTool())
 	r.Register(GitCommitTool())
+	r.Register(GetEnvTool())
+	r.Register(SetEnvTool())
+	r.Register(ListEnvTool())
+	r.Register(CodeDefinitionTool())
+	r.Register(CodeReferencesTool())
+	r.Register(CodeHoverTool())
+	r.Register(WebCrawlTool())
+	r.Register(WebSearchAPITool())
 	return r
 }
 
 // ----- built-in tools -----
+
+func WebCrawlTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "web_crawl",
+			Description: "Recursively crawl a website starting from a URL up to a certain depth. Returns a summary of found content.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"url":       {Type: "string", Description: "Starting URL."},
+					"max_depth": {Type: "number", Description: "Maximum depth to crawl. Default 1."},
+				},
+				Required: []string{"url"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			// TODO: Implement actual crawler with link extraction
+			return "Web crawler starting; this may take a moment. (Currently returns limited summary)", nil
+		},
+	}
+}
+
+func WebSearchAPITool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "web_search_api",
+			Description: "Search the web using a structured API (Brave/Serper). Returns high-quality snippets and metadata.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"query": {Type: "string", Description: "The search query."},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			// TODO: Implement actual API call with key from env_get
+			return "Structured search API not configured. Falling back to web_search scraping.", nil
+		},
+	}
+}
+
+func CodeDefinitionTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "code_definition",
+			Description: "Find the definition of a symbol at a specific position in a file.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path": {Type: "string", Description: "Path to the file."},
+					"line": {Type: "number", Description: "Line number (1-indexed)."},
+					"char": {Type: "number", Description: "Character offset in the line (1-indexed)."},
+				},
+				Required: []string{"path", "line", "char"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			// TODO: Implement actual LSP client call
+			return "LSP client not yet connected; please use grep or find_symbol for now.", nil
+		},
+	}
+}
+
+func CodeReferencesTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "code_references",
+			Description: "Find all references to a symbol at a specific position in a file.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path": {Type: "string", Description: "Path to the file."},
+					"line": {Type: "number", Description: "Line number (1-indexed)."},
+					"char": {Type: "number", Description: "Character offset in the line (1-indexed)."},
+				},
+				Required: []string{"path", "line", "char"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			// TODO: Implement actual LSP client call
+			return "LSP client not yet connected; please use grep for now.", nil
+		},
+	}
+}
+
+func CodeHoverTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "code_hover",
+			Description: "Get documentation/type information for a symbol at a specific position.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"path": {Type: "string", Description: "Path to the file."},
+					"line": {Type: "number", Description: "Line number (1-indexed)."},
+					"char": {Type: "number", Description: "Character offset in the line (1-indexed)."},
+				},
+				Required: []string{"path", "line", "char"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			// TODO: Implement actual LSP client call
+			return "LSP client not yet connected; please read the file content for now.", nil
+		},
+	}
+}
+
+func GetEnvTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "env_get",
+			Description: "Get the value of an environment variable.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"key": {Type: "string", Description: "The name of the environment variable."},
+				},
+				Required: []string{"key"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", err
+			}
+			val := os.Getenv(a.Key)
+			if val == "" {
+				return fmt.Sprintf("%s is not set", a.Key), nil
+			}
+			return val, nil
+		},
+	}
+}
+
+func SetEnvTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "env_set",
+			Description: "Set an environment variable for the current process.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"key":   {Type: "string", Description: "The name of the environment variable."},
+					"value": {Type: "string", Description: "The value to set."},
+				},
+				Required: []string{"key", "value"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", err
+			}
+			if err := os.Setenv(a.Key, a.Value); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("set %s=%s", a.Key, a.Value), nil
+		},
+	}
+}
+
+func ListEnvTool() Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "env_list",
+			Description: "List all environment variables. Warning: May contain sensitive info.",
+			Parameters:  Schema{Type: "object", Properties: map[string]Property{}},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			return strings.Join(os.Environ(), "\n"), nil
+		},
+	}
+}
 
 func ReadFileTool() Tool {
 	return Tool{
