@@ -464,7 +464,8 @@ func WriteFileTool() Tool {
 			if err := os.WriteFile(a.Path, []byte(a.Content), 0o644); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("wrote %d bytes to %s", len(a.Content), a.Path), nil
+			hash, _ := calculateHash(a.Path)
+			return fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash), nil
 		},
 	}
 }
@@ -752,7 +753,9 @@ func AppendFileTool() Tool {
 			if _, err := f.WriteString(a.Content); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("appended %d bytes to %s", len(a.Content), a.Path), nil
+			f.Close()
+			hash, _ := calculateHash(a.Path)
+			return fmt.Sprintf("appended %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash), nil
 		},
 	}
 }
@@ -816,7 +819,8 @@ func EditFileTool() Tool {
 			if err := os.WriteFile(a.Path, []byte(updated), mode); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("edited %s: replaced %d occurrence(s)", a.Path, count), nil
+			hash, _ := calculateHash(a.Path)
+			return fmt.Sprintf("edited %s: replaced %d occurrence(s)\nNew Hash: %s", a.Path, count, hash), nil
 		},
 	}
 }
