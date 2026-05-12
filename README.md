@@ -16,7 +16,8 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
 - **Permission prompts** — in write mode, each destructive tool call is presented for approve/deny before execution
 - **Session notes** — a persistent scratchpad the model uses to track decisions and context across turns
 - **Mouse support** — click and drag to select text, auto-scrolls at edges, copies on release
-- **Slash commands** — `/help`, `/settings`, `/model`, `/notes`, `/clear`, `/copy`, `/quit`
+- **Voice companion (optional)** — a small Gio popup window that captures your microphone for speech-to-text into the input box and speaks Layla's replies aloud via TTS
+- **Slash commands** — `/help`, `/settings`, `/model`, `/notes`, `/clear`, `/copy`, `/companion`, `/quit`
 
 ## Requirements
 
@@ -54,6 +55,11 @@ Run the binary and connect to your Ollama instance:
 |---|---|
 | `OLLAMA_HOST` | Default Ollama URL (override the default `localhost:11434`) |
 | `OLLAMA_MODEL` | Default model to pre-select |
+| `OLLAMA_COMPANION_BIN` | Absolute path to the `ollama-companion` binary (overrides auto-discovery) |
+| `OLLAMA_COMPANION_WHISPER_BIN` | Path to `whisper-cli` (default: `~/.cache/whisper/whisper-cli` or `$PATH`) |
+| `OLLAMA_COMPANION_WHISPER_MODEL` | Path to a `ggml-*.bin` model (default: first match in `~/.cache/whisper/`) |
+| `OLLAMA_COMPANION_PIPER_BIN` | Path to `piper` (default: `/opt/piper-tts/piper`, `~/.cache/piper/piper`, or `$PATH`) |
+| `OLLAMA_COMPANION_PIPER_MODEL` | Path to a piper `.onnx` voice (default: first match in `~/.cache/piper/`) |
 
 ### Keyboard Shortcuts
 
@@ -77,6 +83,7 @@ Run the binary and connect to your Ollama instance:
 | `/notes` | View session notes |
 | `/clear` | Reset the conversation |
 | `/copy` | Copy last assistant response to clipboard |
+| `/companion` | Toggle the voice companion popup (STT in → input, replies → TTS) |
 | `/quit` | Exit |
 
 ### Permission Prompts (Write Mode)
@@ -87,13 +94,77 @@ Run the binary and connect to your Ollama instance:
 | `A` | Allow all pending calls in this turn |
 | `N` / `Esc` | Deny this tool call |
 
+## Voice Companion (optional)
+
+A separate Gio-based GUI binary (`ollama-companion`) gives Layla a face and a voice. It captures your microphone, transcribes utterances via whisper.cpp, drops the text into the TUI's input box, and auto-sends — and it speaks each assistant reply back through piper. A small neon-blue orb visualizes mic level; its perimeter ripples with audio.
+
+### System requirements
+
+The companion shells out to local tools and reads its own audio. None are bundled.
+
+| Component | Purpose | Install (Arch example) |
+|---|---|---|
+| **PipeWire or PulseAudio** | mic capture (`pw-cat` preferred, `parec` fallback) and playback (`paplay`) | usually preinstalled on modern Linux desktops |
+| **whisper.cpp** | speech-to-text inference | `git clone https://github.com/ggerganov/whisper.cpp && cd whisper.cpp && cmake -B build && cmake --build build -j` |
+| A whisper `ggml-*.bin` model | STT model weights | `bash models/download-ggml-model.sh base.en` (run inside the whisper.cpp checkout) |
+| **piper** | text-to-speech inference | `yay -S piper-tts-bin` (AUR), or `pipx install piper-tts`, or download from [piper releases](https://github.com/rhasspy/piper/releases) |
+| A piper voice (`.onnx` + `.onnx.json`) | TTS voice weights | download a pair from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) |
+| **Gio system deps** | only at build time of `ollama-companion` | `vulkan-headers`, plus the usual X11/Wayland dev headers |
+
+### Setup (auto-discovery layout)
+
+If you place files in these locations, no env vars are needed:
+
+```
+~/.cache/whisper/
+├── whisper-cli           # executable (or symlink to your whisper.cpp build)
+└── ggml-base.en.bin      # any ggml-*.bin model; the first match wins
+
+~/.cache/piper/
+├── en_US-lessac-medium.onnx       # any *.onnx voice; the first match wins
+└── en_US-lessac-medium.onnx.json  # piper voice config (sets sample rate)
+```
+
+The piper binary is auto-discovered at `/opt/piper-tts/piper`, `~/.cache/piper/piper`, `~/.local/bin/piper`, or anywhere on `$PATH` (as `piper-tts` or `piper`).
+
+### Build and run
+
+```bash
+make build-companion       # produces ./ollama-companion
+make build                 # produces ./ollama-code
+./ollama-code
+# Inside the TUI, type:
+/companion                 # toggle on/off; speak — your words land in the input
+```
+
+Gio adds a sizable transitive dependency tree. The main `ollama-code` binary deliberately does **not** import `companion/`, so `make build` stays Gio-free; only `make build-companion` pulls in Gio.
+
+### Window features
+
+- **Drag** anywhere on the window to move it (compositor-mediated; works on X11 and Wayland).
+- **Mute button** — small dot in the top-right corner; click to toggle. When muted, the orb dims, the wave goes flat, and STT is disabled. TTS-driven visualization still runs (Layla's voice still wobbles the orb).
+- **Listening indicator** — the orb shifts to bright cyan with a faint outer halo while VAD is buffering an utterance, then snaps back when the utterance closes (~0.7 s of silence) and the transcript fires.
+- **Diagnostic log** at `/tmp/ollama-companion.log` — `tail -f` it while using `/companion` to see capture stats, VAD events, and mute toggles.
+
+### Wayland caveats
+
+- **Always-on-top / corner placement**: Wayland clients cannot self-position or self-pin. Use a compositor rule. Example for Hyprland:
+  ```
+  windowrulev2 = float, class:^(ollama-companion)$
+  windowrulev2 = pin,   class:^(ollama-companion)$
+  windowrulev2 = move 100%-240 100%-240, class:^(ollama-companion)$
+  ```
+- **Frameless rendering**: honored by KDE/Sway/Hyprland; GNOME/Mutter may still draw server-side decorations.
+
 ## Development
 
 The project includes a `Makefile` for common development tasks.
 
 - **Setup dependencies:** `make setup`
-- **Build the binary:** `make build`
+- **Build the main binary:** `make build`
+- **Build the companion (optional):** `make build-companion`
 - **Run the app:** `make run`
+- **Run the companion standalone:** `make run-companion` or `make dev-companion`
 - **Clean build artifacts:** `make clean`
 
 ### Testing
@@ -115,13 +186,23 @@ go test ./api
 
 ```
 ├── api/
-│   └── api.go          # Ollama HTTP client (chat, streaming, models)
+│   └── api.go               # Ollama HTTP client (chat, streaming, models)
 ├── mcp/
-│   └── mcp.go          # Tool registry and 15 built-in filesystem/shell tools
+│   ├── mcp.go               # Tool registry and 30+ built-in filesystem/shell tools
+│   └── external.go          # JSON-RPC stdio bridge for external MCP servers
 ├── tui/
-│   └── tui.go          # Bubbletea TUI (modals, viewport, input, modes)
-├── main.go             # Entry point
-└── go.mod              # Module definition and dependencies
+│   └── tui.go               # Bubbletea TUI (modals, viewport, input, modes)
+├── internal/
+│   ├── companion/           # CLI-side client that manages the companion subprocess
+│   ├── huffman/             # Context compaction codec
+│   ├── memory/              # Long-term user memory store
+│   └── storage/             # Session KV store
+├── companion/               # GUI logic (Gio): orb, audio capture, STT, TTS, IPC
+├── cmd/
+│   └── companion/
+│       └── main.go          # Entry point for the `ollama-companion` binary
+├── main.go                  # Entry point for `ollama-code`
+└── go.mod                   # Module definition and dependencies
 ```
 
 ## Built-in Tools
