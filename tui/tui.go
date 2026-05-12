@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -738,6 +739,38 @@ func laylaMarkdownStyle() glamourAnsi.StyleConfig {
 	return s
 }
 
+// LaTeX math notation patterns. We rewrite $…$ / $$…$$ as inline code so
+// the user sees a styled span instead of literal dollar signs (glamour has no
+// math renderer). Currency like "$5" doesn't match because it has no closer.
+var (
+	mathDisplayRe = regexp.MustCompile(`\$\$([^\n$]+?)\$\$`)
+	mathInlineRe  = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)
+)
+
+// stripLatexMath converts $…$ and $$…$$ into Markdown inline code, skipping
+// content inside fenced code blocks where the dollars might be intentional.
+func stripLatexMath(s string) string {
+	if !strings.Contains(s, "$") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	inFence := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		line = mathDisplayRe.ReplaceAllString(line, "`$1`")
+		line = mathInlineRe.ReplaceAllString(line, "`$1`")
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m *Model) renderMarkdown(s string, useCache bool) string {
 	if strings.TrimSpace(s) == "" {
 		return s
@@ -748,6 +781,8 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 			return cached
 		}
 	}
+
+	pre := stripLatexMath(s)
 
 	width := m.viewport.Width()
 	if width <= 4 {
@@ -767,7 +802,7 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 		// Invalidate cache if width changes
 		m.mdCache = make(map[string]string)
 	}
-	out, err := m.mdRenderer.Render(s)
+	out, err := m.mdRenderer.Render(pre)
 	if err != nil {
 		return s
 	}
@@ -1667,7 +1702,7 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 		m.mdWidth = wrap
 		m.mdCache = make(map[string]string)
 	}
-	out, err := m.mdRenderer.Render(s)
+	out, err := m.mdRenderer.Render(stripLatexMath(s))
 	if err != nil {
 		return s
 	}
