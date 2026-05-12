@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/storage"
@@ -237,6 +238,10 @@ type modelsLoadedMsg struct {
 }
 type connectErrMsg struct{ err error }
 
+type companionTranscriptMsg struct{ text string }
+type companionErrorMsg struct{ err error }
+type companionStoppedMsg struct{}
+
 type streamState struct {
 	resp   <-chan api.ChatResponse
 	errs   <-chan error
@@ -346,6 +351,9 @@ type Model struct {
 	memory       *memory.Store
 	mdCache      map[string]string
 	expandTools  bool
+
+	companion       *companion.Client
+	companionSender func(tea.Msg)
 }
 
 func New() *Model {
@@ -1054,16 +1062,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatDoneMsg:
 		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
-		if m.streamBuf.Len() > 0 {
+		finalAssistant := m.streamBuf.String()
+		if len(finalAssistant) > 0 {
 			m.history = append(m.history, api.Message{
 				Role:    "assistant",
-				Content: m.streamBuf.String(),
+				Content: finalAssistant,
 			})
 		}
 		m.streamBuf.Reset()
 		m.streaming = false
 		m.stream = nil
 		m.refreshTranscript()
+		if m.companion != nil && finalAssistant != "" {
+			_ = m.companion.Speak(finalAssistant)
+		}
 		if wasAtBottom {
 			m.viewport.GotoBottom()
 		}
@@ -1110,6 +1122,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 		}
+
+	case companionTranscriptMsg:
+		if m.state == stateChat {
+			text := strings.TrimSpace(msg.text)
+			if text != "" {
+				cur := m.input.Value()
+				if cur != "" && !strings.HasSuffix(cur, " ") {
+					m.input.InsertString(" ")
+				}
+				m.input.InsertString(text)
+				m.input.Focus()
+			}
+		}
+
+	case companionErrorMsg:
+		m.toast = "companion: " + msg.err.Error()
+
+	case companionStoppedMsg:
+		if m.companion != nil {
+			_ = m.companion.Close()
+			m.companion = nil
+		}
+		m.toast = "companion exited"
 	}
 
 	switch m.state {
@@ -1285,6 +1320,43 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.showNotes = !m.showNotes
 			m.layout()
+			return m, nil
+		case "/companion":
+			m.input.Reset()
+			if m.companion != nil {
+				_ = m.companion.Close()
+				m.companion = nil
+				m.toast = "companion stopped"
+				return m, nil
+			}
+			client, err := companion.Start()
+			if err != nil {
+				m.toast = "companion: " + err.Error()
+				return m, nil
+			}
+			m.companion = client
+			m.toast = "companion started — speak to type"
+			send := m.companionSender
+			go func() {
+				if send == nil {
+					return
+				}
+				for {
+					select {
+					case t, ok := <-client.Transcripts:
+						if !ok {
+							send(companionStoppedMsg{})
+							return
+						}
+						send(companionTranscriptMsg{text: t.Text})
+					case e, ok := <-client.Errors:
+						if !ok {
+							return
+						}
+						send(companionErrorMsg{err: e})
+					}
+				}
+			}()
 			return m, nil
 		case "/copy":
 			m.input.Reset()
@@ -1528,6 +1600,7 @@ func (m *Model) helpModal() string {
 		{"/notes", "view session notes"},
 		{"/clear", "reset the conversation"},
 		{"/copy", "copy last response to system clipboard"},
+		{"/companion", "toggle GUI popup (speech in <-> input, replies -> TTS)"},
 		{"/quit", "exit"},
 		{"", ""},
 		{"", "Keys"},
@@ -2811,7 +2884,13 @@ func saveConfig(c config) {
 }
 
 func Run() error {
-	p := tea.NewProgram(New())
+	m := New()
+	p := tea.NewProgram(m)
+	m.companionSender = func(msg tea.Msg) { p.Send(msg) }
 	_, err := p.Run()
+	if m.companion != nil {
+		_ = m.companion.Close()
+		m.companion = nil
+	}
 	return err
 }

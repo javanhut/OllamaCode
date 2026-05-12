@@ -2,6 +2,7 @@
 
 # --- Configuration ---
 PROJECT_NAME := ollama-code
+COMPANION_NAME := ollama-companion
 VERSION := 1.0.0
 MAIN_ENTRY_POINT := main.go # Assuming your main package entry file is main.go
 
@@ -41,11 +42,27 @@ dev: setup
 	@echo "--- Running $(PROJECT_NAME) in development mode ---"
 	go run $(MAIN_ENTRY_POINT)
 
+# --- Companion GUI Targets ---
+
+# Build the optional Gio-based popup companion (separate binary).
+build-companion:
+	@echo "--- Building $(COMPANION_NAME) ---"
+	go build -v -o $(COMPANION_NAME) ./cmd/companion
+	@echo "Companion build complete: $(COMPANION_NAME)"
+
+# Build then run the companion.
+run-companion: build-companion
+	./$(COMPANION_NAME)
+
+# Fast iteration: run the companion without producing a binary.
+dev-companion:
+	go run ./cmd/companion
+
 # Target to clean generated files and directories
 clean:
 	@echo "--- Cleaning up built files and directories ---"
-	rm -f $(PROJECT_NAME) build/ dist/ *.pyc
+	rm -f $(PROJECT_NAME) $(COMPANION_NAME) build/ dist/ *.pyc
 	@echo "Cleanup complete."
 
 # --- Phony Markers ---
-.PHONY: all setup build run dev clean
+.PHONY: all setup build run dev clean build-companion run-companion dev-companion
