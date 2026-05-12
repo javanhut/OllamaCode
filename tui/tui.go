@@ -27,10 +27,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
 	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/storage"
+	"github.com/javanhut/ollama_code/mcp"
 )
 
 // invisibleTools are tools whose calls and results are hidden from the
@@ -45,42 +45,30 @@ var invisibleTools = map[string]bool{
 const DefaultHost = "http://localhost:11434"
 
 var (
-	accentColor = lipgloss.Color("205") // Soft Pink
-	textColor   = lipgloss.Color("252")
+	accentColor    = lipgloss.Color("211")
+	secondaryColor = lipgloss.Color("81")
+	textColor      = lipgloss.Color("252")
+	surfaceColor   = lipgloss.Color("236")
+	panelColor     = lipgloss.Color("237")
+	subtleColor    = lipgloss.Color("240")
 
-	titleStyle = func() lipgloss.Style {
-		b := lipgloss.RoundedBorder()
-		b.Right = "├"
-		return lipgloss.NewStyle().
-			BorderStyle(b).
-			BorderForeground(accentColor).
-			Foreground(textColor).
-			Padding(0, 1)
-	}()
-
-	infoStyle = func() lipgloss.Style {
-		b := lipgloss.RoundedBorder()
-		b.Left = "┤"
-		return titleStyle.BorderStyle(b)
-	}()
-
-	borderStyle    = lipgloss.NewStyle().Foreground(accentColor)
-	inputBandStyle = lipgloss.NewStyle().Background(lipgloss.Color("238")).Foreground(textColor)
-	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	borderStyle    = lipgloss.NewStyle().Foreground(subtleColor)
+	inputBandStyle = lipgloss.NewStyle().Background(panelColor).Foreground(textColor)
+	chromeStyle    = lipgloss.NewStyle().Background(surfaceColor).Foreground(textColor)
+	userStyle      = lipgloss.NewStyle().Foreground(secondaryColor).Bold(true)
 	assistantStyle = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
 	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	hintStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	hintStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	headingStyle   = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
-	selectedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(accentColor).Bold(true)
-	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	asciiStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	asciiStyle     = lipgloss.NewStyle().Foreground(secondaryColor).Bold(true)
 	bodyStyle      = lipgloss.NewStyle().Foreground(textColor)
 
-	modalBg = lipgloss.Color("236")
+	modalBg = surfaceColor
 
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("244")).
+			BorderForeground(subtleColor).
 			Background(modalBg).
 			Foreground(textColor).
 			Padding(1, 2)
@@ -91,7 +79,7 @@ var (
 	modalMutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(modalBg)
 	modalAccentStyle = lipgloss.NewStyle().Foreground(accentColor).Background(modalBg).Bold(true)
 	modalErrorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(modalBg).Bold(true)
-	modalSelectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(lipgloss.Color("215")).Bold(true)
+	modalSelectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(secondaryColor).Bold(true)
 )
 
 const (
@@ -385,13 +373,13 @@ func New() *Model {
 	ta.CharLimit = 0
 	ta.SetHeight(minInputLines)
 	styles := ta.Styles()
-	inputBg := lipgloss.Color("237")
-	styles.Focused.Base = lipgloss.NewStyle().Background(inputBg).Padding(1, 2)
-	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Background(inputBg)
+	inputBg := panelColor
+	styles.Focused.Base = lipgloss.NewStyle().Background(inputBg).Padding(0, 1)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(secondaryColor).Background(inputBg).Bold(true)
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(inputBg)
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor).Background(inputBg)
 	styles.Focused.CursorLine = lipgloss.NewStyle().Background(inputBg)
-	styles.Blurred.Base = lipgloss.NewStyle().Background(inputBg).Padding(1, 2)
+	styles.Blurred.Base = lipgloss.NewStyle().Background(inputBg).Padding(0, 1)
 	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(inputBg)
 	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Background(inputBg)
 	styles.Blurred.Text = lipgloss.NewStyle().Foreground(textColor).Background(inputBg)
@@ -416,26 +404,26 @@ func New() *Model {
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	s.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &Model{
-		cfg:        cfg,
-		host:       host,
-		tools:      registry,
-		notes:      notes,
-		mode:       ExploreMode,
-		state:      stateChat,
-		urlInput:   ti,
-		input:      ta,
-		modelName:  cfg.Model,
-		spinner:    s,
-		gitBranch:  getGitBranch(),
-		transcript: &strings.Builder{},
-		streamBuf:  &strings.Builder{},
+		cfg:          cfg,
+		host:         host,
+		tools:        registry,
+		notes:        notes,
+		mode:         ExploreMode,
+		state:        stateChat,
+		urlInput:     ti,
+		input:        ta,
+		modelName:    cfg.Model,
+		spinner:      s,
+		gitBranch:    getGitBranch(),
+		transcript:   &strings.Builder{},
+		streamBuf:    &strings.Builder{},
 		contextLimit: 124000,
-		kvStore:    kv,
-		memory:     mem,
-		mdCache:    make(map[string]string),
+		kvStore:      kv,
+		memory:       mem,
+		mdCache:      make(map[string]string),
 	}
 	m.input.Focus()
 	return m
@@ -513,7 +501,7 @@ func (m *Model) refreshTranscript() {
 		m.transcript.WriteString(content)
 		m.viewport.SetContent(content)
 	}
-	
+
 	if m.sel.active {
 		m.applySelectionHighlight()
 	}
@@ -528,8 +516,8 @@ type assistantTurn struct {
 }
 
 type toolCallEntry struct {
-	call    mcp.ToolCall
-	result  string
+	call      mcp.ToolCall
+	result    string
 	hasResult bool
 }
 
@@ -651,7 +639,7 @@ func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string
 	if strings.HasPrefix(content, "error:") {
 		status = "failed"
 	}
-	
+
 	header := fmt.Sprintf("**›** `%s` (%s)", call.Function.Name, status)
 	if !verbose {
 		return header
@@ -665,7 +653,7 @@ func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string
 		lines = lines[:maxLines]
 		truncated = true
 	}
-	
+
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n")
@@ -697,7 +685,7 @@ func renderToolResult(name, content string, verbose bool) string {
 	if strings.HasPrefix(content, "error:") {
 		status = "failed"
 	}
-	
+
 	header := fmt.Sprintf("**←** `%s` (%s)", name, status)
 	if !verbose {
 		return header
@@ -711,7 +699,7 @@ func renderToolResult(name, content string, verbose bool) string {
 		lines = lines[:maxLines]
 		truncated = true
 	}
-	
+
 	var b strings.Builder
 	b.WriteString(header)
 	b.WriteString("\n")
@@ -1296,12 +1284,12 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			val, _ := m.kvStore.Get(lastKey)
-			
+
 			// Map to struct
 			dataBytes, _ := json.Marshal(val)
 			var comp huffman.CompressedData
 			json.Unmarshal(dataBytes, &comp)
-			
+
 			decompressed := huffman.Decompress(&comp)
 			m.history = append(m.history, api.Message{
 				Role:    "system",
@@ -1759,7 +1747,7 @@ func (m *Model) layout() {
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 
 		m.notesViewport = viewport.New(
-			viewport.WithWidth(notesW - 4), // account for border and padding
+			viewport.WithWidth(notesW-4), // account for border and padding
 			viewport.WithHeight(notesVH),
 		)
 	} else {
@@ -2016,34 +2004,63 @@ OUTPUT RULES:
 - No robotic platitudes. No "I hope this helps!" No "Let me know if you have questions!" The user knows where you are.
 - Stay human. Stay sharp. Be the engineer you'd want in the foxhole with you at 3 a.m. when prod is on fire.`
 
-
 func (m *Model) headerView() string {
 	c := m.mode.color()
-	branch := ""
-	if m.gitBranch != "" {
-		branch = fmt.Sprintf(" · %s", m.gitBranch)
-	}
-	title := titleStyle.Copy().
-		BorderForeground(c).
-		Render(fmt.Sprintf("ollama · %s%s · [%s]", m.activeModelName(), branch, m.mode))
 	width := m.width
 	if width <= 0 {
-		width = lipgloss.Width(title)
+		width = 80
 	}
-	line := borderStyle.Copy().Foreground(c).Render(strings.Repeat("─", max(0, width-lipgloss.Width(title))))
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, line)
+
+	brand := lipgloss.NewStyle().
+		Background(c).
+		Foreground(lipgloss.Color("232")).
+		Bold(true).
+		Padding(0, 1).
+		Render("ollama code")
+	modelText := m.activeModelName()
+	if width < 42 {
+		modelText = ""
+	}
+	model := bodyStyle.Copy().Background(surfaceColor).Bold(true).Render(modelText)
+	mode := lipgloss.NewStyle().
+		Background(panelColor).
+		Foreground(c).
+		Bold(true).
+		Padding(0, 1).
+		Render(m.mode.String())
+
+	right := mode
+	metaSpace := width - lipgloss.Width(brand) - lipgloss.Width(model) - lipgloss.Width(right) - 3
+	branch := ""
+	if m.gitBranch != "" && metaSpace > 4 {
+		branch = "  " + truncatePlain(m.gitBranch, metaSpace-2)
+	}
+	meta := mutedStyle.Copy().Background(surfaceColor).Render(branch)
+	left := brand
+	if modelText != "" {
+		left += chromeStyle.Render("  ") + model
+	}
+	left += meta
+	pad := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
+	row := chromeStyle.Width(width).Render(left + chromeStyle.Render(strings.Repeat(" ", pad)) + right)
+	rule := lipgloss.NewStyle().Foreground(c).Render(strings.Repeat("─", width))
+	return row + "\n" + rule
 }
 
 func (m *Model) footerView() string {
 	c := m.mode.color()
-	status := "ready"
+	status := " READY "
 	if m.streaming {
-		status = m.spinner.View() + " streaming…"
+		status = " " + m.spinner.View() + " STREAMING "
 	} else if m.pending != nil {
-		status = fmt.Sprintf("running tools (%d/%d)…", m.pending.done, len(m.pending.calls))
+		status = fmt.Sprintf(" TOOLS %d/%d ", m.pending.done, len(m.pending.calls))
 	}
-	info := infoStyle.Copy().BorderForeground(c).Render(status)
-	
+	info := lipgloss.NewStyle().
+		Background(c).
+		Foreground(lipgloss.Color("232")).
+		Bold(true).
+		Render(status)
+
 	tokens := ""
 	if m.totalTokens > 0 {
 		tokens = fmt.Sprintf(" %dk / %dk ", m.totalTokens/1000, m.contextLimit/1000)
@@ -2058,13 +2075,17 @@ func (m *Model) footerView() string {
 	if m.toast != "" {
 		hintText = " " + m.toast + " "
 	}
-	hint := hintStyle.Render(hintText)
 	width := m.width
 	if width <= 0 {
-		width = lipgloss.Width(info) + lipgloss.Width(hint) + lipgloss.Width(tokens)
+		width = lipgloss.Width(info) + lipgloss.Width(hintText) + lipgloss.Width(tokens)
 	}
+	hintText = truncatePlain(hintText, max(0, width-lipgloss.Width(info)-lipgloss.Width(tokens)))
+	hint := hintStyle.Copy().Background(surfaceColor).Render(hintText)
 	pad := max(0, width-lipgloss.Width(info)-lipgloss.Width(hint)-lipgloss.Width(tokens))
-	return lipgloss.JoinHorizontal(lipgloss.Center, hint, strings.Repeat(" ", pad), tokens, info)
+	tokenView := chromeStyle.Render(tokens)
+	row := hint + chromeStyle.Render(strings.Repeat(" ", pad)) + tokenView + info
+	rule := borderStyle.Render(strings.Repeat("─", width))
+	return rule + "\n" + chromeStyle.Width(width).Render(row)
 }
 
 func (m *Model) contentLineAt(screenY int) int {
@@ -2441,30 +2462,43 @@ func (m *Model) inputView() string {
 	if width <= 0 {
 		width = lipgloss.Width(m.input.View())
 	}
-	status := "ready"
+	c := m.mode.color()
+	label := "message"
 	if m.streaming {
-		status = "streaming"
+		label = "queued while streaming"
 	}
-	label := " " + status + " "
-	line := mutedStyle.Render("─" + label + strings.Repeat("─", max(0, width-lipgloss.Width(label)-1)))
-	input := inputBandStyle.Width(width).Render(m.input.View())
-	return line + "\n" + input
+	prefix := lipgloss.NewStyle().
+		Background(c).
+		Foreground(lipgloss.Color("232")).
+		Bold(true).
+		Padding(0, 1).
+		Render(label)
+	inputW := max(1, width-lipgloss.Width(prefix))
+	input := inputBandStyle.Width(inputW).Render(m.input.View())
+	return prefix + input
 }
 
 func (m *Model) welcomePanel() string {
-	width := 100
+	width := 96
 	if m.width > 0 {
-		width = clamp(m.width-4, 40, 100)
+		width = clamp(m.width-8, 46, 96)
 	}
+	margin := 0
+	if m.width > width {
+		margin = (m.width - width) / 2
+	}
+	prefix := strings.Repeat(" ", margin)
 
 	title := fmt.Sprintf(" Ollama Code %s ", appVersion)
 	topFill := max(0, width-lipgloss.Width(title)-3)
-	top := borderStyle.Render("╭─") + headingStyle.Render(title) + borderStyle.Render(strings.Repeat("─", topFill)+"╮")
-	bottom := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	panelBorder := borderStyle.Copy().Foreground(m.mode.color())
+	top := panelBorder.Render("╭─") + headingStyle.Render(title) + panelBorder.Render(strings.Repeat("─", topFill)+"╮")
+	bottom := panelBorder.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	inner := width - 4 // 1 char border + 1 char pad on each side
+	rowStyle := lipgloss.NewStyle().Background(surfaceColor)
 
 	rows := []string{""}
-	rows = append(rows, centerCell(bodyStyle.Render("Layla's in. Let's write something worth keeping."), inner))
+	rows = append(rows, centerCell(bodyStyle.Copy().Bold(true).Render("Layla's in. Let's write something worth keeping."), inner))
 	rows = append(rows, "")
 	rows = append(rows, llamaRows(inner)...)
 	rows = append(rows, "")
@@ -2472,19 +2506,22 @@ func (m *Model) welcomePanel() string {
 	rows = append(rows, "")
 
 	var b strings.Builder
+	b.WriteString(prefix)
 	b.WriteString(top)
 	b.WriteString("\n")
 	for i, row := range rows {
-		b.WriteString(borderStyle.Render("│"))
-		b.WriteString(" ")
-		b.WriteString(padCell(row, inner))
-		b.WriteString(" ")
-		b.WriteString(borderStyle.Render("│"))
+		b.WriteString(prefix)
+		b.WriteString(panelBorder.Render("│"))
+		b.WriteString(rowStyle.Render(" "))
+		b.WriteString(rowStyle.Render(padCell(row, inner)))
+		b.WriteString(rowStyle.Render(" "))
+		b.WriteString(panelBorder.Render("│"))
 		if i < len(rows)-1 {
 			b.WriteString("\n")
 		}
 	}
 	b.WriteString("\n")
+	b.WriteString(prefix)
 	b.WriteString(bottom)
 	return b.String()
 }
@@ -2498,10 +2535,11 @@ func (m *Model) welcomeInfoRows(width int) []string {
 	statusLine := fmt.Sprintf("%s · %s", m.activeModelName(), host)
 
 	rows := []string{
-		mutedStyle.Render(truncatePlain(statusLine, width)),
-		borderStyle.Render(strings.Repeat("─", width)),
-		headingStyle.Render("Tips for getting started"),
+		centerCell(mutedStyle.Render(truncatePlain(statusLine, width)), width),
+		"",
+		headingStyle.Render("Quick starts"),
 		bodyStyle.Render(truncatePlain(modelLine, width)),
+		mutedStyle.Render(truncatePlain("/model pick a model    /notes session notes    /help shortcuts", width)),
 		"",
 		headingStyle.Render("Recent activity"),
 	}
