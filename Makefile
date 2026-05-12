@@ -5,6 +5,18 @@ PROJECT_NAME := ollama-code
 COMPANION_NAME := ollama-companion
 VERSION := 1.0.0
 MAIN_ENTRY_POINT := main.go # Assuming your main package entry file is main.go
+UNAME_S := $(shell uname -s)
+
+# Installation locations (override as needed, e.g. `make install PREFIX=$$HOME/.local`)
+DEFAULT_PREFIX := /usr/local
+ifeq ($(UNAME_S),Darwin)
+ifneq ("$(wildcard /opt/homebrew/bin)","")
+DEFAULT_PREFIX := /opt/homebrew
+endif
+endif
+PREFIX ?= $(DEFAULT_PREFIX)
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
 
 # --- Targets ---
 
@@ -26,11 +38,25 @@ build: setup
 	# GOOS=linux GOARCH=amd64 go build -v -o $(PROJECT_NAME)_linux .
 	@echo "Build complete. Binary named $(PROJECT_NAME) created."
 
-# Target to install/deploy the built binary (Placeholder)
+# Target to install the built binary into PATH.
 install: build
-	@echo "--- Installation/Deployment Phase ---"
-	# TODO: Implement logic to copy $(PROJECT_NAME) binary to system PATH or deployment directory
-	@echo "Installation target defined. Please implement specific deployment steps."
+	@echo "--- Installing $(PROJECT_NAME) ---"
+	@echo "OS: $(UNAME_S)"
+	@echo "Install path: $(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"
+	mkdir -p "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(PROJECT_NAME)" "$(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"
+	@echo "Install complete."
+
+# Target to uninstall the installed binary.
+uninstall:
+	@echo "--- Uninstalling $(PROJECT_NAME) ---"
+	@if [ -f "$(DESTDIR)$(BINDIR)/$(PROJECT_NAME)" ]; then \
+		rm -f "$(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"; \
+		echo "Removed $(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"; \
+	else \
+		echo "No installed binary found at $(DESTDIR)$(BINDIR)/$(PROJECT_NAME)"; \
+	fi
+	@echo "Uninstall complete."
 
 # Target to run the application using the compiled binary
 run: build
@@ -58,6 +84,26 @@ run-companion: build-companion
 dev-companion:
 	go run ./cmd/companion
 
+# Install the optional companion binary.
+install-companion: build-companion
+	@echo "--- Installing $(COMPANION_NAME) ---"
+	@echo "OS: $(UNAME_S)"
+	@echo "Install path: $(DESTDIR)$(BINDIR)/$(COMPANION_NAME)"
+	mkdir -p "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(COMPANION_NAME)" "$(DESTDIR)$(BINDIR)/$(COMPANION_NAME)"
+	@echo "Install complete."
+
+# Uninstall the optional companion binary.
+uninstall-companion:
+	@echo "--- Uninstalling $(COMPANION_NAME) ---"
+	@if [ -f "$(DESTDIR)$(BINDIR)/$(COMPANION_NAME)" ]; then \
+		rm -f "$(DESTDIR)$(BINDIR)/$(COMPANION_NAME)"; \
+		echo "Removed $(DESTDIR)$(BINDIR)/$(COMPANION_NAME)"; \
+	else \
+		echo "No installed binary found at $(DESTDIR)$(BINDIR)/$(COMPANION_NAME)"; \
+	fi
+	@echo "Uninstall complete."
+
 # Target to clean generated files and directories
 clean:
 	@echo "--- Cleaning up built files and directories ---"
@@ -65,4 +111,4 @@ clean:
 	@echo "Cleanup complete."
 
 # --- Phony Markers ---
-.PHONY: all setup build run dev clean build-companion run-companion dev-companion
+.PHONY: all setup build install uninstall run dev clean build-companion run-companion dev-companion install-companion uninstall-companion
