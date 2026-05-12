@@ -1,7 +1,10 @@
 package companion
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,34 +23,94 @@ type TTSConfig struct {
 	SampleRate int
 }
 
+// DefaultTTSConfig resolves binary and model paths from, in order:
+//
+//  1. env vars OLLAMA_COMPANION_PIPER_{BIN,MODEL}
+//  2. ~/.cache/piper/piper                  (binary)
+//  3. ~/.local/bin/piper                    (binary)
+//  4. /opt/piper-tts/piper                  (binary, AUR piper-tts-bin)
+//  5. PATH lookup for piper-tts or piper    (binary)
+//  6. first *.onnx in ~/.cache/piper/       (model)
+//
+// SampleRate defaults to 22050; if the picked voice has an adjacent
+// <voice>.onnx.json with a different sample_rate, we honor it.
 func DefaultTTSConfig() TTSConfig {
+	home, _ := os.UserHomeDir()
+	pcache := filepath.Join(home, ".cache", "piper")
+
 	bin := os.Getenv("OLLAMA_COMPANION_PIPER_BIN")
 	if bin == "" {
-		bin = "piper"
+		candidates := []string{
+			filepath.Join(pcache, "piper"),
+			filepath.Join(home, ".local", "bin", "piper"),
+			"/opt/piper-tts/piper",
+		}
+		for _, p := range candidates {
+			if isExecutable(p) {
+				bin = p
+				break
+			}
+		}
 	}
+	if bin == "" {
+		if p, err := exec.LookPath("piper-tts"); err == nil {
+			bin = p
+		} else if p, err := exec.LookPath("piper"); err == nil {
+			bin = p
+		} else {
+			bin = "piper-tts"
+		}
+	}
+
 	model := os.Getenv("OLLAMA_COMPANION_PIPER_MODEL")
 	if model == "" {
-		home, _ := os.UserHomeDir()
-		model = filepath.Join(home, ".cache", "piper", "en_US-lessac-medium.onnx")
+		if matches, _ := filepath.Glob(filepath.Join(pcache, "*.onnx")); len(matches) > 0 {
+			model = matches[0]
+		}
 	}
+
 	rate := 22050
+	if model != "" {
+		if r, ok := readPiperSampleRate(model + ".json"); ok {
+			rate = r
+		}
+	}
 	return TTSConfig{Bin: bin, Model: model, SampleRate: rate}
 }
 
+func readPiperSampleRate(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var cfg struct {
+		Audio struct {
+			SampleRate int `json:"sample_rate"`
+		} `json:"audio"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return 0, false
+	}
+	if cfg.Audio.SampleRate <= 0 {
+		return 0, false
+	}
+	return cfg.Audio.SampleRate, true
+}
+
 // TTS owns the piper/paplay subprocess pair for the currently-playing speak
-// request. Calling Speak while one is playing kills it and starts a new one,
-// so a fresh assistant reply doesn't have to wait for the previous to finish.
+// request. Calling Speak while one is playing kills it and starts a new one.
 type TTS struct {
 	cfg      TTSConfig
-	suppress *atomic.Bool // signals STT to ignore mic while TTS is talking
+	suppress *atomic.Bool  // STT ignores mic while TTS is talking
+	levels   chan<- float32 // RMS of TTS audio for the visualizer
 
 	mu      sync.Mutex
 	cancel  func()
 	playing bool
 }
 
-func NewTTS(cfg TTSConfig, suppress *atomic.Bool) *TTS {
-	return &TTS{cfg: cfg, suppress: suppress}
+func NewTTS(cfg TTSConfig, suppress *atomic.Bool, levels chan<- float32) *TTS {
+	return &TTS{cfg: cfg, suppress: suppress, levels: levels}
 }
 
 // Speak vocalizes text. If something is already playing, it is killed.
@@ -93,37 +156,67 @@ func (t *TTS) Speak(text string) {
 			rateArg,
 			"--format=s16le",
 			"--channels=1",
+			"--latency-msec=80", // default is ~1s; this drops first-audio delay
+			"--process-time-msec=20",
 		)
 
-		pr, pw := io.Pipe()
-		piper.Stdout = pw
-		paplay.Stdin = pr
+		piperOut, err := piper.StdoutPipe()
+		if err != nil {
+			return
+		}
+		paplayIn, err := paplay.StdinPipe()
+		if err != nil {
+			return
+		}
 
-		// Make stderr observable for diagnostics but don't propagate piper's
-		// noisy progress logs to our own stderr.
 		piper.Stderr = io.Discard
 		paplay.Stderr = io.Discard
 
-		killBoth := func() {
+		killAll := func() {
 			if piper.Process != nil {
 				_ = piper.Process.Kill()
 			}
 			if paplay.Process != nil {
 				_ = paplay.Process.Kill()
 			}
-			pw.Close()
-			pr.Close()
+			_ = paplayIn.Close()
 		}
-		localCancel = killBoth
+		localCancel = killAll
 
 		if err := paplay.Start(); err != nil {
 			return
 		}
-		if err := piper.Run(); err != nil {
-			killBoth()
+		if err := piper.Start(); err != nil {
+			killAll()
 			return
 		}
-		pw.Close()
+
+		// Pump piper -> paplay, tapping RMS every chunkSamples samples.
+		const chunkSamples = 2048 // ~93 ms at 22050 Hz
+		const chunkBytes = chunkSamples * 2
+		var leftover []byte
+		buf := make([]byte, chunkBytes)
+		for {
+			n, rerr := piperOut.Read(buf)
+			if n > 0 {
+				if _, werr := paplayIn.Write(buf[:n]); werr != nil {
+					break
+				}
+				leftover = append(leftover, buf[:n]...)
+				for len(leftover) >= chunkBytes {
+					emitLevel(leftover[:chunkBytes], t.levels)
+					leftover = leftover[chunkBytes:]
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
+		if len(leftover) >= 2 {
+			emitLevel(leftover, t.levels)
+		}
+		_ = paplayIn.Close()
+		_ = piper.Wait()
 		_ = paplay.Wait()
 
 		t.mu.Lock()
@@ -140,6 +233,35 @@ func (t *TTS) Stop() {
 	t.mu.Unlock()
 	if c != nil {
 		c()
+	}
+}
+
+// emitLevel computes RMS over a raw 16-bit LE PCM chunk and forwards it to
+// the visualizer channel, non-blocking.
+func emitLevel(b []byte, out chan<- float32) {
+	if out == nil {
+		return
+	}
+	n := len(b) / 2
+	if n == 0 {
+		return
+	}
+	var sum float64
+	for i := 0; i < n; i++ {
+		s := int16(binary.LittleEndian.Uint16(b[i*2:]))
+		v := float64(s) / 32768.0
+		sum += v * v
+	}
+	rms := math.Sqrt(sum / float64(n))
+	// Piper is well-leveled (no quiet background), so a tighter gain than
+	// the mic path keeps the visualization in a similar range.
+	level := float32(rms * 2.5)
+	if level > 1 {
+		level = 1
+	}
+	select {
+	case out <- level:
+	default:
 	}
 }
 

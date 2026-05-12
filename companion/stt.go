@@ -15,7 +15,7 @@ import (
 const (
 	sttSpeechThreshold  = 0.06 // RMS above -> speech
 	sttSilenceThreshold = 0.04 // RMS below -> silence
-	sttSilenceFrames    = 16   // ~1.0 s of silence to close an utterance
+	sttSilenceFrames    = 11   // ~0.7 s of silence to close an utterance (snappier turn-taking)
 	sttMinSpeechFrames  = 5    // ~320 ms minimum (rejects clicks)
 	sttMaxSpeechFrames  = 220  // ~14 s safety cap
 	sttPrerollFrames    = 3    // ~192 ms of audio kept before speech onset
@@ -27,20 +27,53 @@ type STTConfig struct {
 	Model string // path to ggml-*.bin
 }
 
-// DefaultSTTConfig pulls binary/model paths from env vars with sensible fallbacks.
-// If the model file isn't readable, transcripts will fail at runtime and we
-// emit MsgError instead of hanging.
+// DefaultSTTConfig resolves binary and model paths from, in order:
+//
+//  1. env vars OLLAMA_COMPANION_WHISPER_{BIN,MODEL}
+//  2. ~/.cache/whisper/{whisper-cli,main}     (binary)
+//  3. PATH lookup for whisper-cli or main     (binary)
+//  4. first ggml-*.bin in ~/.cache/whisper/   (model)
+//  5. ~/.cache/whisper/ggml-base.en.bin       (model fallback)
+//
+// If neither binary nor model can be located, transcription requests will
+// fail at runtime and the companion emits MsgError to the parent CLI.
 func DefaultSTTConfig() STTConfig {
+	home, _ := os.UserHomeDir()
+	cache := filepath.Join(home, ".cache", "whisper")
+
 	bin := os.Getenv("OLLAMA_COMPANION_WHISPER_BIN")
 	if bin == "" {
-		bin = "whisper-cli"
+		for _, name := range []string{"whisper-cli", "main"} {
+			p := filepath.Join(cache, name)
+			if isExecutable(p) {
+				bin = p
+				break
+			}
+		}
 	}
+	if bin == "" {
+		bin = "whisper-cli" // fall back to PATH lookup at exec time
+	}
+
 	model := os.Getenv("OLLAMA_COMPANION_WHISPER_MODEL")
 	if model == "" {
-		home, _ := os.UserHomeDir()
-		model = filepath.Join(home, ".cache", "whisper", "ggml-base.en.bin")
+		if matches, _ := filepath.Glob(filepath.Join(cache, "ggml-*.bin")); len(matches) > 0 {
+			model = matches[0]
+		}
 	}
+	if model == "" {
+		model = filepath.Join(cache, "ggml-base.en.bin")
+	}
+
 	return STTConfig{Bin: bin, Model: model}
+}
+
+func isExecutable(p string) bool {
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0o111 != 0
 }
 
 // RunSTT consumes audio frames, runs voice activity detection, and on each
@@ -49,7 +82,9 @@ func DefaultSTTConfig() STTConfig {
 //
 // suppress is checked at each frame; while it is non-zero (TTS is playing)
 // VAD is reset so the speaker output isn't picked up as user speech.
-func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress *atomic.Bool, cfg STTConfig) {
+// listening, if non-nil, mirrors the VAD's "buffering an utterance" state so
+// the UI can show a live indicator.
+func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress, listening *atomic.Bool, cfg STTConfig) {
 	var (
 		preroll      [][]int16 // ring buffer of pre-speech samples
 		prerollHead  int
@@ -59,10 +94,18 @@ func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress *atomic.Bool,
 		inSpeech     bool
 	)
 	preroll = make([][]int16, sttPrerollFrames)
+	setListening := func(v bool) {
+		if listening != nil {
+			listening.Store(v)
+		}
+	}
 
 	for f := range frames {
 		if suppress != nil && suppress.Load() {
 			// TTS is talking; keep capture going but never emit transcripts.
+			if inSpeech {
+				setListening(false)
+			}
 			inSpeech = false
 			buf = buf[:0]
 			silenceCount = 0
@@ -77,6 +120,7 @@ func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress *atomic.Bool,
 
 			if f.Level >= sttSpeechThreshold {
 				inSpeech = true
+				setListening(true)
 				buf = buf[:0]
 				for i := 0; i < sttPrerollFrames; i++ {
 					idx := (prerollHead + i) % sttPrerollFrames
@@ -104,11 +148,13 @@ func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress *atomic.Bool,
 				go transcribeAsync(append([]int16(nil), buf...), cfg, out)
 			}
 			inSpeech = false
+			setListening(false)
 			buf = buf[:0]
 			silenceCount = 0
 			speechFrames = 0
 		}
 	}
+	setListening(false)
 }
 
 func transcribeAsync(samples []int16, cfg STTConfig, out chan<- Message) {

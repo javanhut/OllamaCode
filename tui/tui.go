@@ -1133,6 +1133,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.input.InsertString(text)
 				m.input.Focus()
+
+				// Auto-submit: when the user stops talking, send the message.
+				val := strings.TrimSpace(m.input.Value())
+				if val != "" {
+					if m.streaming {
+						m.queue = append(m.queue, val)
+						m.input.Reset()
+						m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
+					} else if m.modelName == "" {
+						m.input.Reset()
+						m.lastError = "no model selected — run /model"
+						m.refreshTranscript()
+						m.viewport.GotoBottom()
+					} else if cmd := m.submit(); cmd != nil {
+						return m, cmd
+					}
+				}
 			}
 		}
 

@@ -12,14 +12,12 @@
 //
 // IPC: when launched as a child of ollama-code, the companion uses line-delimited
 // JSON on its stdin (speak/stop/shutdown) and stdout (ready/transcript/error).
-// Run standalone (interactive shell), stdin is a terminal and the bridge is
-// effectively idle — STT still emits to stdout, which the user just sees as
-// printed JSON.
 package companion
 
 import (
 	"bufio"
 	"encoding/json"
+	"image"
 	"log"
 	"os"
 	"sync/atomic"
@@ -38,18 +36,33 @@ import (
 // Run opens the companion window and blocks until it is closed.
 // Must be called from main(); it drives the OS event loop via app.Main().
 func Run() error {
-	audioCh, stopAudio := StartAudioCapture()
+	InitLog()
+	defer CloseLog()
+	Logf("companion Run() starting")
 
-	// Fan-out: capture -> (render levels, STT samples)
-	levelCh := make(chan float32, 32)
+	state := &UIState{}
+
+	audioCh, stopAudio := StartAudioCapture()
+	if audioCh == nil {
+		Logf("audio: capture NOT available; circle will be static and STT disabled")
+	}
+
+	// Merged level channel: mic capture and TTS playback both push here so
+	// the visualizer reacts to either the user speaking or Layla speaking.
+	rawLevelCh := make(chan float32, 64)
+	levelCh := LevelMonitor(rawLevelCh, "merged")
 	sttCh := make(chan AudioFrame, 32)
 	if audioCh != nil {
 		go func() {
-			defer close(levelCh)
 			defer close(sttCh)
 			for f := range audioCh {
+				if state.Muted.Load() {
+					// Drop mic-derived frames entirely while muted; visualizer
+					// still receives TTS levels via the same channel.
+					continue
+				}
 				select {
-				case levelCh <- f.Level:
+				case rawLevelCh <- f.Level:
 				default:
 				}
 				select {
@@ -57,30 +70,22 @@ func Run() error {
 				default:
 				}
 			}
+			close(rawLevelCh)
 		}()
 	} else {
-		close(levelCh)
 		close(sttCh)
+		close(rawLevelCh)
 	}
 
-	// Outbound messages to the parent CLI on stdout.
 	outMsgs := make(chan Message, 16)
 
-	// suppress flag: TTS sets it while speaking so STT ignores the speaker echo.
 	var suppress atomic.Bool
+	tts := NewTTS(DefaultTTSConfig(), &suppress, rawLevelCh)
 
-	tts := NewTTS(DefaultTTSConfig(), &suppress)
-
-	// STT pipeline.
-	go RunSTT(sttCh, outMsgs, &suppress, DefaultSTTConfig())
-
-	// Stdin reader: parent CLI -> companion (speak / stop / shutdown).
-	go readStdin(tts)
-
-	// Stdout writer: companion -> parent CLI.
+	go RunSTT(sttCh, outMsgs, &suppress, &state.Listening, DefaultSTTConfig())
+	go readStdin(tts, state)
 	go writeStdout(outMsgs)
 
-	// Announce readiness once everything is wired.
 	select {
 	case outMsgs <- Message{Type: MsgReady}:
 	default:
@@ -96,7 +101,7 @@ func Run() error {
 			app.MaxSize(unit.Dp(220), unit.Dp(220)),
 			app.Decorated(false),
 		)
-		if err := loop(w, levelCh); err != nil {
+		if err := loop(w, levelCh, state); err != nil {
 			log.Fatal(err)
 		}
 		os.Exit(0)
@@ -107,7 +112,7 @@ func Run() error {
 }
 
 // readStdin parses one JSON message per line and dispatches.
-func readStdin(tts *TTS) {
+func readStdin(tts *TTS, state *UIState) {
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -131,7 +136,6 @@ func readStdin(tts *TTS) {
 	}
 }
 
-// writeStdout emits one JSON message per line.
 func writeStdout(in <-chan Message) {
 	enc := json.NewEncoder(os.Stdout)
 	for msg := range in {
@@ -142,10 +146,11 @@ func writeStdout(in <-chan Message) {
 // dragTag identifies pointer-event subscriptions; only its address matters.
 var dragTag = new(bool)
 
-func loop(w *app.Window, levels <-chan float32) error {
+func loop(w *app.Window, levels <-chan float32, state *UIState) error {
 	var ops op.Ops
 	start := time.Now()
 	var smoothed float32
+	var lastBtnRect image.Rectangle
 
 	for {
 		switch e := w.Event().(type) {
@@ -155,7 +160,6 @@ func loop(w *app.Window, levels <-chan float32) error {
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 
-			// Drain available levels; keep the latest values.
 			if levels != nil {
 			drain:
 				for {
@@ -178,7 +182,9 @@ func loop(w *app.Window, levels <-chan float32) error {
 
 			paint.Fill(gtx.Ops, Background)
 
-			// Whole-window drag handle.
+			// Single pointer area covers the whole window. On press, we
+			// decide: hit-inside-button -> toggle mute; hit-outside-button
+			// -> hand the drag off to the compositor.
 			area := clip.Rect{Max: e.Size}.Push(gtx.Ops)
 			event.Op(gtx.Ops, dragTag)
 			for {
@@ -189,12 +195,22 @@ func loop(w *app.Window, levels <-chan float32) error {
 				if !ok {
 					break
 				}
-				if pe, ok := ev.(pointer.Event); ok && pe.Kind == pointer.Press {
+				pe, isPtr := ev.(pointer.Event)
+				if !isPtr || pe.Kind != pointer.Press {
+					continue
+				}
+				px := int(pe.Position.X)
+				py := int(pe.Position.Y)
+				if !lastBtnRect.Empty() && image.Pt(px, py).In(lastBtnRect) {
+					was := state.Muted.Load()
+					state.Muted.Store(!was)
+					Logf("mute toggled -> %v", !was)
+				} else {
 					w.Perform(system.ActionMove)
 				}
 			}
 
-			DrawCircle(gtx, time.Since(start), smoothed)
+			lastBtnRect = Render(gtx, time.Since(start), state, smoothed)
 
 			area.Pop()
 			e.Frame(gtx.Ops)

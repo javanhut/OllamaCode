@@ -132,13 +132,62 @@ func (c *Client) Speak(text string) error {
 	return c.send(message{Type: "speak", Text: cleaned})
 }
 
-var fencedBlockRE = regexp.MustCompile("(?s)```.*?```")
+var (
+	fencedBlockRE  = regexp.MustCompile("(?s)```.*?```")
+	inlineCodeRE   = regexp.MustCompile("`([^`\n]+)`")
+	imageRE        = regexp.MustCompile(`!\[[^\]]*\]\([^)]+\)`)
+	linkRE         = regexp.MustCompile(`\[([^\]]+)\]\([^)]+\)`)
+	autolinkRE     = regexp.MustCompile(`<https?://[^>]+>`)
+	asteriskWrapRE = regexp.MustCompile(`\*+([^*\n]+?)\*+`)
+	strikeRE       = regexp.MustCompile(`~~([^~\n]+)~~`)
+	headingRE      = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+	blockquoteRE   = regexp.MustCompile(`(?m)^\s{0,3}>\s*`)
+	listBulletRE   = regexp.MustCompile(`(?m)^\s{0,3}[-*+]\s+`)
+	listNumberRE   = regexp.MustCompile(`(?m)^\s{0,3}\d+\.\s+`)
+	hrRE           = regexp.MustCompile(`(?m)^\s{0,3}(?:-\s*){3,}$|^\s{0,3}(?:\*\s*){3,}$|^\s{0,3}(?:_\s*){3,}$`)
+	tablePipeRE    = regexp.MustCompile(`\|`)
+	extraSpaceRE   = regexp.MustCompile(`[ \t]{2,}`)
+	extraBlankRE   = regexp.MustCompile(`\n{3,}`)
+)
 
-// SanitizeForSpeech strips parts of the assistant's reply that read poorly
-// when vocalized — currently fenced code blocks and inline backticks.
+// SanitizeForSpeech strips markdown noise that reads poorly when vocalized
+// — fenced code blocks, inline code, links/images, bold/italic asterisks,
+// headings, list markers, blockquotes, strikethroughs, table pipes, and
+// horizontal rules. Underscores are left alone (commonly appear in
+// identifiers, file paths, URLs in prose).
 func SanitizeForSpeech(s string) string {
+	// Block-level structure first.
 	s = fencedBlockRE.ReplaceAllString(s, " (code block omitted) ")
+	s = imageRE.ReplaceAllString(s, "")
+	s = linkRE.ReplaceAllString(s, "$1")
+	s = autolinkRE.ReplaceAllStringFunc(s, func(m string) string {
+		// <https://...> -> drop entirely; URLs don't read well
+		return ""
+	})
+
+	// Line-anchored markers.
+	s = headingRE.ReplaceAllString(s, "")
+	s = blockquoteRE.ReplaceAllString(s, "")
+	s = listBulletRE.ReplaceAllString(s, "")
+	s = listNumberRE.ReplaceAllString(s, "")
+	s = hrRE.ReplaceAllString(s, "")
+
+	// Inline emphasis.
+	s = inlineCodeRE.ReplaceAllString(s, "$1")
+	s = asteriskWrapRE.ReplaceAllString(s, "$1")
+	s = strikeRE.ReplaceAllString(s, "$1")
+
+	// Tables: drop pipes; surrounding whitespace gets collapsed below.
+	s = tablePipeRE.ReplaceAllString(s, " ")
+
+	// Catch-all for any orphan asterisks left behind by mismatched markdown.
+	s = strings.ReplaceAll(s, "*", "")
 	s = strings.ReplaceAll(s, "`", "")
+
+	// Whitespace cleanup so piper doesn't insert weird pauses.
+	s = extraSpaceRE.ReplaceAllString(s, " ")
+	s = extraBlankRE.ReplaceAllString(s, "\n\n")
+
 	return strings.TrimSpace(s)
 }
 
@@ -185,10 +234,40 @@ func resolveBinary() (string, error) {
 		return "", fmt.Errorf("OLLAMA_COMPANION_BIN points at %q which doesn't exist", env)
 	}
 
+	var tried []string
+
+	// Sibling of the running ollama-code binary. With `go run` /
+	// `make dev`, os.Executable() returns the temp build path so this
+	// will usually miss — fine, we keep looking.
 	if exe, err := os.Executable(); err == nil {
 		guess := filepath.Join(filepath.Dir(exe), BinaryName)
 		if _, err := os.Stat(guess); err == nil {
 			return guess, nil
+		}
+		tried = append(tried, guess)
+	}
+
+	// Current working directory — common when you ran `make build-companion`
+	// in the repo and launch `./ollama-code` from the same place.
+	if cwd, err := os.Getwd(); err == nil {
+		guess := filepath.Join(cwd, BinaryName)
+		if _, err := os.Stat(guess); err == nil {
+			return guess, nil
+		}
+		tried = append(tried, guess)
+	}
+
+	// The repo root, even if you launched from a subdirectory.
+	if cwd, err := os.Getwd(); err == nil {
+		for dir := cwd; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				guess := filepath.Join(dir, BinaryName)
+				if _, err := os.Stat(guess); err == nil {
+					return guess, nil
+				}
+				tried = append(tried, guess)
+				break
+			}
 		}
 	}
 
@@ -196,5 +275,6 @@ func resolveBinary() (string, error) {
 		return p, nil
 	}
 
-	return "", fmt.Errorf("%s not found (build it with `make build-companion`)", BinaryName)
+	return "", fmt.Errorf("%s not found (looked in: %s) — set $OLLAMA_COMPANION_BIN or run `make build-companion`",
+		BinaryName, strings.Join(tried, ", "))
 }

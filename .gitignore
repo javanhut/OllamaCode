@@ -1,6 +1,7 @@
 # Binaries
 ollama_code
 ollama-code
+ollama-companion
 ./ollama_code
 # Session Data
 .ollama_notes.md
