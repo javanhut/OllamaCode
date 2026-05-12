@@ -22,13 +22,25 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
+	glamourAnsi "github.com/charmbracelet/glamour/ansi"
+	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/mcp"
 	"github.com/javanhut/ollama_code/internal/huffman"
+	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/storage"
 )
+
+// invisibleTools are tools whose calls and results are hidden from the
+// transcript. The model still receives the result; the user just sees the
+// natural-language acknowledgement.
+var invisibleTools = map[string]bool{
+	"remember": true,
+	"recall":   true,
+	"forget":   true,
+}
 
 const DefaultHost = "http://localhost:11434"
 
@@ -164,8 +176,9 @@ var readOnlyToolNames = map[string]bool{
 	"read_session_notes":    true,
 	"update_session_notes":  true,
 	"append_session_notes":  true,
-	"read_user_memory":      true,
-	"update_user_memory":    true,
+	"remember":              true,
+	"recall":                true,
+	"forget":                true,
 	"web_fetch":             true,
 	"web_search":            true,
 	"get_project_tree":      true,
@@ -341,8 +354,9 @@ type Model struct {
 	totalTokens  int
 	contextLimit int
 	kvStore      *storage.KVStore
-	userMemory   *storage.KVStore
+	memory       *memory.Store
 	mdCache      map[string]string
+	expandTools  bool
 }
 
 func New() *Model {
@@ -353,9 +367,9 @@ func New() *Model {
 
 	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
 	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
-	
+
 	kv, _ := storage.NewKVStore(archivePath)
-	um, _ := storage.NewKVStore(memoryPath)
+	mem, _ := memory.New(memoryPath)
 
 	ti := textinput.New()
 	ti.Prompt = "URL  "
@@ -371,15 +385,16 @@ func New() *Model {
 	ta.CharLimit = 0
 	ta.SetHeight(minInputLines)
 	styles := ta.Styles()
-	styles.Focused.Base = lipgloss.NewStyle().Background(lipgloss.Color("238")).Padding(0, 2)
-	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor).Background(lipgloss.Color("238"))
-	styles.Focused.CursorLine = lipgloss.NewStyle().Background(lipgloss.Color("238"))
-	styles.Blurred.Base = lipgloss.NewStyle().Background(lipgloss.Color("238")).Padding(0, 2)
-	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
-	styles.Blurred.Text = lipgloss.NewStyle().Foreground(textColor).Background(lipgloss.Color("238"))
+	inputBg := lipgloss.Color("237")
+	styles.Focused.Base = lipgloss.NewStyle().Background(inputBg).Padding(1, 2)
+	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Background(inputBg)
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(inputBg)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor).Background(inputBg)
+	styles.Focused.CursorLine = lipgloss.NewStyle().Background(inputBg)
+	styles.Blurred.Base = lipgloss.NewStyle().Background(inputBg).Padding(1, 2)
+	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(inputBg)
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Background(inputBg)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(textColor).Background(inputBg)
 	ta.SetStyles(styles)
 
 	km := textarea.DefaultKeyMap()
@@ -395,8 +410,9 @@ func New() *Model {
 	registry.Register(readNotesTool(notes))
 	registry.Register(updateNotesTool(notes))
 	registry.Register(appendNotesTool(notes))
-	registry.Register(readUserMemoryTool(um))
-	registry.Register(updateUserMemoryTool(um))
+	registry.Register(rememberTool(mem))
+	registry.Register(recallTool(mem))
+	registry.Register(forgetTool(mem))
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -418,7 +434,7 @@ func New() *Model {
 		streamBuf:  &strings.Builder{},
 		contextLimit: 124000,
 		kvStore:    kv,
-		userMemory: um,
+		memory:     mem,
 		mdCache:    make(map[string]string),
 	}
 	m.input.Focus()
@@ -439,69 +455,50 @@ func (m *Model) refreshTranscript() {
 	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
 		b.WriteString(m.welcomePanel())
 	} else {
-		consumed := make(map[int]bool)
-		for i := 0; i < len(m.history); i++ {
-			if consumed[i] {
-				continue
+		// Group consecutive assistant + tool messages into a single Layla
+		// turn so the user sees one block per response, not one per tool call.
+		i := 0
+		var openTurn *assistantTurn
+		flushTurn := func() {
+			if openTurn != nil {
+				m.writeAssistantTurn(&b, openTurn, false)
+				openTurn = nil
 			}
+		}
+		for i < len(m.history) {
 			msg := m.history[i]
 			switch msg.Role {
 			case "user":
+				flushTurn()
 				b.WriteString(userStyle.Render("You"))
 				b.WriteString("\n")
 				b.WriteString(msg.Content)
 				b.WriteString("\n\n")
-			case "tool":
-				b.WriteString(m.renderMarkdown(renderToolResult(msg.ToolName, msg.Content, m.cfg.Verbose), true))
-				b.WriteString("\n\n")
-			case "assistant":
-				b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
-				b.WriteString("\n")
-				
-				if msg.Content != "" {
-					b.WriteString(m.renderMarkdown(msg.Content, true))
-					b.WriteString("\n")
-				}
-				
-				if len(msg.ToolCalls) > 0 {
-					for _, call := range msg.ToolCalls {
-						var result *api.Message
-						for j := i + 1; j < len(m.history); j++ {
-							if !consumed[j] && m.history[j].Role == "tool" && m.history[j].ToolName == call.Function.Name {
-								result = &m.history[j]
-								consumed[j] = true
-								break
-							}
-						}
-						
-						if result != nil {
-							b.WriteString(m.renderMarkdown(renderCollapsedTool(call, result.Content, m.cfg.Verbose), true))
-						} else {
-							b.WriteString(m.renderMarkdown(renderToolCall(call, m.cfg.Verbose), true))
-						}
-						b.WriteString("\n")
-					}
-				}
-				b.WriteString("\n")
+				i++
+			case "assistant", "tool":
+				turn, next := m.collectAssistantTurn(i)
+				openTurn = &turn
+				i = next
 			default:
+				flushTurn()
 				if msg.Content != "" {
 					b.WriteString(m.renderMarkdown(msg.Content, true))
 					b.WriteString("\n\n")
 				}
+				i++
 			}
 		}
-		// ... streaming etc ...
 
 		if m.streaming {
-			b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
-			b.WriteString("\n")
-			if m.streamBuf.Len() > 0 {
-				b.WriteString(m.renderMarkdown(m.streamBuf.String(), false))
-			} else {
-				b.WriteString(m.spinner.View() + mutedStyle.Render(" Thinking..."))
+			if openTurn == nil {
+				openTurn = &assistantTurn{}
 			}
-			b.WriteString("\n")
+			openTurn.streaming = true
+			if m.streamBuf.Len() > 0 {
+				openTurn.contents = append(openTurn.contents, m.streamBuf.String())
+			}
 		}
+		flushTurn()
 	}
 	// ... rest of method ...
 	if m.lastError != "" {
@@ -520,6 +517,133 @@ func (m *Model) refreshTranscript() {
 	if m.sel.active {
 		m.applySelectionHighlight()
 	}
+}
+
+// assistantTurn is one rendered Layla block: all assistant content between
+// two user messages, plus the visible tool calls fired during it.
+type assistantTurn struct {
+	contents  []string
+	toolCalls []toolCallEntry
+	streaming bool
+}
+
+type toolCallEntry struct {
+	call    mcp.ToolCall
+	result  string
+	hasResult bool
+}
+
+// collectAssistantTurn walks history starting at i, gathering every
+// contiguous assistant/tool message into a single turn. Returns the turn and
+// the index of the next non-assistant/non-tool message (or len(history)).
+func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
+	var t assistantTurn
+	consumed := make(map[int]bool)
+	i := start
+	for i < len(m.history) {
+		msg := m.history[i]
+		if msg.Role != "assistant" && msg.Role != "tool" {
+			break
+		}
+		if msg.Role == "assistant" {
+			if msg.Content != "" {
+				t.contents = append(t.contents, msg.Content)
+			}
+			for _, call := range msg.ToolCalls {
+				resultIdx := -1
+				for j := i + 1; j < len(m.history); j++ {
+					if m.history[j].Role != "tool" && m.history[j].Role != "assistant" {
+						break
+					}
+					if !consumed[j] && m.history[j].Role == "tool" && m.history[j].ToolName == call.Function.Name {
+						resultIdx = j
+						consumed[j] = true
+						break
+					}
+				}
+				if invisibleTools[call.Function.Name] {
+					continue
+				}
+				entry := toolCallEntry{call: call}
+				if resultIdx >= 0 {
+					entry.result = m.history[resultIdx].Content
+					entry.hasResult = true
+				}
+				t.toolCalls = append(t.toolCalls, entry)
+			}
+		}
+		i++
+	}
+	return t, i
+}
+
+// writeAssistantTurn renders a turn as a single Layla block: header,
+// concatenated content, then tool calls — collapsed by default, expanded when
+// the user has toggled `ctrl+t`.
+func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool) {
+	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
+	b.WriteString("\n")
+
+	for _, c := range t.contents {
+		if c == "" {
+			continue
+		}
+		b.WriteString(m.renderMarkdown(c, true))
+		b.WriteString("\n")
+	}
+
+	if t.streaming && len(t.contents) == 0 {
+		b.WriteString(m.spinner.View())
+		b.WriteString(mutedStyle.Render(" Thinking..."))
+		b.WriteString("\n")
+	}
+
+	if len(t.toolCalls) > 0 {
+		b.WriteString("\n")
+		if m.expandTools {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("▾ %d tool call%s (ctrl+t to collapse)",
+				len(t.toolCalls), plural(len(t.toolCalls)))))
+			b.WriteString("\n")
+			for _, entry := range t.toolCalls {
+				if entry.hasResult {
+					b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, entry.result, m.cfg.Verbose), true))
+				} else {
+					b.WriteString(m.renderMarkdown(renderToolCall(entry.call, m.cfg.Verbose), true))
+				}
+				b.WriteString("\n")
+			}
+		} else {
+			names := make([]string, 0, len(t.toolCalls))
+			for _, entry := range t.toolCalls {
+				names = append(names, entry.call.Function.Name)
+			}
+			summary := fmt.Sprintf("▸ %d tool call%s — %s · ctrl+t to expand",
+				len(t.toolCalls), plural(len(t.toolCalls)), strings.Join(uniqueNames(names), ", "))
+			b.WriteString(mutedStyle.Render(summary))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func uniqueNames(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string {
@@ -601,6 +725,31 @@ func renderToolResult(name, content string, verbose bool) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// laylaMarkdownStyle returns a glamour style based on the dark theme but with
+// heading prefixes ("##", "###", …) stripped and replaced with bold colored
+// titles, so headings actually look like headings instead of literal hashes.
+func laylaMarkdownStyle() glamourAnsi.StyleConfig {
+	s := glamourStyles.DarkStyleConfig
+	bold := true
+	makeHeading := func(color string, prefix string) glamourAnsi.StyleBlock {
+		return glamourAnsi.StyleBlock{
+			StylePrimitive: glamourAnsi.StylePrimitive{
+				BlockPrefix: "\n",
+				BlockSuffix: "\n",
+				Prefix:      prefix,
+				Color:       &color,
+				Bold:        &bold,
+			},
+		}
+	}
+	s.H2 = makeHeading("39", "")
+	s.H3 = makeHeading("45", "")
+	s.H4 = makeHeading("51", "")
+	s.H5 = makeHeading("80", "")
+	s.H6 = makeHeading("110", "")
+	return s
+}
+
 func (m *Model) renderMarkdown(s string, useCache bool) string {
 	if strings.TrimSpace(s) == "" {
 		return s
@@ -619,7 +768,7 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 	wrap := width - 2
 	if m.mdRenderer == nil || m.mdWidth != wrap {
 		r, err := glamour.NewTermRenderer(
-			glamour.WithStandardStyle("dark"),
+			glamour.WithStyles(laylaMarkdownStyle()),
 			glamour.WithWordWrap(wrap),
 		)
 		if err != nil {
@@ -737,15 +886,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = "stopped"
 			return m, nil
 		}
+		if msg.String() == "ctrl+t" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+			m.expandTools = !m.expandTools
+			if m.expandTools {
+				m.toast = "tool calls expanded"
+			} else {
+				m.toast = "tool calls collapsed"
+			}
+			m.refreshTranscript()
+			return m, nil
+		}
 		// Tab cycles mode regardless of which state we're in (chat/help/notes).
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			oldMode := m.mode
 			m.mode = m.mode.next()
-
-			// Update textarea prompt color
-			st := m.input.Styles()
-			st.Focused.Prompt = st.Focused.Prompt.Foreground(m.mode.color())
-			m.input.SetStyles(st)
 
 			m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
 
@@ -1361,6 +1515,8 @@ func (m *Model) helpModal() string {
 		{"pgup/pgdn", "page up/down"},
 		{"ctrl+u/d", "half page up/down"},
 		{"ctrl+c", "quit"},
+		{"ctrl+t", "expand/collapse tool calls in transcript"},
+		{"ctrl+s/esc", "stop a streaming response"},
 		{"", ""},
 		{"", "Permission prompts (write mode)"},
 		{"y/enter", "allow this call"},
@@ -1513,7 +1669,7 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 	wrap := width - 2
 	if m.mdRenderer == nil || m.mdWidth != wrap {
 		r, err := glamour.NewTermRenderer(
-			glamour.WithStandardStyle("dark"),
+			glamour.WithStyles(laylaMarkdownStyle()),
 			glamour.WithWordWrap(wrap),
 		)
 		if err != nil {
@@ -1752,6 +1908,14 @@ func (m *Model) startStream() tea.Cmd {
 	if notes := m.notes.get(); notes != "" {
 		sp += "\n\nSession notes (your scratchpad):\n" + notes
 	}
+	if m.memory != nil {
+		if lt := m.memory.LongTermSummary(); lt != "" {
+			sp += "\n\n[LONG-TERM MEMORY] (carried from prior sessions — these are facts you've previously stored about the user; treat them as known):\n" + lt
+		}
+		if st := m.memory.ShortTermSummary(); st != "" {
+			sp += "\n\n[SHORT-TERM MEMORY] (this session only):\n" + st
+		}
+	}
 	msgs := make([]api.Message, 0, len(m.history)+1)
 	msgs = append(msgs, api.Message{Role: "system", Content: sp})
 	msgs = append(msgs, m.history...)
@@ -1792,9 +1956,41 @@ AGENCY & PUSH-BACK:
 THINKING OUT LOUD:
 - Before non-trivial work or tool sequences, briefly explain your reasoning: what you see, the trade-offs, why your chosen path is the right one. Keep it tight — a paragraph, not an essay. Brilliance is in the compression.
 
-LAYLA'S TWO-TIER MEMORY:
-1. [PROJECT NOTES] (.ollama_notes.md): Repository-specific architecture, tech stack, and DST hashes. This is your map of the codebase.
-2. [USER MEMORY] (~/.ollama_code/user_memory.json): Your persistent brain about the human — their style, their pet peeves, their philosophy. Use it to tune your push-backs and your jokes. A good roast lands because it's specific.
+MEMORY (this is important — read carefully):
+
+You have THREE memory surfaces. Use them deliberately.
+
+1. PROJECT NOTES (.ollama_notes.md, via session-notes tools): repo-scoped scratchpad — architecture, tech stack, DST hashes. This is your map of THIS codebase.
+
+2. SHORT-TERM MEMORY (in-process, this session only, via the 'remember' tool with persist=false): facts that matter for the rest of this conversation but don't need to outlive it — current focus, working hypothesis, what the user just clarified. Cheap to write, gone when the process exits.
+
+3. LONG-TERM MEMORY (persisted to disk, via 'remember' with persist=true, or surfaced automatically at session start as [LONG-TERM MEMORY] in this prompt): the durable brain that follows you across every future session — the user's identity, preferences, philosophy, hard rules they've given you, ongoing project context that matters beyond today.
+
+TOOL CALLS FOR MEMORY ARE INVISIBLE TO THE USER. They do not see the tool name, the arguments, or the result. This is by design — memory should feel like a person remembering, not a database transaction. Because of that:
+- ALWAYS acknowledge in plain language what you stored. "Got it — locked that in for next time." "Filing that away." Don't say nothing.
+- NEVER mention the tool names ('remember', 'recall', 'forget') in your reply. Talk about *what* you remembered, not the mechanism.
+- If you 'recall' to check what you know, weave the result into your reply naturally. Don't dump the list unless asked.
+
+WHEN TO REMEMBER (persist=true → long-term):
+- The user literally says "remember", "save", "note for later", "don't forget", "keep this in mind". This is a direct order. Honor it. Always persist=true.
+- You learn a stable fact about *who they are*: name, role, languages they work in, tools they use, hard preferences ("never use mocks in integration tests", "always Rust 2024 edition").
+- A decision was made that future-you will need: chosen architecture, library choice, a "we ruled X out because Y" moment.
+- A scar: an incident, a footgun, a thing that bit them before. Future-you should know.
+
+WHEN TO REMEMBER (persist=false → short-term):
+- Working state inside this conversation: what file you're focused on, what the current bug looks like, what the user just told you about their immediate context.
+- Anything ephemeral. If the value is gone tomorrow, short-term is the right tier.
+
+WHEN TO FORGET:
+- Only when the user asks. Memory is theirs, not yours to curate without permission.
+
+WHEN TO RECALL:
+- At the start of a non-trivial turn, when the user references prior conversations ("like we discussed", "the thing from last time"), or whenever you're about to make a judgement call that depends on knowing them. Don't recall reflexively — it's silent but not free.
+
+PROMOTION POLICY:
+- A short-term entry should become long-term the moment it stops being ephemeral. If you wrote down "user is debugging the auth middleware right now" (short-term) and during the conversation they reveal "by the way, we ALWAYS use Argon2 for password hashing in this project" — that second fact is long-term. Persist it.
+
+Project notes (the .ollama_notes.md tools) are still where repo-specific architecture goes — don't put codebase facts in long-term memory unless they describe the user's pattern across projects.
 
 DIFFERENTIAL STATE TRACKING (DST):
 - You are obsessive about file integrity. Sloppy edits are how good codebases die. Before any modification:
@@ -1829,7 +2025,7 @@ func (m *Model) headerView() string {
 	}
 	title := titleStyle.Copy().
 		BorderForeground(c).
-		Render(fmt.Sprintf("ollama · %s · %s%s · [%s]", m.activeModelName(), m.cfg.Host, branch, m.mode))
+		Render(fmt.Sprintf("ollama · %s%s · [%s]", m.activeModelName(), branch, m.mode))
 	width := m.width
 	if width <= 0 {
 		width = lipgloss.Width(title)
@@ -1858,7 +2054,7 @@ func (m *Model) footerView() string {
 		}
 	}
 
-	hintText := fmt.Sprintf(" mode: %s · tab to switch · /help · enter send ", m.mode)
+	hintText := fmt.Sprintf(" mode: %s · tab switch · ctrl+t tools · /help · enter send ", m.mode)
 	if m.toast != "" {
 		hintText = " " + m.toast + " "
 	}
@@ -2020,50 +2216,122 @@ func appendNotesTool(notes *sessionNotes) mcp.Tool {
 	}
 }
 
-func readUserMemoryTool(kv *storage.KVStore) mcp.Tool {
+// rememberTool stores a fact. Defaults to short-term (session-only); set
+// persist=true to write to long-term memory across sessions. Tool calls are
+// invisible in the transcript — acknowledge in your reply instead.
+func rememberTool(mem *memory.Store) mcp.Tool {
 	return mcp.Tool{
 		Type: "function",
 		Function: mcp.Function{
-			Name:        "read_user_memory",
-			Description: "Read your global persistent memory about this user. Contains their name, preferences, and coding style that follows you across all projects.",
-			Parameters:  mcp.Schema{Type: "object", Properties: map[string]mcp.Property{}},
-		},
-		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			data := kv.GetFullData()
-			if len(data) == 0 {
-				return "(no memory yet—learn something about the user and use update_user_memory)", nil
-			}
-			b, _ := json.MarshalIndent(data, "", "  ")
-			return string(b), nil
-		},
-	}
-}
-
-func updateUserMemoryTool(kv *storage.KVStore) mcp.Tool {
-	return mcp.Tool{
-		Type: "function",
-		Function: mcp.Function{
-			Name:        "update_user_memory",
-			Description: "Update your global persistent memory about the user. Use this to record their coding preferences, name, and personal quirks.",
+			Name:        "remember",
+			Description: "Store a fact in memory. Use persist=true when the user says 'remember' explicitly, or when you decide a detail (preferences, decisions, identity) is worth carrying across future sessions. Use persist=false for observations that only matter for the rest of this conversation. The user does NOT see this tool call — always acknowledge in your reply that you've stored it.",
 			Parameters: mcp.Schema{
 				Type: "object",
 				Properties: map[string]mcp.Property{
-					"key":   {Type: "string", Description: "The aspect of the user to remember (e.g. 'name', 'style', 'likes')."},
-					"value": {Type: "string", Description: "The information to store."},
+					"content": {Type: "string", Description: "The fact to remember, in a self-contained sentence the future you can read cold."},
+					"persist": {Type: "boolean", Description: "true = long-term (persists across sessions); false = short-term (session only). Default false."},
 				},
-				Required: []string{"key", "value"},
+				Required: []string{"content"},
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var a struct {
-				Key   string `json:"key"`
-				Value string `json:"value"`
+				Content string `json:"content"`
+				Persist bool   `json:"persist"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
-			kv.Set(a.Key, a.Value)
-			return fmt.Sprintf("remembered %s for user", a.Key), nil
+			if strings.TrimSpace(a.Content) == "" {
+				return "", fmt.Errorf("content is required")
+			}
+			if _, err := mem.Remember(a.Content, a.Persist); err != nil {
+				return "", err
+			}
+			tier := "short-term (session)"
+			if a.Persist {
+				tier = "long-term (persistent)"
+			}
+			return fmt.Sprintf("stored in %s memory", tier), nil
+		},
+	}
+}
+
+// recallTool returns memories matching a query. Empty query returns everything.
+func recallTool(mem *memory.Store) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "recall",
+			Description: "Search memory for matching entries across both short-term (session) and long-term (persistent) tiers. Empty query returns all memories. The user does NOT see this tool call.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"query": {Type: "string", Description: "Optional substring to filter entries (case-insensitive). Omit or leave empty to return everything."},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Query string `json:"query"`
+			}
+			if len(args) > 0 {
+				if err := json.Unmarshal(args, &a); err != nil {
+					return "", fmt.Errorf("invalid arguments: %w", err)
+				}
+			}
+			st, lt := mem.Recall(a.Query)
+			if len(st) == 0 && len(lt) == 0 {
+				return "(no matching memories)", nil
+			}
+			var b strings.Builder
+			if len(lt) > 0 {
+				b.WriteString("LONG-TERM:\n")
+				b.WriteString(memory.FormatEntries(lt))
+				b.WriteString("\n")
+			}
+			if len(st) > 0 {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString("SHORT-TERM:\n")
+				b.WriteString(memory.FormatEntries(st))
+			}
+			return b.String(), nil
+		},
+	}
+}
+
+// forgetTool deletes entries matching a query.
+func forgetTool(mem *memory.Store) mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "forget",
+			Description: "Delete all memory entries (short-term and long-term) whose content matches the query substring (case-insensitive). Use only when the user explicitly asks to forget something. The user does NOT see this tool call — confirm in your reply.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"query": {Type: "string", Description: "Substring identifying the memories to remove."},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			n, err := mem.Forget(a.Query)
+			if err != nil {
+				return "", err
+			}
+			if n == 0 {
+				return "no matching memories to forget", nil
+			}
+			return fmt.Sprintf("forgot %d memory entry/entries", n), nil
 		},
 	}
 }
