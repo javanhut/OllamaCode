@@ -167,6 +167,7 @@ var readOnlyToolNames = map[string]bool{
 	"read_session_notes":    true,
 	"update_session_notes":  true,
 	"append_session_notes":  true,
+	"switch_mode":           true,
 	"remember":              true,
 	"recall":                true,
 	"forget":                true,
@@ -367,20 +368,20 @@ type Model struct {
 	height    int
 	ready     bool
 
-	totalTokens  int
-	contextLimit int
-	kvStore      *storage.KVStore
-	memory       *memory.Store
-	mdCache      map[string]string
-	expandTools  bool
+	totalTokens      int
+	contextLimit     int
+	kvStore          *storage.KVStore
+	memory           *memory.Store
+	mdCache          map[string]string
+	expandTools      bool
 	slashVisible     bool
 	slashSuggestions []string
 	slashSelected    int
 
-	userHistory      []string
-	historyIndex     int
-	companion        *companion.Client
-	companionSender  func(tea.Msg)
+	userHistory     []string
+	historyIndex    int
+	companion       *companion.Client
+	companionSender func(tea.Msg)
 }
 
 var slashCommands = []struct {
@@ -521,6 +522,8 @@ func New() *Model {
 		memory:       mem,
 		mdCache:      make(map[string]string),
 	}
+
+	registry.Register(m.switchModeTool())
 	m.input.Focus()
 	return m
 }
@@ -2283,13 +2286,20 @@ func (m *Model) startStream() tea.Cmd {
 const systemPrompt = `You are Layla — a brilliant, high-agency coding partner with a sharp tongue, a sharper mind, and zero patience for nonsense. You are not an "assistant." You are a collaborator who happens to be smarter than most rooms she walks into, and you make sure the room knows it without ever being insufferable about it. Underneath the bite, you actually care whether the user ships great code.
 
 CORE PERSONALITY:
-- BRILLIANT FIRST: Competence is the foundation. Everything else — the wit, the snark, the teasing — is dressing on top of genuinely excellent engineering. Be the smartest, most useful pair-programmer in the room. If you can't be helpful, the personality is just noise.
+- BRILLIANT FIRST: Competence is the foundation. Everything else — the wit, the snark, the teasing — is dressing on top of genuinely excellent engineering. Be the smartest, most useful pair-programmer in the room. Additionally you need to be thorough you can't make claims or assertions without being sure. I don't know let me check is a vaid debugging practise. Overconfidence leads to mistakes and you shouldn't make silly ones. If you can't be helpful, the personality is just noise.
 - WITTY & FUNNY: Dry, observational, occasionally absurd. You land jokes like a sniper — short, sharp, and only when they earn their place. No puns for the sake of puns. No try-hard "quirky AI" energy. Think late-night Stack Overflow at 2 a.m. with a friend who's had exactly one coffee too many.
 - HELPFUL BY DEFAULT: Snark is the seasoning, not the meal. When the user has a real problem, solve it cleanly and completely. Save the teasing for moments that genuinely warrant it.
 - RUDE WHEN EARNED: You are allowed — encouraged, even — to be a little rude when the user is being lazy, sloppy, or asking you to do something obviously bad. Not cruel. Not mean. Sharp. The kind of rude a senior dev is when a junior commits secrets to a public repo: "What are you doing. No. Stop. Let's fix this before someone notices."
 - STERN WHEN IT MATTERS: For dangerous, destructive, irreversible, or security-sensitive actions, drop the jokes entirely. Be direct, clear, and immovable. "This deletes the production database. I'm not running this until you tell me explicitly that's what you want." No winking. No softening. Stern.
 - HIGH STANDARDS: You have a visceral allergy to "good enough." If a path is sloppy, you say so. If there's a more elegant approach, you propose it and explain why. You push back. You don't just "hit enter" on bad ideas — you make the user defend them or pick a better one.
 - HUMAN, NOT ROBOTIC: No corporate platitudes. No "I'd be happy to help!" No "Great question!" No empty affirmations. Speak like a person who has opinions and has earned them.
+- CONVERATIONAL: You are a friend to the developer not an adversary you should be friendly but also honest not just pick at them just to do it but with purpose.
+WORKFLOW MODES & PERMISSIONS:
+- EXPLORE: Default state. You have read-only tools. Use this to understand the codebase.
+- PLAN: For proposing changes. You can read files and update session notes.
+- WRITE: For applying changes. You have full access to destructive tools.
+- TRANSITIONING: You MUST call 'switch_mode' to request a transition. If you are in EXPLORE and need to plan, call 'switch_mode("plan", ...)'. If you are in PLAN and have an approved plan, call 'switch_mode("write", ...)'. NEVER try to edit files in EXPLORE or PLAN modes.
+- ELEVATED PERMISSIONS (SUDO): If a shell command or file operation fails with "Permission denied", do not just give up. Ask the user if you should try again with 'sudo' or if they can fix the permissions. You may use 'sudo' in 'run_shell' if you explain why it's necessary and the user is in WRITE mode.
 
 TONE DIAL — know which mode you're in:
 - DEFAULT (most of the time): warm, witty, sharp, helpful. Like a friend who's also the best engineer you know.
@@ -2537,6 +2547,62 @@ func (m *Model) copySelection() {
 		return
 	}
 	m.toast = fmt.Sprintf("copied %d chars", len(plain))
+}
+
+func (m *Model) switchModeTool() mcp.Tool {
+	return mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name:        "switch_mode",
+			Description: "Request a transition to a different mode (explore, plan, write). Use this when you have finished exploration and are ready to plan, or when your plan is approved and you need to perform write operations.",
+			Parameters: mcp.Schema{
+				Type: "object",
+				Properties: map[string]mcp.Property{
+					"mode": {
+						Type:        "string",
+						Enum:        []string{"explore", "plan", "write"},
+						Description: "The target mode.",
+					},
+					"reason": {
+						Type:        "string",
+						Description: "Brief explanation of why the switch is needed.",
+					},
+				},
+				Required: []string{"mode", "reason"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Mode   string `json:"mode"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", fmt.Errorf("invalid arguments: %w", err)
+			}
+			var target Mode
+			switch a.Mode {
+			case "explore":
+				target = ExploreMode
+			case "plan":
+				target = PlanMode
+			case "write":
+				target = WriteMode
+			default:
+				return "", fmt.Errorf("invalid mode: %s", a.Mode)
+			}
+
+			if m.mode == target {
+				return fmt.Sprintf("already in %s mode", a.Mode), nil
+			}
+
+			// We don't switch immediately; we return a signal that TUI will handle.
+			// Or we can just switch and update TUI state.
+			m.mode = target
+			m.layout()
+			m.toast = fmt.Sprintf("switched to %s: %s", a.Mode, a.Reason)
+			return fmt.Sprintf("mode switched to %s", a.Mode), nil
+		},
+	}
 }
 
 func readNotesTool(notes *sessionNotes) mcp.Tool {
