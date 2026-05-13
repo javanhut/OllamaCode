@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/javanhut/ollama_code/internal/semantic"
 )
 
 // Tool is an Ollama/OpenAI-compatible function definition paired with a local
@@ -46,6 +48,12 @@ type Property struct {
 // Handler executes a tool call. args is the raw JSON object the model sent;
 // the returned string is fed back to the model as the tool's reply.
 type Handler func(ctx context.Context, args json.RawMessage) (string, error)
+
+// Embedder abstracts the Ollama embedding endpoint so semantic tools can
+// compute vectors without creating a circular import on api.OllamaHost.
+type Embedder interface {
+	Embed(model string, inputs []string) ([][]float32, error)
+}
 
 // ToolCall mirrors the shape Ollama emits inside a chat response message.
 type ToolCall struct {
@@ -1639,5 +1647,114 @@ func joinLines(s []string) string {
 		out += "\n" + line
 	}
 	return out
+}
+
+func CodeIndexTool(embedder Embedder) Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "code_index",
+			Description: "Build or rebuild a semantic embedding index for the current project. The index enables natural-language code search via semantic_search. You can force a rebuild with force_rebuild=true.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"model":         {Type: "string", Description: "Embedding model to use (default: nomic-embed-text)."},
+					"force_rebuild": {Type: "boolean", Description: "Rebuild even if a cached index exists."},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Model        string `json:"model"`
+				ForceRebuild bool   `json:"force_rebuild"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", err
+			}
+			if a.Model == "" {
+				a.Model = "nomic-embed-text"
+			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				return "", err
+			}
+			if !a.ForceRebuild {
+				if _, err := semantic.LoadIndex(cwd); err == nil {
+					return "Semantic index already exists. Use force_rebuild=true to rebuild.", nil
+				}
+			}
+			idx, err := semantic.BuildIndex(cwd, a.Model, func(inputs []string) ([][]float32, error) {
+				return embedder.Embed(a.Model, inputs)
+			})
+			if err != nil {
+				return "", fmt.Errorf("index build failed: %w", err)
+			}
+			if err := semantic.SaveIndex(idx); err != nil {
+				return "", fmt.Errorf("save index failed: %w", err)
+			}
+			return fmt.Sprintf("Indexed %d chunks from project %s using model %s", len(idx.Chunks), cwd, a.Model), nil
+		},
+	}
+}
+
+func SemanticSearchTool(embedder Embedder) Tool {
+	return Tool{
+		Type: "function",
+		Function: Function{
+			Name:        "semantic_search",
+			Description: "Search the project with natural language using a pre-built semantic embedding index. Returns the top_k most relevant code snippets.",
+			Parameters: Schema{
+				Type: "object",
+				Properties: map[string]Property{
+					"query":  {Type: "string", Description: "Natural language query."},
+					"top_k":  {Type: "number", Description: "Number of results to return. Default 5."},
+					"model":  {Type: "string", Description: "Embedding model used for the index (default: nomic-embed-text). Must match the model passed to code_index."},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Query string `json:"query"`
+				TopK  int    `json:"top_k"`
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(args, &a); err != nil {
+				return "", err
+			}
+			if a.TopK <= 0 {
+				a.TopK = 5
+			}
+			if a.Model == "" {
+				a.Model = "nomic-embed-text"
+			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				return "", err
+			}
+			idx, err := semantic.LoadIndex(cwd)
+			if err != nil {
+				return "No semantic index found. Run code_index first.", nil
+			}
+			results, err := idx.Search(a.Query, func(q string) ([]float32, error) {
+				embs, err := embedder.Embed(a.Model, []string{q})
+				if err != nil {
+					return nil, err
+				}
+				if len(embs) == 0 {
+					return nil, fmt.Errorf("empty embedding response")
+				}
+				return embs[0], nil
+			}, a.TopK)
+			if err != nil {
+				return "", err
+			}
+			var b strings.Builder
+			for i, r := range results {
+				fmt.Fprintf(&b, "%d. %s:%d-%d (score: %.3f)\n%s\n\n", i+1, r.Path, r.StartLine, r.EndLine, r.Score, r.Text)
+			}
+			return strings.TrimSpace(b.String()), nil
+		},
+	}
 }
 

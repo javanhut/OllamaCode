@@ -57,6 +57,15 @@ type VersionResponse struct {
 	Version string `json:"version"`
 }
 
+type EmbedRequest struct {
+	Model  string   `json:"model"`
+	Input  []string `json:"input"`
+}
+
+type EmbedResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
+}
+
 type Endpoint struct {
 	Path    string
 	Method  string
@@ -236,4 +245,27 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 	}()
 
 	return respChan, errChan
+}
+
+func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
+	urlPath := generatePath("getInputEmbedings", o)
+	req := EmbedRequest{Model: model, Input: inputs}
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal embed request: %v", err)
+	}
+	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	var embedResp EmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
+		return nil, fmt.Errorf("failed to decode embed response: %v", err)
+	}
+	return embedResp.Embeddings, nil
 }

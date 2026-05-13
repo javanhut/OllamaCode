@@ -31,6 +31,7 @@ import (
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
+	"github.com/javanhut/ollama_code/internal/session"
 	"github.com/javanhut/ollama_code/internal/storage"
 	"github.com/javanhut/ollama_code/mcp"
 )
@@ -178,6 +179,8 @@ var readOnlyToolNames = map[string]bool{
 	"git_diff":              true,
 	"git_log":               true,
 	"hash_file":             true,
+	"code_index":            true,
+	"semantic_search":       true,
 }
 
 var planExtraToolNames = map[string]bool{}
@@ -261,6 +264,7 @@ type pendingBatch struct {
 	done     int
 	index    int
 	allowAll bool
+	preview  string
 }
 
 const notesFile = ".ollama_notes.md"
@@ -410,6 +414,8 @@ func New() *Model {
 	registry.Register(rememberTool(mem))
 	registry.Register(recallTool(mem))
 	registry.Register(forgetTool(mem))
+	registry.Register(mcp.CodeIndexTool(host))
+	registry.Register(mcp.SemanticSearchTool(host))
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -1423,6 +1429,83 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 			m.toast = "retrieved & decompressed"
 			return m, nil
+		case "/save":
+			m.input.Reset()
+			name := strings.TrimSpace(strings.TrimPrefix(val, "/save"))
+			if name == "" {
+				name = time.Now().Format("2006-01-02_15-04-05")
+			}
+			s := session.Session{
+				Name:      name,
+				CreatedAt: time.Now(),
+				Model:     m.modelName,
+				Mode:      m.mode.String(),
+				Notes:     m.notes.get(),
+				Messages:  append([]api.Message(nil), m.history...),
+			}
+			if err := session.Save(s); err != nil {
+				m.toast = "save failed: " + err.Error()
+			} else {
+				m.toast = "saved session '" + name + "'"
+			}
+			return m, nil
+		case "/load":
+			m.input.Reset()
+			name := strings.TrimSpace(strings.TrimPrefix(val, "/load"))
+			if name == "" {
+				m.toast = "usage: /load <name>"
+				return m, nil
+			}
+			s, err := session.Load(name)
+			if err != nil {
+				m.toast = "load failed: " + err.Error()
+				return m, nil
+			}
+			m.history = append([]api.Message(nil), s.Messages...)
+			m.notes.set(s.Notes)
+			m.modelName = s.Model
+			if s.Mode != "" {
+				switch s.Mode {
+				case "explore":
+					m.mode = ExploreMode
+				case "plan":
+					m.mode = PlanMode
+				case "write":
+					m.mode = WriteMode
+				}
+			}
+			m.cfg.Model = m.modelName
+			saveConfig(m.cfg)
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			m.toast = "loaded session '" + name + "'"
+			return m, nil
+		case "/sessions":
+			m.input.Reset()
+			sessions, err := session.List()
+			if err != nil {
+				m.toast = "list failed: " + err.Error()
+				return m, nil
+			}
+			if len(sessions) == 0 {
+				m.history = append(m.history, api.Message{
+					Role:    "system",
+					Content: "No saved sessions.",
+				})
+			} else {
+				var b strings.Builder
+				b.WriteString("Saved sessions:\n\n")
+				for _, s := range sessions {
+					fmt.Fprintf(&b, "- %s (%s, %s, %d messages)\n", s.Name, s.CreatedAt.Format("2006-01-02 15:04"), s.Model, len(s.Messages))
+				}
+				m.history = append(m.history, api.Message{
+					Role:    "system",
+					Content: b.String(),
+				})
+			}
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, nil
 		}
 		if m.modelName == "" {
 			m.input.Reset()
@@ -1618,6 +1701,9 @@ func (m *Model) helpModal() string {
 		{"/clear", "reset the conversation"},
 		{"/copy", "copy last response to system clipboard"},
 		{"/companion", "toggle GUI popup (speech in <-> input, replies -> TTS)"},
+		{"/save", "save current conversation to named session"},
+		{"/load", "load a saved session"},
+		{"/sessions", "list saved sessions"},
 		{"/quit", "exit"},
 		{"", ""},
 		{"", "Keys"},
@@ -1706,6 +1792,15 @@ func (m *Model) permissionModal() string {
 	for _, line := range args {
 		b.WriteString(modalBodyStyle.Render(line))
 		b.WriteString("\n")
+	}
+	if m.pending.preview != "" {
+		b.WriteString("\n")
+		b.WriteString(modalMutedStyle.Render("Preview:"))
+		b.WriteString("\n")
+		for _, line := range strings.Split(m.pending.preview, "\n") {
+			b.WriteString(modalMutedStyle.Render(truncatePlain(line, innerW)))
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(modalMutedStyle.Render("y/enter ") + modalBodyStyle.Render("allow once   "))
@@ -2557,6 +2652,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
 			m.pending.index = i
+			m.pending.preview = computePreview(call)
 			m.state = statePermission
 			m.refreshTranscript()
 			break
@@ -2571,6 +2667,148 @@ func (m *Model) processPendingTools() tea.Cmd {
 	}
 
 	return nil
+}
+
+func computePreview(call mcp.ToolCall) string {
+	var args map[string]any
+	_ = json.Unmarshal(call.Function.Arguments, &args)
+
+	switch call.Function.Name {
+	case "write_file":
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		old, err := os.ReadFile(path)
+		if err != nil {
+			return "(new file)\n" + truncatePreview(content, 20)
+		}
+		return simpleDiff(string(old), content, 10)
+	case "edit_file":
+		path, _ := args["path"].(string)
+		oldStr, _ := args["old_string"].(string)
+		newStr, _ := args["new_string"].(string)
+		return fmt.Sprintf("%s\n--- old ---\n%s\n+++ new +++\n%s", path, truncatePreview(oldStr, 10), truncatePreview(newStr, 10))
+	case "apply_diff":
+		path, _ := args["path"].(string)
+		search, _ := args["search"].(string)
+		replace, _ := args["replace"].(string)
+		return fmt.Sprintf("%s\n--- search ---\n%s\n+++ replace +++\n%s", path, truncatePreview(search, 10), truncatePreview(replace, 10))
+	case "append_file":
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		old, err := os.ReadFile(path)
+		if err != nil {
+			return "(new file) → append:\n" + truncatePreview(content, 15)
+		}
+		lines := strings.Split(string(old), "\n")
+		start := len(lines) - 5
+		if start < 0 {
+			start = 0
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s (current end):\n", path)
+		for _, l := range lines[start:] {
+			b.WriteString(l)
+			b.WriteString("\n")
+		}
+		b.WriteString("----- appended -----\n")
+		b.WriteString(truncatePreview(content, 15))
+		return b.String()
+	case "delete_file":
+		path, _ := args["path"].(string)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Sprintf("%s (not found)", path)
+		}
+		preview := fmt.Sprintf("%s (%d bytes)\n", path, info.Size())
+		if !info.IsDir() {
+			data, _ := os.ReadFile(path)
+			lines := strings.Split(string(data), "\n")
+			for i := 0; i < 3 && i < len(lines); i++ {
+				preview += lines[i] + "\n"
+			}
+			if len(lines) > 3 {
+				preview += "..."
+			}
+		}
+		return preview
+	case "move_file":
+		src, _ := args["source"].(string)
+		dst, _ := args["destination"].(string)
+		return fmt.Sprintf("move %s → %s", src, dst)
+	case "copy_file":
+		src, _ := args["source"].(string)
+		dst, _ := args["destination"].(string)
+		return fmt.Sprintf("copy %s → %s", src, dst)
+	case "run_shell":
+		cmd, _ := args["command"].(string)
+		return fmt.Sprintf("shell: %s", cmd)
+	case "git_add":
+		paths, _ := args["paths"].(string)
+		return fmt.Sprintf("git add %s", paths)
+	case "git_commit":
+		msg, _ := args["message"].(string)
+		return fmt.Sprintf("git commit -m %q", msg)
+	default:
+		return ""
+	}
+}
+
+func truncatePreview(s string, maxLines int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[:maxLines], "\n") + "\n..."
+}
+
+func simpleDiff(old, new string, context int) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new, "\n")
+	// Very naive diff: find first changed line and last changed line
+	start := 0
+	for start < len(oldLines) && start < len(newLines) && oldLines[start] == newLines[start] {
+		start++
+	}
+	endOld := len(oldLines) - 1
+	endNew := len(newLines) - 1
+	for endOld >= start && endNew >= start && oldLines[endOld] == newLines[endNew] {
+		endOld--
+		endNew--
+	}
+	ctxStart := start - context
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	ctxEndOld := endOld + context
+	if ctxEndOld >= len(oldLines) {
+		ctxEndOld = len(oldLines) - 1
+	}
+	ctxEndNew := endNew + context
+	if ctxEndNew >= len(newLines) {
+		ctxEndNew = len(newLines) - 1
+	}
+	var b strings.Builder
+	if ctxStart > 0 {
+		b.WriteString("...\n")
+	}
+	for i := ctxStart; i <= ctxEndOld && i < len(oldLines); i++ {
+		if i >= start && i <= endOld {
+			fmt.Fprintf(&b, "-%s\n", oldLines[i])
+		} else {
+			fmt.Fprintf(&b, " %s\n", oldLines[i])
+		}
+	}
+	for i := ctxStart; i <= ctxEndNew && i < len(newLines); i++ {
+		if i >= start && i <= endNew {
+			fmt.Fprintf(&b, "+%s\n", newLines[i])
+		} else {
+			fmt.Fprintf(&b, " %s\n", newLines[i])
+		}
+	}
+	if ctxEndNew < len(newLines)-1 || ctxEndOld < len(oldLines)-1 {
+		b.WriteString("...")
+	}
+	return b.String()
 }
 
 func lastAssistantMessage(history []api.Message) string {
