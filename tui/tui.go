@@ -66,6 +66,9 @@ var (
 	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	asciiStyle     = lipgloss.NewStyle().Foreground(secondaryColor).Bold(true)
 	bodyStyle      = lipgloss.NewStyle().Foreground(textColor)
+	selectionStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("62")).
+			Foreground(lipgloss.Color("230"))
 
 	modalBg = surfaceColor
 
@@ -486,6 +489,9 @@ func New() *Model {
 	ta.Prompt = "› "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
+	ta.DynamicHeight = true
+	ta.MinHeight = minInputLines
+	ta.MaxHeight = maxInputLines
 	ta.SetHeight(minInputLines)
 	styles := ta.Styles()
 	inputBg := panelColor
@@ -987,7 +993,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == stateChat && m.sel.active {
 			m.copySelection()
 			m.sel.active = false
-			m.viewport.SetHighlights(nil)
+			m.viewport.ClearHighlights()
 		}
 		return m, nil
 
@@ -1008,7 +1014,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Any key clears an active selection
 		if m.sel.active {
 			m.sel.active = false
-			m.viewport.SetHighlights(nil)
+			m.viewport.ClearHighlights()
 		}
 		if k := msg.String(); k == "ctrl+c" {
 			return m, tea.Quit
@@ -1316,9 +1322,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
 		m.updateSlashSuggestions()
-		desired := clamp(m.input.LineCount(), minInputLines, maxInputLines)
-		if desired != prevH {
-			m.input.SetHeight(desired)
+		if m.input.Height() != prevH {
 			m.layout()
 		}
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -2126,6 +2130,14 @@ func (m *Model) layout() {
 		m.notesViewport.SetWidth(notesW - 4)
 		m.notesViewport.SetHeight(notesVH)
 	}
+	m.viewport.SoftWrap = true
+	m.notesViewport.SoftWrap = true
+	m.viewport.StyleLineFunc = func(line int) lipgloss.Style {
+		if !m.selectedTranscriptLine(line) {
+			return lipgloss.NewStyle()
+		}
+		return selectionStyle.Width(m.viewport.Width())
+	}
 
 	notesText := m.notes.get()
 	if notesText == "" {
@@ -2494,7 +2506,39 @@ func (m *Model) contentLineAt(x, y int) int {
 	if viewportY >= m.viewport.Height() {
 		return -2
 	}
-	return m.viewport.YOffset() + viewportY
+	return m.transcriptLineAtVisualOffset(m.viewport.YOffset() + viewportY)
+}
+
+func (m *Model) transcriptLineAtVisualOffset(offset int) int {
+	content := m.transcript.String()
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+
+	width := m.viewport.Width()
+	if width <= 0 {
+		width = m.width
+	}
+	if width <= 0 {
+		width = 1
+	}
+
+	visual := 0
+	for i, line := range lines {
+		lineHeight := 1
+		if m.viewport.SoftWrap {
+			lineWidth := ansi.StringWidth(line)
+			if lineWidth > 0 {
+				lineHeight = (lineWidth + width - 1) / width
+			}
+		}
+		if offset < visual+lineHeight {
+			return i
+		}
+		visual += lineHeight
+	}
+	return len(lines) - 1
 }
 
 func (m *Model) selectionRange() (int, int, []string, bool) {
@@ -2526,24 +2570,13 @@ func (m *Model) selectionRange() (int, int, []string, bool) {
 	return s, e, lines, true
 }
 
+func (m *Model) selectedTranscriptLine(line int) bool {
+	s, e, _, ok := m.selectionRange()
+	return ok && line >= s && line <= e
+}
+
 func (m *Model) applySelectionHighlight() {
-	s, e, lines, ok := m.selectionRange()
-	if !ok {
-		m.viewport.SetHighlights(nil)
-		return
-	}
-	startByte := 0
-	for i := 0; i < s; i++ {
-		startByte += len(lines[i]) + 1
-	}
-	endByte := startByte
-	for i := s; i <= e; i++ {
-		endByte += len(lines[i])
-		if i < e {
-			endByte++
-		}
-	}
-	m.viewport.SetHighlights([][]int{{startByte, endByte}})
+	m.viewport.ClearHighlights()
 }
 
 func (m *Model) copySelection() {

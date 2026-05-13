@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/mcp"
@@ -121,5 +122,70 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 	}
 	if m.state != statePermission {
 		t.Fatalf("expected permission state, got %v", m.state)
+	}
+}
+
+func TestSelectedTranscriptLineUsesSelectionRange(t *testing.T) {
+	m := &Model{
+		transcript: &strings.Builder{},
+		sel:        selection{active: true, anchor: 3, cursor: 1},
+	}
+	m.transcript.WriteString("zero\none\ntwo\nthree\nfour")
+
+	for _, line := range []int{1, 2, 3} {
+		if !m.selectedTranscriptLine(line) {
+			t.Fatalf("expected line %d to be selected", line)
+		}
+	}
+	for _, line := range []int{0, 4} {
+		if m.selectedTranscriptLine(line) {
+			t.Fatalf("expected line %d not to be selected", line)
+		}
+	}
+}
+
+func TestTranscriptLineAtVisualOffsetAccountsForSoftWrap(t *testing.T) {
+	m := &Model{
+		transcript: &strings.Builder{},
+	}
+	m.transcript.WriteString("short\n1234567890abcdefghij\nlast")
+	m.viewport.SetWidth(10)
+	m.viewport.SoftWrap = true
+
+	tests := map[int]int{
+		0: 0,
+		1: 1,
+		2: 1,
+		3: 2,
+	}
+	for offset, want := range tests {
+		if got := m.transcriptLineAtVisualOffset(offset); got != want {
+			t.Fatalf("offset %d: expected line %d, got %d", offset, want, got)
+		}
+	}
+}
+
+func TestInputDynamicHeightGrowsOnWrappedText(t *testing.T) {
+	input := textarea.New()
+	input.Prompt = "› "
+	input.ShowLineNumbers = false
+	input.DynamicHeight = true
+	input.MinHeight = minInputLines
+	input.MaxHeight = maxInputLines
+	input.SetWidth(12)
+	input.SetHeight(minInputLines)
+	input.Focus()
+	input, _ = input.Update(nil)
+
+	for _, r := range "abcdefghijklmnopqrstuvwxyz" {
+		var cmd tea.Cmd
+		input, cmd = input.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		if cmd != nil {
+			_ = cmd()
+		}
+	}
+
+	if input.Height() <= minInputLines {
+		t.Fatalf("expected wrapped input to grow beyond %d line, got %d", minInputLines, input.Height())
 	}
 }
