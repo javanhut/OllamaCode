@@ -377,8 +377,10 @@ type Model struct {
 	slashSuggestions []string
 	slashSelected    int
 
-	companion       *companion.Client
-	companionSender func(tea.Msg)
+	userHistory      []string
+	historyIndex     int
+	companion        *companion.Client
+	companionSender  func(tea.Msg)
 }
 
 var slashCommands = []struct {
@@ -400,6 +402,7 @@ var slashCommands = []struct {
 	{"/load", "load a saved session by name"},
 	{"/sessions", "list saved sessions"},
 	{"/archive", "retrieve compressed archive"},
+	{"/verbose", "toggle detailed tool output"},
 }
 
 func (m *Model) updateSlashSuggestions() {
@@ -665,15 +668,13 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
 
-	for _, c := range t.contents {
-		if c == "" {
-			continue
-		}
-		b.WriteString(m.renderMarkdown(c, true))
+	fullContent := strings.Join(t.contents, "")
+	if fullContent != "" {
+		b.WriteString(m.renderMarkdown(fullContent, true))
 		b.WriteString("\n")
 	}
 
-	if t.streaming && len(t.contents) == 0 {
+	if t.streaming && fullContent == "" {
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(" Thinking..."))
 		b.WriteString("\n")
@@ -842,25 +843,18 @@ var (
 // stripLatexMath converts $…$ and $$…$$ into Markdown inline code, skipping
 // content inside fenced code blocks where the dollars might be intentional.
 func stripLatexMath(s string) string {
-	if !strings.Contains(s, "$") {
+	if !strings.Contains(s, "$") && !strings.Contains(s, "\\(") && !strings.Contains(s, "\\[") {
 		return s
 	}
-	lines := strings.Split(s, "\n")
-	inFence := false
-	for i, line := range lines {
-		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, "```") || strings.HasPrefix(trim, "~~~") {
-			inFence = !inFence
-			continue
-		}
-		if inFence {
-			continue
-		}
-		line = mathDisplayRe.ReplaceAllString(line, "`$1`")
-		line = mathInlineRe.ReplaceAllString(line, "`$1`")
-		lines[i] = line
-	}
-	return strings.Join(lines, "\n")
+
+	// Handle multi-line $$ ... $$ and \[ ... \] blocks by converting to code blocks
+	// Handle inline $ ... $ and \( ... \) by converting to inline code
+	s = regexp.MustCompile(`(?s)\$\$(.*?)\$\$`).ReplaceAllString(s, "```latex\n$1\n```")
+	s = regexp.MustCompile(`(?s)\\\[(.*?)\\\]`).ReplaceAllString(s, "```latex\n$1\n```")
+	s = regexp.MustCompile(`\\\((.*?)\\\)`).ReplaceAllString(s, "`$1`")
+	s = mathInlineRe.ReplaceAllString(s, "`$1`")
+
+	return s
 }
 
 func (m *Model) renderMarkdown(s string, useCache bool) string {
@@ -934,7 +928,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseClickMsg:
 		if m.state == stateChat && msg.Button == tea.MouseLeft {
-			line := m.contentLineAt(msg.Y)
+			line := m.contentLineAt(msg.X, msg.Y)
 			if line >= 0 {
 				m.toast = ""
 				m.sel = selection{active: true, anchor: line, cursor: line}
@@ -953,7 +947,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if msg.Y >= botY {
 				m.viewport.ScrollDown(1)
 			}
-			line := m.contentLineAt(msg.Y)
+			line := m.contentLineAt(msg.X, msg.Y)
 			switch line {
 			case -1:
 				m.sel.cursor = m.viewport.YOffset()
@@ -1017,6 +1011,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
+		if msg.String() == "ctrl+o" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+			m.cfg.Verbose = !m.cfg.Verbose
+			saveConfig(m.cfg)
+			if m.cfg.Verbose {
+				m.toast = "verbose mode on"
+			} else {
+				m.toast = "verbose mode off"
+			}
+			m.refreshTranscript()
+			return m, nil
+		}
 		// Tab: complete slash command if autocomplete is visible, else cycle mode.
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			if m.slashVisible && len(m.slashSuggestions) > 0 {
@@ -1070,6 +1075,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "enter" {
 				return m.updateChatKey(msg)
 			}
+			if msg.String() == "up" && (m.input.Value() == "" || (m.historyIndex < len(m.userHistory) && m.input.Value() == m.userHistory[m.historyIndex])) {
+				if len(m.userHistory) > 0 && m.historyIndex > 0 {
+					m.historyIndex--
+					m.input.SetValue(m.userHistory[m.historyIndex])
+					m.input.CursorEnd()
+					return m, nil
+				}
+			}
+			if msg.String() == "down" && m.historyIndex < len(m.userHistory) {
+				m.historyIndex++
+				if m.historyIndex < len(m.userHistory) {
+					m.input.SetValue(m.userHistory[m.historyIndex])
+					m.input.CursorEnd()
+				} else {
+					m.input.SetValue("")
+				}
+				return m, nil
+			}
 		}
 
 	case modelsLoadedMsg:
@@ -1113,12 +1136,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatToolCallsMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		// Discard any preamble text the model emitted before the tool call so
-		// the model doesn't see its own preamble in history and re-state it.
+		preamble := m.streamBuf.String()
 		m.streamBuf.Reset()
 		m.history = append(m.history, api.Message{
 			Role:      "assistant",
-			Content:   "",
+			Content:   preamble,
 			ToolCalls: msg.calls,
 		})
 		m.pending = &pendingBatch{
@@ -1433,6 +1455,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.stream = nil
 			m.queue = nil
 			m.history = nil
+			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
 			m.refreshTranscript()
 			m.viewport.GotoTop()
@@ -1495,6 +1518,17 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.toast = fmt.Sprintf("copied %d chars to clipboard", len(text))
+			return m, nil
+		case "/verbose":
+			m.input.Reset()
+			m.cfg.Verbose = !m.cfg.Verbose
+			saveConfig(m.cfg)
+			if m.cfg.Verbose {
+				m.toast = "verbose mode on"
+			} else {
+				m.toast = "verbose mode off"
+			}
+			m.refreshTranscript()
 			return m, nil
 		case "/archive":
 			m.input.Reset()
@@ -2063,9 +2097,7 @@ func (m *Model) layout() {
 			Left:         empty,
 			Right:        empty,
 		}
-		m.viewport.HighlightStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("232")).
-			Background(lipgloss.Color("39")) // Bright blue — high contrast on dark backgrounds
+		m.viewport.HighlightStyle = lipgloss.NewStyle().Reverse(true)
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 
 		m.notesViewport = viewport.New(
@@ -2110,6 +2142,8 @@ func (m *Model) submit() tea.Cmd {
 	}
 
 	m.history = append(m.history, api.Message{Role: "user", Content: value})
+	m.userHistory = append(m.userHistory, value)
+	m.historyIndex = len(m.userHistory)
 	m.logActivity("Message: " + value)
 	m.lastError = ""
 
@@ -2213,9 +2247,6 @@ func (m *Model) startStream() tea.Cmd {
 	case WriteMode:
 		sp += " You may modify files and run shell commands. Each destructive call requires user approval."
 	}
-	if notes := m.notes.get(); notes != "" {
-		sp += "\n\nSession notes (your scratchpad):\n" + notes
-	}
 	if m.memory != nil {
 		if lt := m.memory.LongTermSummary(); lt != "" {
 			sp += "\n\n[LONG-TERM MEMORY] (carried from prior sessions — these are facts you've previously stored about the user; treat them as known):\n" + lt
@@ -2224,6 +2255,13 @@ func (m *Model) startStream() tea.Cmd {
 			sp += "\n\n[SHORT-TERM MEMORY] (this session only):\n" + st
 		}
 	}
+
+	notes := m.notes.get()
+	if notes == "" {
+		notes = "(empty)"
+	}
+	sp += "\n\nSession notes (your persistent scratchpad for this repository):\n" + notes
+	sp += "\n\nUse your session notes tools (read/update/append_session_notes) to record important decisions, project state, and file hashes. This scratchpad is visible to you in every turn and helps you stay on track when the conversation gets long."
 	msgs := make([]api.Message, 0, len(m.history)+1)
 	msgs = append(msgs, api.Message{Role: "system", Content: sp})
 	msgs = append(msgs, m.history...)
@@ -2232,6 +2270,9 @@ func (m *Model) startStream() tea.Cmd {
 		Model:    m.modelName,
 		Messages: msgs,
 		Tools:    m.toolsForMode(),
+		Options: map[string]any{
+			"num_ctx": m.contextLimit,
+		},
 	})
 	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel}
 	m.streaming = true
@@ -2408,9 +2449,22 @@ func (m *Model) footerView() string {
 	return rule + "\n" + chromeStyle.Width(width).Render(row)
 }
 
-func (m *Model) contentLineAt(screenY int) int {
+func (m *Model) contentLineAt(x, y int) int {
+	vpW := m.width
+	if m.showNotes {
+		notesW := 30
+		if m.width < 60 {
+			notesW = m.width / 2
+		}
+		vpW -= (notesW + 2)
+	}
+
+	if x >= vpW {
+		return -1 // Clicked in notes or border
+	}
+
 	headerH := lipgloss.Height(m.headerView())
-	viewportY := screenY - headerH
+	viewportY := y - headerH
 	if viewportY < 0 {
 		return -1
 	}

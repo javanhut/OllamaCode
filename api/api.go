@@ -19,10 +19,11 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Model    string     `json:"model"`
-	Messages []Message  `json:"messages"`
-	Stream   bool       `json:"stream"` // Set to true for streaming
-	Tools    []mcp.Tool `json:"tools,omitempty"`
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Stream   bool           `json:"stream"` // Set to true for streaming
+	Tools    []mcp.Tool     `json:"tools,omitempty"`
+	Options  map[string]any `json:"options,omitempty"`
 }
 
 type ChatResponse struct {
@@ -199,6 +200,7 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("User-Agent", "OllamaCode/1.0 (Chat)")
 
 		client := &http.Client{}
 		resp, err := client.Do(httpReq)
