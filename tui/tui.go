@@ -157,6 +157,19 @@ func (m Mode) color() color.Color {
 	return lipgloss.Color("39")
 }
 
+func parseMode(s string) (Mode, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "explore":
+		return ExploreMode, true
+	case "plan":
+		return PlanMode, true
+	case "write":
+		return WriteMode, true
+	default:
+		return ExploreMode, false
+	}
+}
+
 var readOnlyToolNames = map[string]bool{
 	"read_file":             true,
 	"list_directory":        true,
@@ -246,8 +259,15 @@ type chatToolCallsMsg struct {
 }
 
 type toolResultMsg struct {
-	index  int
-	result api.Message
+	index      int
+	result     api.Message
+	modeSwitch *modeSwitchRequest
+}
+
+type modeSwitchRequest struct {
+	target Mode
+	mode   string
+	reason string
 }
 
 type compactDoneMsg struct {
@@ -1036,21 +1056,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slashSelected = 0
 				return m, nil
 			}
-			oldMode := m.mode
-			m.mode = m.mode.next()
-
-			m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
-
-			if oldMode == PlanMode && m.mode == WriteMode {
-				notes := m.notes.get()
-				if notes != "" {
-					m.history = append(m.history, api.Message{
-						Role:    "system",
-						Content: "Plan Summary from Session Notes:\n\n" + notes,
-					})
-					m.refreshTranscript()
-					m.viewport.GotoBottom()
-				}
+			changed := m.applyModeTransition(m.mode.next(), "")
+			if changed {
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
 			}
 			m.layout()
 			return m, nil
@@ -1165,6 +1174,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pending != nil {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
+			if msg.modeSwitch != nil && !strings.HasPrefix(msg.result.Content, "error:") {
+				m.applyModeTransition(msg.modeSwitch.target, msg.modeSwitch.reason)
+				m.layout()
+			}
 
 			// Update notes viewport in case the tool modified them
 			notesText := m.notes.get()
@@ -2549,6 +2562,47 @@ func (m *Model) copySelection() {
 	m.toast = fmt.Sprintf("copied %d chars", len(plain))
 }
 
+func parseModeSwitchArgs(args json.RawMessage) (*modeSwitchRequest, error) {
+	var a struct {
+		Mode   string `json:"mode"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	target, ok := parseMode(a.Mode)
+	if !ok {
+		return nil, fmt.Errorf("invalid mode: %s", a.Mode)
+	}
+	modeName := target.String()
+	reason := strings.TrimSpace(a.Reason)
+	return &modeSwitchRequest{target: target, mode: modeName, reason: reason}, nil
+}
+
+func (m *Model) applyModeTransition(target Mode, reason string) bool {
+	if m.mode == target {
+		m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
+		return false
+	}
+
+	oldMode := m.mode
+	m.mode = target
+	m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
+	if strings.TrimSpace(reason) != "" {
+		m.toast = fmt.Sprintf("mode: %s — %s", m.mode, strings.TrimSpace(reason))
+	}
+
+	if oldMode == PlanMode && m.mode == WriteMode {
+		if notes := m.notes.get(); notes != "" {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "Plan Summary from Session Notes:\n\n" + notes,
+			})
+		}
+	}
+	return true
+}
+
 func (m *Model) switchModeTool() mcp.Tool {
 	return mcp.Tool{
 		Type: "function",
@@ -2572,35 +2626,12 @@ func (m *Model) switchModeTool() mcp.Tool {
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			var a struct {
-				Mode   string `json:"mode"`
-				Reason string `json:"reason"`
-			}
-			if err := json.Unmarshal(args, &a); err != nil {
-				return "", fmt.Errorf("invalid arguments: %w", err)
-			}
-			var target Mode
-			switch a.Mode {
-			case "explore":
-				target = ExploreMode
-			case "plan":
-				target = PlanMode
-			case "write":
-				target = WriteMode
-			default:
-				return "", fmt.Errorf("invalid mode: %s", a.Mode)
+			req, err := parseModeSwitchArgs(args)
+			if err != nil {
+				return "", err
 			}
 
-			if m.mode == target {
-				return fmt.Sprintf("already in %s mode", a.Mode), nil
-			}
-
-			// We don't switch immediately; we return a signal that TUI will handle.
-			// Or we can just switch and update TUI state.
-			m.mode = target
-			m.layout()
-			m.toast = fmt.Sprintf("switched to %s: %s", a.Mode, a.Reason)
-			return fmt.Sprintf("mode switched to %s", a.Mode), nil
+			return fmt.Sprintf("mode switch requested to %s", req.mode), nil
 		},
 	}
 }
@@ -2835,7 +2866,11 @@ func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
 
 func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
 	return func() tea.Msg {
-		return toolResultMsg{index: index, result: m.invokeTool(call)}
+		var req *modeSwitchRequest
+		if call.Function.Name == "switch_mode" {
+			req, _ = parseModeSwitchArgs(call.Function.Arguments)
+		}
+		return toolResultMsg{index: index, result: m.invokeTool(call), modeSwitch: req}
 	}
 }
 
@@ -2868,6 +2903,12 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.pending.started[i] = true
 			m.pending.done++
 			continue
+		}
+
+		if call.Function.Name == "switch_mode" {
+			m.pending.started[i] = true
+			cmds = append(cmds, m.invokeToolCmd(i, call))
+			break
 		}
 
 		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
