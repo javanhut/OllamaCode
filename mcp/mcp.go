@@ -601,7 +601,11 @@ func WriteFileTool() Tool {
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
-			if err := os.WriteFile(a.Path, []byte(a.Content), 0o644); err != nil {
+			mode := os.FileMode(0o644)
+			if info, err := os.Stat(a.Path); err == nil {
+				mode = info.Mode().Perm()
+			}
+			if err := os.WriteFile(a.Path, []byte(a.Content), mode); err != nil {
 				return "", err
 			}
 			hash, _ := calculateHash(a.Path)
@@ -804,7 +808,7 @@ func RunShellTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "run_shell",
-			Description: "Run a shell command via `bash -c`. Use this for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr; non-zero exits are reported in the result.",
+			Description: "Run a shell command via `sh -c`. Use this for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr; non-zero exits are reported in the result.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -833,7 +837,7 @@ func RunShellTool() Tool {
 			}
 			cctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			cmd := exec.CommandContext(cctx, "bash", "-c", a.Command)
+			cmd := exec.CommandContext(cctx, "sh", "-c", a.Command)
 			if a.WorkingDir != "" {
 				cmd.Dir = a.WorkingDir
 			}
@@ -1378,7 +1382,11 @@ func ApplyDiffTool() Tool {
 				return "", fmt.Errorf("search block is ambiguous (multiple occurrences)")
 			}
 			newContent := strings.Replace(content, a.Search, a.Replace, 1)
-			if err := os.WriteFile(a.Path, []byte(newContent), 0o644); err != nil {
+			mode := os.FileMode(0o644)
+			if info, err := os.Stat(a.Path); err == nil {
+				mode = info.Mode().Perm()
+			}
+			if err := os.WriteFile(a.Path, []byte(newContent), mode); err != nil {
 				return "", err
 			}
 			return "successfully applied diff to " + a.Path, nil
@@ -1610,7 +1618,7 @@ func FindSymbolTool() Tool {
 			}
 			// Common regex for "func Symbol", "class Symbol", "Symbol =" etc.
 			pattern := fmt.Sprintf(`(func|class|type|var|const|def|interface)\s+%s`, a.Symbol)
-			argv := []string{"-rnE", "--exclude-dir={.git,node_modules,build}", pattern, "."}
+			argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", pattern, "."}
 			cmd := exec.CommandContext(ctx, "grep", argv...)
 			out, _ := cmd.CombinedOutput()
 			text := strings.TrimSpace(string(out))
