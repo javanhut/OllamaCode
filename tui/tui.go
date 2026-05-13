@@ -217,6 +217,7 @@ func (m *Model) logActivity(s string) {
 
 type chatChunkMsg struct{ content string }
 type chatDoneMsg struct {
+	content    string
 	promptEval int
 	evalCount  int
 }
@@ -1068,6 +1069,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatDoneMsg:
 		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
+		if msg.content != "" {
+			m.streamBuf.WriteString(msg.content)
+			m.refreshTranscript()
+		}
 		finalAssistant := m.streamBuf.String()
 		if len(finalAssistant) > 0 {
 			m.history = append(m.history, api.Message{
@@ -2084,10 +2089,8 @@ func (m *Model) waitForStream() tea.Cmd {
 				}
 			}
 			if chunk.Done {
-				if chunk.Message.Content != "" {
-					return chatChunkMsg{content: chunk.Message.Content}
-				}
 				return chatDoneMsg{
+					content:    chunk.Message.Content,
 					promptEval: chunk.PromptEval,
 					evalCount:  chunk.EvalCount,
 				}
