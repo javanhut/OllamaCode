@@ -373,9 +373,69 @@ type Model struct {
 	memory       *memory.Store
 	mdCache      map[string]string
 	expandTools  bool
+	slashVisible     bool
+	slashSuggestions []string
+	slashSelected    int
 
 	companion       *companion.Client
 	companionSender func(tea.Msg)
+}
+
+var slashCommands = []struct {
+	name string
+	desc string
+}{
+	{"/quit", "exit the application"},
+	{"/exit", "exit the application"},
+	{"/settings", "change Ollama URL"},
+	{"/model", "pick a model"},
+	{"/models", "pick a model"},
+	{"/clear", "reset the conversation"},
+	{"/help", "show help screen"},
+	{"/?", "show help screen"},
+	{"/notes", "toggle session notes panel"},
+	{"/companion", "toggle speech-to-text input"},
+	{"/copy", "copy last response to clipboard"},
+	{"/save", "save session with optional name"},
+	{"/load", "load a saved session by name"},
+	{"/sessions", "list saved sessions"},
+	{"/archive", "retrieve compressed archive"},
+}
+
+func (m *Model) updateSlashSuggestions() {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") || strings.Contains(val, "\n") {
+		m.slashVisible = false
+		m.slashSuggestions = nil
+		m.slashSelected = 0
+		return
+	}
+	var matches []string
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.name, val) && val != c.name {
+			dup := false
+			for _, m := range matches {
+				if m == c.name {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				matches = append(matches, c.name)
+			}
+		}
+	}
+	if len(matches) > 0 {
+		m.slashVisible = true
+		m.slashSuggestions = matches
+		if m.slashSelected >= len(matches) {
+			m.slashSelected = 0
+		}
+	} else {
+		m.slashVisible = false
+		m.slashSuggestions = nil
+		m.slashSelected = 0
+	}
 }
 
 func New() *Model {
@@ -936,6 +996,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if k := msg.String(); k == "ctrl+c" {
 			return m, tea.Quit
 		}
+		if msg.String() == "esc" && m.slashVisible {
+			m.slashVisible = false
+			m.slashSuggestions = nil
+			m.slashSelected = 0
+			return m, nil
+		}
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil {
 			m.stream.cancel()
 			m.toast = "stopped"
@@ -951,8 +1017,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
-		// Tab cycles mode regardless of which state we're in (chat/help/notes).
+		// Tab: complete slash command if autocomplete is visible, else cycle mode.
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+			if m.slashVisible && len(m.slashSuggestions) > 0 {
+				// Complete with current suggestion
+				m.input.SetValue(m.slashSuggestions[m.slashSelected])
+				m.input.CursorEnd()
+				m.slashVisible = false
+				m.slashSuggestions = nil
+				m.slashSelected = 0
+				return m, nil
+			}
 			oldMode := m.mode
 			m.mode = m.mode.next()
 
@@ -1202,6 +1277,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
+		m.updateSlashSuggestions()
 		desired := clamp(m.input.LineCount(), minInputLines, maxInputLines)
 		if desired != prevH {
 			m.input.SetHeight(desired)
@@ -1325,10 +1401,14 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.streaming && !strings.HasPrefix(val, "/") {
 			m.queue = append(m.queue, val)
 			m.input.Reset()
+			m.slashVisible = false
+			m.slashSuggestions = nil
 			m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
 			return m, nil
 		}
 
+		m.slashVisible = false
+		m.slashSuggestions = nil
 		m.toast = ""
 		switch val {
 		case "/quit", "/exit":
@@ -1985,7 +2065,7 @@ func (m *Model) layout() {
 		}
 		m.viewport.HighlightStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("232")).
-			Background(lipgloss.Color("215"))
+			Background(lipgloss.Color("39")) // Bright blue — high contrast on dark backgrounds
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 
 		m.notesViewport = viewport.New(
@@ -2840,6 +2920,40 @@ func lastAssistantMessage(history []api.Message) string {
 	return ""
 }
 
+func (m *Model) slashSuggestionsView() string {
+	if !m.slashVisible || len(m.slashSuggestions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	sugStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252")).
+		Padding(0, 1)
+	selStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("39")).
+		Foreground(lipgloss.Color("232")).
+		Bold(true).
+		Padding(0, 1)
+	mutedStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("245")).
+		Padding(0, 1)
+
+	b.WriteString("\n")
+	for i, s := range m.slashSuggestions {
+		if i == m.slashSelected {
+			b.WriteString(selStyle.Render(s))
+		} else {
+			b.WriteString(sugStyle.Render(s))
+		}
+		if i < len(m.slashSuggestions)-1 {
+			b.WriteString(" ")
+		}
+	}
+	b.WriteString("  ")
+	b.WriteString(mutedStyle.Render("tab to complete"))
+	return b.String()
+}
+
 func (m *Model) inputView() string {
 	width := m.width
 	if width <= 0 {
@@ -2858,7 +2972,8 @@ func (m *Model) inputView() string {
 		Render(label)
 	inputW := max(1, width-lipgloss.Width(prefix))
 	input := inputBandStyle.Width(inputW).Render(m.input.View())
-	return prefix + input
+	suggestions := m.slashSuggestionsView()
+	return suggestions + "\n" + prefix + input
 }
 
 func (m *Model) welcomePanel() string {
