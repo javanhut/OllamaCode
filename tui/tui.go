@@ -405,6 +405,7 @@ type Model struct {
 	historyIndex    int
 	companion       *companion.Client
 	companionSender func(tea.Msg)
+	lastRenderTime  time.Time
 }
 
 var slashCommands = []struct {
@@ -1144,9 +1145,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatChunkMsg:
 		wasAtBottom := m.viewport.AtBottom()
 		m.streamBuf.WriteString(msg.content)
-		m.refreshTranscript()
-		if wasAtBottom {
-			m.viewport.GotoBottom()
+		if time.Since(m.lastRenderTime) > 60*time.Millisecond || strings.Contains(msg.content, "\n") {
+			m.refreshTranscript()
+			m.lastRenderTime = time.Now()
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
 		}
 		if m.stream != nil {
 			cmds = append(cmds, m.waitForStream())
@@ -2305,6 +2309,7 @@ func (m *Model) startStream() tea.Cmd {
 	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel}
 	m.streaming = true
 	m.streamBuf.Reset()
+	m.lastRenderTime = time.Time{}
 	return m.waitForStream()
 }
 

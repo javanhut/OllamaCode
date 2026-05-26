@@ -2,6 +2,7 @@ package huffman
 
 import (
 	"container/heap"
+	"strings"
 )
 
 type Node struct {
@@ -74,18 +75,18 @@ func Encode(text string) (string, *Node) {
 	codes := make(map[rune]string)
 	GetCodes(root, "", codes)
 
-	encoded := ""
+	var encoded strings.Builder
 	for _, char := range text {
-		encoded += codes[char]
+		encoded.WriteString(codes[char])
 	}
-	return encoded, root
+	return encoded.String(), root
 }
 
 func Decode(encoded string, root *Node) string {
 	if root == nil || encoded == "" {
 		return ""
 	}
-	decoded := ""
+	var decoded strings.Builder
 	current := root
 	for _, bit := range encoded {
 		if bit == '0' {
@@ -95,11 +96,11 @@ func Decode(encoded string, root *Node) string {
 		}
 
 		if current.Left == nil && current.Right == nil {
-			decoded += string(current.Char)
+			decoded.WriteRune(current.Char)
 			current = root
 		}
 	}
-	return decoded
+	return decoded.String()
 }
 
 type CompressedData struct {
