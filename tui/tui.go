@@ -223,6 +223,7 @@ var destructiveToolNames = map[string]bool{
 	"run_shell":      true,
 	"git_add":        true,
 	"git_commit":     true,
+	"switch_mode":    true,
 	"git_checkout":   true,
 	"git_pull":       true,
 	"git_push":       true,
@@ -1938,34 +1939,85 @@ func (m *Model) notesModal() string {
 func (m *Model) permissionModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Tool wants to run", "n=deny", innerW))
-	b.WriteString("\n\n")
+
+	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
+	maxLines := m.height - 4
+	if maxLines < 8 {
+		maxLines = 8 // absolute minimum safety boundary
+	}
+
+	var headerSection []string
+	headerSection = append(headerSection, m.modalHeader("Tool wants to run", "n=deny", innerW))
+	headerSection = append(headerSection, "")
+
 	if m.pending == nil || m.pending.index >= len(m.pending.calls) {
-		b.WriteString(modalMutedStyle.Render("(no pending call)"))
-		return modalStyle.Width(w).Render(b.String())
+		headerSection = append(headerSection, modalMutedStyle.Render("(no pending call)"))
+		return modalStyle.Width(w).Render(strings.Join(headerSection, "\n"))
 	}
+
 	call := m.pending.calls[m.pending.index]
-	b.WriteString(modalAccentStyle.Render(call.Function.Name))
-	b.WriteString("\n\n")
+	headerSection = append(headerSection, modalAccentStyle.Render(call.Function.Name))
+	headerSection = append(headerSection, "")
+
+	var footerSection []string
+	footerSection = append(footerSection, "")
+	footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("allow once   ")+
+		modalMutedStyle.Render("a ")+modalBodyStyle.Render("allow all in this turn   ")+
+		modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
+
+	// How many lines are left for arguments and preview?
+	usedLines := len(headerSection) + len(footerSection) + 2
+	availableLines := maxLines - usedLines
+	if availableLines < 2 {
+		availableLines = 2 // absolute minimum for args/preview
+	}
+
+	var middleSection []string
 	args := formatToolArgs(call.Function.Arguments, innerW)
-	for _, line := range args {
-		b.WriteString(modalBodyStyle.Render(line))
+
+	// Append arguments line-by-line, truncating if they exceed availableLines
+	for i, line := range args {
+		if len(middleSection) >= availableLines-1 && i < len(args)-1 {
+			middleSection = append(middleSection, modalMutedStyle.Render(fmt.Sprintf("... (%d more lines of arguments)", len(args)-i)))
+			break
+		}
+		middleSection = append(middleSection, modalBodyStyle.Render(line))
+	}
+
+	// If there's still room, add the preview
+	remainingForPreview := availableLines - len(middleSection)
+	if m.pending.preview != "" && remainingForPreview > 2 {
+		middleSection = append(middleSection, "")
+		middleSection = append(middleSection, modalMutedStyle.Render("Preview:"))
+		remainingForPreview -= 2
+
+		previewLines := strings.Split(m.pending.preview, "\n")
+		for i, line := range previewLines {
+			if len(middleSection) >= availableLines-1 && i < len(previewLines)-1 {
+				middleSection = append(middleSection, modalMutedStyle.Render(fmt.Sprintf("... (%d more lines of preview)", len(previewLines)-i)))
+				break
+			}
+			middleSection = append(middleSection, modalMutedStyle.Render(truncatePlain(line, innerW)))
+		}
+	}
+
+	// Build the final modal string
+	var b strings.Builder
+	for _, line := range headerSection {
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	if m.pending.preview != "" {
+	for _, line := range middleSection {
+		b.WriteString(line)
 		b.WriteString("\n")
-		b.WriteString(modalMutedStyle.Render("Preview:"))
-		b.WriteString("\n")
-		for _, line := range strings.Split(m.pending.preview, "\n") {
-			b.WriteString(modalMutedStyle.Render(truncatePlain(line, innerW)))
+	}
+	for i, line := range footerSection {
+		b.WriteString(line)
+		if i < len(footerSection)-1 {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(modalMutedStyle.Render("y/enter ") + modalBodyStyle.Render("allow once   "))
-	b.WriteString(modalMutedStyle.Render("a ") + modalBodyStyle.Render("allow all in this turn   "))
-	b.WriteString(modalMutedStyle.Render("n/esc ") + modalBodyStyle.Render("deny"))
+
 	return modalStyle.Width(w).Render(b.String())
 }
 
@@ -2269,22 +2321,31 @@ func (m *Model) waitForStream() tea.Cmd {
 }
 
 func (m *Model) startStream() tea.Cmd {
-	sp := systemPrompt
-	sp += fmt.Sprintf("\n\nCurrent mode: %s — %s.", m.mode, m.mode.hint())
+	// 1. Static base system prompt (keeps prefix cache hot)
+	msgs := make([]api.Message, 0, len(m.history)+2)
+	msgs = append(msgs, api.Message{Role: "system", Content: systemPrompt})
+
+	// 2. Append conversation history
+	msgs = append(msgs, m.history...)
+
+	// 3. Append dynamic instructions and notes at the end of the history
+	var dynamicContext strings.Builder
+	dynamicContext.WriteString(fmt.Sprintf("Current mode: %s — %s.\n", m.mode, m.mode.hint()))
 	switch m.mode {
 	case ExploreMode:
-		sp += " You may only read. After exploration, summarize concisely. Do not attempt write/edit/run_shell calls."
+		dynamicContext.WriteString("You may only read. After exploration, summarize concisely. Do not attempt write/edit/run_shell calls.\n")
 	case PlanMode:
-		sp += " You may read and update session notes. Describe a plan; do not modify files yet."
+		dynamicContext.WriteString("You may read and update session notes. Describe a plan; do not modify files yet.\n")
 	case WriteMode:
-		sp += " You may modify files and run shell commands. Each destructive call requires user approval."
+		dynamicContext.WriteString("You may modify files and run shell commands. Each destructive call requires user approval.\n")
 	}
+
 	if m.memory != nil {
 		if lt := m.memory.LongTermSummary(); lt != "" {
-			sp += "\n\n[LONG-TERM MEMORY] (carried from prior sessions — these are facts you've previously stored about the user; treat them as known):\n" + lt
+			dynamicContext.WriteString(fmt.Sprintf("\n[LONG-TERM MEMORY] (carried from prior sessions):\n%s\n", lt))
 		}
 		if st := m.memory.ShortTermSummary(); st != "" {
-			sp += "\n\n[SHORT-TERM MEMORY] (this session only):\n" + st
+			dynamicContext.WriteString(fmt.Sprintf("\n[SHORT-TERM MEMORY] (this session only):\n%s\n", st))
 		}
 	}
 
@@ -2292,11 +2353,11 @@ func (m *Model) startStream() tea.Cmd {
 	if notes == "" {
 		notes = "(empty)"
 	}
-	sp += "\n\nSession notes (your persistent scratchpad for this repository):\n" + notes
-	sp += "\n\nUse your session notes tools (read/update/append_session_notes) to record important decisions, project state, and file hashes. This scratchpad is visible to you in every turn and helps you stay on track when the conversation gets long."
-	msgs := make([]api.Message, 0, len(m.history)+1)
-	msgs = append(msgs, api.Message{Role: "system", Content: sp})
-	msgs = append(msgs, m.history...)
+	dynamicContext.WriteString(fmt.Sprintf("\nSession notes (your persistent scratchpad for this repository):\n%s\n", notes))
+	dynamicContext.WriteString("\nUse your session notes tools (read/update/append_session_notes) to record important decisions, project state, and file hashes. This scratchpad is visible to you in every turn and helps you stay on track when the conversation gets long.")
+
+	msgs = append(msgs, api.Message{Role: "system", Content: dynamicContext.String()})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	respCh, errCh := m.host.ContinuousChat(ctx, api.ChatRequest{
 		Model:    m.modelName,
@@ -2944,9 +3005,30 @@ func (m *Model) processPendingTools() tea.Cmd {
 		}
 
 		if call.Function.Name == "switch_mode" {
-			m.pending.started[i] = true
-			cmds = append(cmds, m.invokeToolCmd(i, call))
-			break
+			req, err := parseModeSwitchArgs(call.Function.Arguments)
+			var flowErr error
+			if err != nil {
+				flowErr = err
+			} else {
+				if m.mode == ExploreMode && req.target != PlanMode {
+					flowErr = fmt.Errorf("invalid transition: must switch to 'plan' from 'explore' (requested '%s')", req.mode)
+				} else if m.mode == PlanMode && req.target != WriteMode {
+					flowErr = fmt.Errorf("invalid transition: must switch to 'write' from 'plan' (requested '%s')", req.mode)
+				} else if m.mode == WriteMode {
+					flowErr = fmt.Errorf("already in write mode (the final mode)")
+				}
+			}
+
+			if flowErr != nil {
+				m.pending.results[i] = api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  fmt.Sprintf("error: %v", flowErr),
+				}
+				m.pending.started[i] = true
+				m.pending.done++
+				continue
+			}
 		}
 
 		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
@@ -2973,6 +3055,10 @@ func computePreview(call mcp.ToolCall) string {
 	_ = json.Unmarshal(call.Function.Arguments, &args)
 
 	switch call.Function.Name {
+	case "switch_mode":
+		mode, _ := args["mode"].(string)
+		reason, _ := args["reason"].(string)
+		return fmt.Sprintf("Switch mode to: %s\nReason: %s", strings.TrimSpace(mode), strings.TrimSpace(reason))
 	case "write_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)

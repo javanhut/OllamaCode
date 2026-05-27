@@ -49,7 +49,7 @@ func TestApplyModeTransitionAddsPlanSummaryWhenEnteringWrite(t *testing.T) {
 
 func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 	m := &Model{
-		mode:       ExploreMode,
+		mode:       PlanMode,
 		state:      stateChat,
 		tools:      mcp.NewRegistry(),
 		notes:      &sessionNotes{},
@@ -82,8 +82,17 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 	}
 
 	cmd := m.processPendingTools()
+	if cmd != nil {
+		t.Fatal("expected nil command as switch_mode is now permission-gated")
+	}
+	if m.state != statePermission {
+		t.Fatalf("expected statePermission, got %v", m.state)
+	}
+
+	// Simulate user approval (pressing 'y')
+	_, cmd = m.updatePermission(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if cmd == nil {
-		t.Fatal("expected switch_mode command")
+		t.Fatal("expected switch_mode command after user approval")
 	}
 	if !m.pending.started[0] {
 		t.Fatal("expected switch_mode to be started")
