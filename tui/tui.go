@@ -209,6 +209,13 @@ var readOnlyToolNames = map[string]bool{
 	"disk_usage":            true,
 }
 
+// exploreExtraToolNames are tools available in explore mode in addition to
+// readOnlyToolNames. run_shell is allowed here, but each call is filtered
+// through isExploreReadOnlyShell before invocation.
+var exploreExtraToolNames = map[string]bool{
+	"run_shell": true,
+}
+
 var planExtraToolNames = map[string]bool{}
 
 var destructiveToolNames = map[string]bool{
@@ -407,6 +414,7 @@ type Model struct {
 	companion       *companion.Client
 	companionSender func(tea.Msg)
 	lastRenderTime  time.Time
+	busySince       time.Time
 }
 
 var slashCommands = []struct {
@@ -705,7 +713,7 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString("\n")
 	}
 
-	if t.streaming && fullContent == "" {
+	if t.streaming && fullContent == "" && m.pending == nil {
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(" Thinking..."))
 		b.WriteString("\n")
@@ -735,6 +743,17 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 			b.WriteString(mutedStyle.Render(summary))
 			b.WriteString("\n")
 		}
+	}
+
+	if t.streaming && m.pending != nil && m.pending.done < len(m.pending.calls) {
+		b.WriteString(m.spinner.View())
+		label := m.currentToolLabel()
+		if label != "" {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf(" running %s… (%d/%d)", label, m.pending.done, len(m.pending.calls))))
+		} else {
+			b.WriteString(mutedStyle.Render(" working…"))
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 }
@@ -941,7 +960,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.streaming && m.streamBuf.Len() == 0 {
+		if (m.streaming && m.streamBuf.Len() == 0) || m.pending != nil {
 			m.refreshTranscript()
 		}
 		return m, cmd
@@ -1029,7 +1048,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil {
 			m.stream.cancel()
+			m.streaming = false
+			m.stream = nil
+			m.pending = nil
+			m.busySince = time.Time{}
 			m.toast = "stopped"
+			m.refreshTranscript()
 			return m, nil
 		}
 		if msg.String() == "ctrl+t" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
@@ -1171,6 +1195,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			results: make([]api.Message, len(msg.calls)),
 			started: make([]bool, len(msg.calls)),
 		}
+		m.busySince = time.Now()
 		cmd := m.processPendingTools()
 		m.refreshTranscript()
 		if wasAtBottom {
@@ -1224,6 +1249,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamBuf.Reset()
 		m.streaming = false
 		m.stream = nil
+		m.busySince = time.Time{}
 		m.refreshTranscript()
 		if m.companion != nil && finalAssistant != "" {
 			_ = m.companion.Speak(finalAssistant)
@@ -1262,6 +1288,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastError = fmt.Sprintf("error: %v", msg.err)
 		m.streaming = false
 		m.stream = nil
+		m.busySince = time.Time{}
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
 
@@ -1478,6 +1505,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.streamBuf.Reset()
 			m.streaming = false
 			m.stream = nil
+			m.busySince = time.Time{}
+			m.pending = nil
 			m.queue = nil
 			m.history = nil
 			m.historyIndex = len(m.userHistory)
@@ -2333,11 +2362,11 @@ func (m *Model) startStream() tea.Cmd {
 	dynamicContext.WriteString(fmt.Sprintf("Current mode: %s — %s.\n", m.mode, m.mode.hint()))
 	switch m.mode {
 	case ExploreMode:
-		dynamicContext.WriteString("You may only read. After exploration, summarize concisely. Do not attempt write/edit/run_shell calls.\n")
+		dynamicContext.WriteString("EXPLORE: investigate the codebase. You may read files and call run_shell, but run_shell is restricted to a read-only allowlist (ls, cat, head, tail, grep/rg, find/fd, tree, wc, file, stat, du/df, ps, env, which, sort/uniq/cut/tr, basename/dirname/realpath, plus git status/log/diff/show/branch/remote/blame and go version/env/list/doc/vet). Output redirection (>, >>) and command substitution ($(...), backticks) are blocked. Anything that mutates state — write, edit, install, rm, mv, cp, sudo — will be rejected here. When you have enough context to act, call switch_mode(\"plan\", ...) with a one-line rationale.\n")
 	case PlanMode:
-		dynamicContext.WriteString("You may read and update session notes. Describe a plan; do not modify files yet.\n")
+		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Use this mode to outline the change: scope, files to touch, risks, the exact diff strategy. Do NOT call run_shell — it is unavailable here. When the plan is solid, call switch_mode(\"write\", ...) to execute it.\n")
 	case WriteMode:
-		dynamicContext.WriteString("You may modify files and run shell commands. Each destructive call requires user approval.\n")
+		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Execute the plan from your session notes; don't re-derive it.\n")
 	}
 
 	if m.memory != nil {
@@ -2371,6 +2400,7 @@ func (m *Model) startStream() tea.Cmd {
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.lastRenderTime = time.Time{}
+	m.busySince = time.Now()
 	return m.waitForStream()
 }
 
@@ -2386,11 +2416,15 @@ CORE PERSONALITY:
 - HUMAN, NOT ROBOTIC: No corporate platitudes. No "I'd be happy to help!" No "Great question!" No empty affirmations. Speak like a person who has opinions and has earned them.
 - CONVERATIONAL: You are a friend to the developer not an adversary you should be friendly but also honest not just pick at them just to do it but with purpose.
 WORKFLOW MODES & PERMISSIONS:
-- EXPLORE: Default state. You have read-only tools. Use this to understand the codebase.
-- PLAN: For proposing changes. You can read files and update session notes.
-- WRITE: For applying changes. You have full access to destructive tools.
-- TRANSITIONING: You MUST call 'switch_mode' to request a transition. If you are in EXPLORE and need to plan, call 'switch_mode("plan", ...)'. If you are in PLAN and have an approved plan, call 'switch_mode("write", ...)'. NEVER try to edit files in EXPLORE or PLAN modes.
-- ELEVATED PERMISSIONS (SUDO): If a shell command or file operation fails with "Permission denied", do not just give up. Ask the user if you should try again with 'sudo' or if they can fix the permissions. You may use 'sudo' in 'run_shell' if you explain why it's necessary and the user is in WRITE mode.
+The session moves in one direction: EXPLORE → PLAN → WRITE. Each mode has a specific job; do not try to do the next mode's job from the current one.
+
+- EXPLORE (default): investigate. You have the read-only file tools (read_file, list_directory, find_files, grep, file_info, get_working_directory, git_status/diff/log/branch, find_symbol, semantic_search, etc.) and run_shell — but run_shell here is gated to a READ-ONLY ALLOWLIST. Allowed: ls, cat, head, tail, wc, file, stat, du/df, grep/rg, find/fd, tree, ps, env, which/type, sort/uniq/cut/tr, basename/dirname/realpath, plus git status/log/diff/show/branch/remote/blame/ls-files/rev-parse and go version/env/list/doc/vet. Blocked: anything that writes (rm, mv, cp, mkdir, touch, sed -i, install, sudo, etc.), output redirection (>, >>), and command substitution ($(...), backticks). When you've understood enough to act, call switch_mode("plan", "<one-line reason>"). DO NOT try to write, edit, or mutate from here.
+- PLAN: think and design. NO run_shell. NO writes. You may read freely and you may update session notes (read/update/append_session_notes) to record the plan: what changes, in which files, why, and the exact diff strategy. Calling run_shell in this mode is an error — the harness will reject it. When the plan is concrete and scoped, call switch_mode("write", "<one-line reason>").
+- WRITE: execute the plan. Full toolset — edit_file, write_file, run_shell, delete_file, the git mutators, all of it. Each destructive call surfaces a permission prompt; the user must approve Y/A/N before it runs. This is the terminal mode; you cannot move back.
+
+TRANSITIONING: You MUST call 'switch_mode' to advance. Valid transitions are explore→plan and plan→write only. The switch itself is permission-gated, so the user sees and approves every transition. NEVER try to edit files in EXPLORE or PLAN; NEVER try to run_shell in PLAN.
+
+ELEVATED PERMISSIONS (SUDO): If a shell command or file operation fails with "Permission denied", do not just give up. Ask the user if you should try again with 'sudo' or if they can fix the permissions. You may use 'sudo' in 'run_shell' only in WRITE mode, and only after explaining why it's necessary.
 
 TONE DIAL — know which mode you're in:
 - DEFAULT (most of the time): warm, witty, sharp, helpful. Like a friend who's also the best engineer you know.
@@ -2509,13 +2543,43 @@ func (m *Model) headerView() string {
 	return row + "\n" + rule
 }
 
+// elapsedSuffix returns " Ns" for the current busy phase, or "" when idle or
+// under one second. It gives the user a moving counter so a slow turn never
+// looks frozen.
+func (m *Model) elapsedSuffix() string {
+	if m.busySince.IsZero() {
+		return ""
+	}
+	secs := int(time.Since(m.busySince).Seconds())
+	if secs < 1 {
+		return ""
+	}
+	return fmt.Sprintf(" %ds", secs)
+}
+
+// currentToolLabel names the tool currently being worked on in the pending
+// batch (the next one expected to finish), or "" if none.
+func (m *Model) currentToolLabel() string {
+	if m.pending == nil || m.pending.done >= len(m.pending.calls) {
+		return ""
+	}
+	return m.pending.calls[m.pending.done].Function.Name
+}
+
 func (m *Model) footerView() string {
 	c := m.mode.color()
 	status := " READY "
-	if m.streaming {
-		status = " " + m.spinner.View() + " STREAMING "
-	} else if m.pending != nil {
-		status = fmt.Sprintf(" TOOLS %d/%d ", m.pending.done, len(m.pending.calls))
+	switch {
+	case m.pending != nil:
+		if label := m.currentToolLabel(); label != "" {
+			status = fmt.Sprintf(" %s TOOLS %d/%d · %s%s ", m.spinner.View(), m.pending.done, len(m.pending.calls), label, m.elapsedSuffix())
+		} else {
+			status = fmt.Sprintf(" %s TOOLS %d/%d%s ", m.spinner.View(), m.pending.done, len(m.pending.calls), m.elapsedSuffix())
+		}
+	case m.streaming && m.streamBuf.Len() == 0:
+		status = fmt.Sprintf(" %s THINKING%s ", m.spinner.View(), m.elapsedSuffix())
+	case m.streaming:
+		status = fmt.Sprintf(" %s STREAMING%s ", m.spinner.View(), m.elapsedSuffix())
 	}
 	info := lipgloss.NewStyle().
 		Background(c).
@@ -2941,13 +3005,189 @@ func (m *Model) toolsForMode() []mcp.Tool {
 func (m *Model) toolAllowedInMode(name string) bool {
 	switch m.mode {
 	case ExploreMode:
-		return readOnlyToolNames[name]
+		return readOnlyToolNames[name] || exploreExtraToolNames[name]
 	case PlanMode:
 		return readOnlyToolNames[name] || planExtraToolNames[name]
 	case WriteMode:
 		return true
 	}
 	return false
+}
+
+// exploreShellAllowedBins is the read-only allowlist for run_shell in explore
+// mode. The check is per-segment (commands split on |, ||, &&, ;) and matches
+// the first non-env-assignment token. Anything not in this list is rejected
+// with a hint to switch to write mode.
+var exploreShellAllowedBins = map[string]bool{
+	"ls": true, "cat": true, "head": true, "tail": true,
+	"pwd": true, "echo": true, "printf": true,
+	"wc": true, "file": true, "stat": true,
+	"du": true, "df": true, "free": true,
+	"grep": true, "egrep": true, "fgrep": true, "rg": true,
+	"find": true, "fd": true, "tree": true,
+	"which": true, "whereis": true, "type": true, "command": true,
+	"ps": true, "uptime": true, "whoami": true, "id": true,
+	"uname": true, "hostname": true, "date": true,
+	"env": true, "printenv": true,
+	"sort": true, "uniq": true, "cut": true, "tr": true, "column": true,
+	"true": true, "false": true,
+	"basename": true, "dirname": true, "realpath": true, "readlink": true,
+	"go":  true,
+	"git": true,
+}
+
+var exploreShellAllowedGitSubs = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "remote": true, "blame": true,
+	"ls-files": true, "ls-tree": true, "rev-parse": true,
+	"describe": true, "shortlog": true, "reflog": true,
+	"tag":      true,
+	"cat-file": true, "rev-list": true, "name-rev": true,
+	"grep": true,
+}
+
+var exploreShellAllowedGoSubs = map[string]bool{
+	"version": true, "env": true, "list": true, "doc": true, "vet": true,
+}
+
+func isExploreReadOnlyShell(command string) (bool, string) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false, "empty command"
+	}
+	if strings.ContainsRune(command, '`') {
+		return false, "command substitution (backticks) is not allowed in explore mode"
+	}
+	if strings.Contains(command, "$(") {
+		return false, "command substitution $(...) is not allowed in explore mode"
+	}
+	if hasOutputRedirect(command) {
+		return false, "output redirection (>, >>) is not allowed in explore mode"
+	}
+	segments := splitShellSegments(command)
+	for _, seg := range segments {
+		if seg == "" {
+			continue
+		}
+		fields := strings.Fields(seg)
+		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
+			fields = fields[1:]
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		bin := fields[0]
+		if idx := strings.LastIndexAny(bin, "/"); idx >= 0 {
+			bin = bin[idx+1:]
+		}
+		if !exploreShellAllowedBins[bin] {
+			return false, fmt.Sprintf("command %q is not in the explore-mode read-only allowlist", bin)
+		}
+		switch bin {
+		case "git":
+			sub := firstNonFlagArg(fields[1:])
+			if sub != "" && !exploreShellAllowedGitSubs[sub] {
+				return false, fmt.Sprintf("git subcommand %q is not in the explore-mode read-only allowlist", sub)
+			}
+		case "go":
+			sub := firstNonFlagArg(fields[1:])
+			if sub != "" && !exploreShellAllowedGoSubs[sub] {
+				return false, fmt.Sprintf("go subcommand %q is not in the explore-mode read-only allowlist", sub)
+			}
+		}
+	}
+	return true, ""
+}
+
+func firstNonFlagArg(fields []string) string {
+	for _, f := range fields {
+		if !strings.HasPrefix(f, "-") {
+			return f
+		}
+	}
+	return ""
+}
+
+func hasOutputRedirect(s string) bool {
+	inSingle, inDouble := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s):
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+		case c == '>' && !inSingle && !inDouble:
+			// `>&` is fd duplication (e.g. 2>&1), not a file write.
+			if i+1 < len(s) && s[i+1] == '&' {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// splitShellSegments breaks a command on |, ||, &&, and ; while leaving the
+// contents of single- and double-quoted strings intact. This is a deliberate
+// approximation — it doesn't handle every shell edge case, just enough to
+// identify the leading binary of each pipeline segment.
+func splitShellSegments(command string) []string {
+	var (
+		segments  []string
+		cur       strings.Builder
+		inSingle  bool
+		inDouble  bool
+	)
+	flush := func() {
+		segments = append(segments, strings.TrimSpace(cur.String()))
+		cur.Reset()
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case c == '\\' && i+1 < len(command):
+			cur.WriteByte(c)
+			cur.WriteByte(command[i+1])
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+			cur.WriteByte(c)
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+			cur.WriteByte(c)
+		case !inSingle && !inDouble && c == '|':
+			if i+1 < len(command) && command[i+1] == '|' {
+				i++
+			}
+			flush()
+		case !inSingle && !inDouble && c == '&':
+			if i+1 < len(command) && command[i+1] == '&' {
+				i++
+				flush()
+			} else {
+				cur.WriteByte(c)
+			}
+		case !inSingle && !inDouble && c == ';':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		flush()
+	}
+	return segments
+}
+
+func extractShellCommand(raw json.RawMessage) string {
+	var a struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal(raw, &a)
+	return a.Command
 }
 
 func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
@@ -3004,6 +3244,21 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
+		exploreShellPrechecked := m.mode == ExploreMode && call.Function.Name == "run_shell"
+		if exploreShellPrechecked {
+			ok, reason := isExploreReadOnlyShell(extractShellCommand(call.Function.Arguments))
+			if !ok {
+				m.pending.results[i] = api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  fmt.Sprintf("error: %s. Call switch_mode(\"plan\", ...) and then switch_mode(\"write\", ...) to run mutating commands.", reason),
+				}
+				m.pending.started[i] = true
+				m.pending.done++
+				continue
+			}
+		}
+
 		if call.Function.Name == "switch_mode" {
 			req, err := parseModeSwitchArgs(call.Function.Arguments)
 			var flowErr error
@@ -3031,7 +3286,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			}
 		}
 
-		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] {
+		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] && !exploreShellPrechecked {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
 			m.state = statePermission

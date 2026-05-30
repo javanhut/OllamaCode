@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -171,6 +172,125 @@ func TestTranscriptLineAtVisualOffsetAccountsForSoftWrap(t *testing.T) {
 		if got := m.transcriptLineAtVisualOffset(offset); got != want {
 			t.Fatalf("offset %d: expected line %d, got %d", offset, want, got)
 		}
+	}
+}
+
+func TestIsExploreReadOnlyShell(t *testing.T) {
+	allowed := []string{
+		"ls -la",
+		"cat README.md",
+		"head -n 20 main.go",
+		"grep -rn foo .",
+		"rg --files",
+		"find . -name '*.go'",
+		"git status",
+		"git log --oneline -n 5",
+		"git diff HEAD~1",
+		"go version",
+		"go list ./...",
+		"ls | wc -l",
+		"cat file.txt | grep foo | sort | uniq",
+		"ps aux 2>&1",
+		"ls -la && pwd",
+		"FOO=bar env",
+		"cat 'has > in name.txt'",
+	}
+	for _, cmd := range allowed {
+		ok, reason := isExploreReadOnlyShell(cmd)
+		if !ok {
+			t.Errorf("expected %q to be allowed; rejected: %s", cmd, reason)
+		}
+	}
+
+	blocked := []string{
+		"rm -rf /tmp/foo",
+		"mv a b",
+		"echo hi > out.txt",
+		"cat a >> b",
+		"sed -i 's/a/b/' file",
+		"sudo cat /etc/shadow",
+		"git push",
+		"git commit -m oops",
+		"git checkout main",
+		"go build ./...",
+		"go run main.go",
+		"$(rm -rf /)",
+		"`whoami`",
+		"ls; rm foo",
+		"ls && rm foo",
+		"npm install",
+		"curl https://example.com",
+	}
+	for _, cmd := range blocked {
+		ok, _ := isExploreReadOnlyShell(cmd)
+		if ok {
+			t.Errorf("expected %q to be blocked, but it was allowed", cmd)
+		}
+	}
+}
+
+func TestToolAllowedInModeMatrix(t *testing.T) {
+	cases := []struct {
+		mode    Mode
+		tool    string
+		allowed bool
+	}{
+		{ExploreMode, "read_file", true},
+		{ExploreMode, "run_shell", true},
+		{ExploreMode, "write_file", false},
+		{ExploreMode, "edit_file", false},
+		{ExploreMode, "switch_mode", true},
+		{PlanMode, "read_file", true},
+		{PlanMode, "run_shell", false},
+		{PlanMode, "write_file", false},
+		{PlanMode, "update_session_notes", true},
+		{PlanMode, "switch_mode", true},
+		{WriteMode, "run_shell", true},
+		{WriteMode, "write_file", true},
+		{WriteMode, "edit_file", true},
+	}
+	for _, c := range cases {
+		m := &Model{mode: c.mode}
+		got := m.toolAllowedInMode(c.tool)
+		if got != c.allowed {
+			t.Errorf("mode=%s tool=%s: expected %v, got %v", c.mode, c.tool, c.allowed, got)
+		}
+	}
+}
+
+func TestElapsedSuffix(t *testing.T) {
+	m := &Model{}
+	if got := m.elapsedSuffix(); got != "" {
+		t.Errorf("idle: expected empty suffix, got %q", got)
+	}
+	m.busySince = time.Now().Add(-3 * time.Second)
+	if got := m.elapsedSuffix(); got != " 3s" {
+		t.Errorf("expected \" 3s\", got %q", got)
+	}
+	m.busySince = time.Now()
+	if got := m.elapsedSuffix(); got != "" {
+		t.Errorf("sub-second: expected empty suffix, got %q", got)
+	}
+}
+
+func TestCurrentToolLabel(t *testing.T) {
+	m := &Model{}
+	if got := m.currentToolLabel(); got != "" {
+		t.Errorf("no pending: expected empty, got %q", got)
+	}
+	m.pending = &pendingBatch{
+		calls: []mcp.ToolCall{
+			{Function: mcp.ToolCallFunction{Name: "read_file"}},
+			{Function: mcp.ToolCallFunction{Name: "grep"}},
+		},
+		done: 1,
+	}
+	if got := m.currentToolLabel(); got != "grep" {
+		t.Errorf("expected \"grep\" at done=1, got %q", got)
+	}
+	m.pending.done = 2
+	if got := m.currentToolLabel(); got != "" {
+		t.Errorf("all done: expected empty, got %q", got)
 	}
 }
 
