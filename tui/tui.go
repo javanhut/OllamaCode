@@ -430,18 +430,20 @@ type Model struct {
 	failedCalls       map[string]int // fingerprint -> consecutive failure count
 	oscillationWarned bool           // corrective nudge emitted once per turn
 	suppressToolsOnce bool           // next stream sends no tools (step budget hit)
+	lastStepTool      string         // tool name of the previous step's batch
+	sameToolStreak    int            // consecutive steps calling only that tool
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
-	ragIndex         *semantic.Index
-	ragReady         bool
-	ragBuilding      bool
-	lastRagQuery     string
-	lastRagBlock     string // injected via buildDynamicContext; reused across tool re-invokes
-	ragMu            sync.Mutex
-	ragChanged       map[string]bool // paths changed since last reindex (hook-populated)
+	ragIndex     *semantic.Index
+	ragReady     bool
+	ragBuilding  bool
+	lastRagQuery string
+	lastRagBlock string // injected via buildDynamicContext; reused across tool re-invokes
+	ragMu        sync.Mutex
+	ragChanged   map[string]bool // paths changed since last reindex (hook-populated)
 
-	ckpt checkpointStore // per-turn file snapshots for /undo
+	ckpt             checkpointStore // per-turn file snapshots for /undo
 	kvStore          *storage.KVStore
 	memory           *memory.Store
 	mdCache          map[string]string
@@ -3398,6 +3400,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 	}
 
 	if m.pending.done >= len(m.pending.calls) {
+		batchTool := batchSingleTool(m.pending.calls)
 		m.history = append(m.history, m.pending.results...)
 		m.pending = nil
 
@@ -3409,6 +3412,28 @@ func (m *Model) processPendingTools() tea.Cmd {
 				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions without making progress. Stop, state your blocker explicitly, and try a different approach.",
 			})
 			m.oscillationWarned = true
+		}
+
+		// Same-tool spam guard: catches a model calling ONE tool over and over
+		// with varying arguments (e.g. switch_mode with a different reason each
+		// time), which slips past fingerprint-based detection.
+		if batchTool != "" && batchTool == m.lastStepTool {
+			m.sameToolStreak++
+		} else {
+			m.sameToolStreak = 1
+			m.lastStepTool = batchTool
+		}
+		if m.sameToolStreak == 3 {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak),
+			})
+		} else if m.sameToolStreak >= 5 {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak),
+			})
+			m.suppressToolsOnce = true
 		}
 
 		// Step budget: cap tool-call rounds per user turn so a confused model
@@ -3462,29 +3487,33 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 		if call.Function.Name == "switch_mode" {
 			req, err := parseModeSwitchArgs(call.Function.Arguments)
-			var flowErr error
-			if err != nil {
-				flowErr = err
-			} else {
-				if m.mode == ExploreMode && req.target != PlanMode {
-					flowErr = fmt.Errorf("invalid transition: must switch to 'plan' from 'explore' (requested '%s')", req.mode)
-				} else if m.mode == PlanMode && req.target != WriteMode {
-					flowErr = fmt.Errorf("invalid transition: must switch to 'write' from 'plan' (requested '%s')", req.mode)
-				} else if m.mode == WriteMode {
-					flowErr = fmt.Errorf("already in write mode (the final mode)")
-				}
-			}
-
-			if flowErr != nil {
+			switch {
+			case err != nil:
+				// Genuinely malformed (bad/unknown mode) — report and move on.
 				m.pending.results[i] = api.Message{
 					Role:     "tool",
 					ToolName: call.Function.Name,
-					Content:  fmt.Sprintf("error: %v", flowErr),
+					Content:  fmt.Sprintf("error: %v", err),
+				}
+				m.pending.started[i] = true
+				m.pending.done++
+				continue
+			case req.target == m.mode:
+				// Redundant switch: succeed as a no-op rather than erroring, so a
+				// confused model doesn't spin retrying the same switch.
+				m.pending.results[i] = api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  fmt.Sprintf("already in %s mode", m.mode),
 				}
 				m.pending.started[i] = true
 				m.pending.done++
 				continue
 			}
+			// Any real transition (forward or backward) is allowed; it's applied
+			// when the result returns (toolResultMsg -> applyModeTransition).
+			// Backward switches go to a safer/more-restrictive mode; permission
+			// prompts still gate destructive tools in write mode.
 		}
 
 		// Short-circuit a call that has already failed identically: re-running

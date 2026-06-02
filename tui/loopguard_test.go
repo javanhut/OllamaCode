@@ -26,6 +26,18 @@ func TestCallFingerprint_DiffersByArgs(t *testing.T) {
 	}
 }
 
+func TestBatchSingleTool(t *testing.T) {
+	if got := batchSingleTool([]mcp.ToolCall{tc("switch_mode", `{"mode":"plan","reason":"a"}`), tc("switch_mode", `{"mode":"plan","reason":"b"}`)}); got != "switch_mode" {
+		t.Fatalf("same tool, varying args should return name, got %q", got)
+	}
+	if got := batchSingleTool([]mcp.ToolCall{tc("read_file", `{}`), tc("grep", `{}`)}); got != "" {
+		t.Fatalf("mixed tools should return empty, got %q", got)
+	}
+	if got := batchSingleTool(nil); got != "" {
+		t.Fatalf("empty batch should return empty, got %q", got)
+	}
+}
+
 func TestIsOscillating(t *testing.T) {
 	if !isOscillating([]string{"A", "B", "A", "B"}) {
 		t.Fatal("ABAB should be detected as oscillating")

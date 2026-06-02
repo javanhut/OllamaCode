@@ -31,9 +31,27 @@ func (m *Model) resetTurnGuards() {
 	m.recentCalls = m.recentCalls[:0]
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
+	m.lastStepTool = ""
+	m.sameToolStreak = 0
 	for k := range m.failedCalls {
 		delete(m.failedCalls, k)
 	}
+}
+
+// batchSingleTool returns the tool name if every call in a batch is the same
+// tool, else "". Used to detect a model spamming one tool (e.g. switch_mode)
+// with varying arguments — which evades fingerprint-based repeat detection.
+func batchSingleTool(calls []mcp.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	name := calls[0].Function.Name
+	for _, c := range calls[1:] {
+		if c.Function.Name != name {
+			return ""
+		}
+	}
+	return name
 }
 
 // canonicalJSON returns a stable serialization of a JSON value with object keys
