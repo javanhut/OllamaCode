@@ -389,6 +389,12 @@ var fileMutators = map[string]bool{
 	"delete_file": true, "move_file": true, "copy_file": true, "touch": true,
 }
 
+// MutatedPaths extracts the path-like arguments of a file-mutating tool call,
+// or nil if the tool doesn't mutate files. Exported for checkpoint snapshots.
+func MutatedPaths(name string, raw json.RawMessage) []string {
+	return mutatedPaths(name, raw)
+}
+
 // mutatedPaths extracts the path-like arguments of a file-mutating tool call.
 func mutatedPaths(name string, raw json.RawMessage) []string {
 	if !fileMutators[name] {
@@ -804,7 +810,7 @@ func CodeDefinitionTool() Tool {
 				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
 				"--exclude-dir=vendor", "--exclude-dir=target", pat, ".")
 			out, _ := cmd.CombinedOutput()
-			text := strings.TrimSpace(stripANSI(string(out)))
+			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
 			if text == "" {
 				return fmt.Sprintf("definition of %q not found in project (found on line %d of %s)", sym, a.Line, a.Path), nil
 			}
@@ -875,18 +881,11 @@ func CodeReferencesTool() Tool {
 				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
 				"--exclude-dir=vendor", "--exclude-dir=target", sym, ".")
 			out, _ := cmd.CombinedOutput()
-			text := strings.TrimSpace(stripANSI(string(out)))
+			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
 			if text == "" {
 				return fmt.Sprintf("no references to %q found in project", sym), nil
 			}
-
-			count := strings.Count(text, "\n") + 1
-			if count > 50 {
-				lines := strings.Split(text, "\n")
-				text = strings.Join(lines[:50], "\n")
-				text += fmt.Sprintf("\n\n... and %d more references (truncated at 50)", count-50)
-			}
-			return fmt.Sprintf("references to %q (%d found):\n%s", sym, count, text), nil
+			return fmt.Sprintf("references to %q (comments excluded):\n%s", sym, text), nil
 		},
 	}
 }
@@ -1711,26 +1710,30 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 		oLines = oLines[:len(oLines)-1]
 	}
 	k := len(oLines)
-	if k == 0 || k > len(cLines) {
-		return "", 0, 2, fmt.Errorf("old_string not found")
+	if k == 0 {
+		return "", 0, 2, fmt.Errorf("old_string is empty")
 	}
 
-	// Find all window start indices whose trimmed lines match oLines.
+	// Find all window start indices whose trimmed lines match oLines exactly.
 	var starts []int
-	for i := 0; i+k <= len(cLines); i++ {
-		match := true
-		for j := 0; j < k; j++ {
-			if strings.TrimSpace(cLines[i+j]) != strings.TrimSpace(oLines[j]) {
-				match = false
-				break
+	if k <= len(cLines) {
+		for i := 0; i+k <= len(cLines); i++ {
+			match := true
+			for j := 0; j < k; j++ {
+				if strings.TrimSpace(cLines[i+j]) != strings.TrimSpace(oLines[j]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				starts = append(starts, i)
 			}
 		}
-		if match {
-			starts = append(starts, i)
-		}
 	}
+
 	if len(starts) == 0 {
-		return "", 0, 2, fmt.Errorf("old_string not found")
+		// Tier 3: fuzzy line-block match.
+		return fuzzyEdit(cLines, oLines, newNorm, useCRLF)
 	}
 	if len(starts) > 1 && !replaceAll {
 		return "", len(starts), 2, fmt.Errorf("old_string matches %d locations (after whitespace-normalization); pass replace_all=true or use a more specific snippet", len(starts))
@@ -1753,6 +1756,87 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 		joined = strings.ReplaceAll(joined, "\n", "\r\n")
 	}
 	return joined, len(starts), 2, nil
+}
+
+// Tier-3 fuzzy thresholds: a match must be both strong in absolute terms and an
+// unambiguous winner over any other (non-overlapping) region.
+const (
+	fuzzyAccept = 0.85
+	fuzzyMargin = 0.10
+)
+
+// fuzzyEdit performs a similarity-based single-best-window replacement. It only
+// commits when the best window scores >= fuzzyAccept AND beats the next-best
+// non-overlapping window by >= fuzzyMargin; otherwise it refuses and returns the
+// closest region so the model can copy the exact current text.
+func fuzzyEdit(cLines, oLines []string, newNorm string, useCRLF bool) (string, int, int, error) {
+	k := len(oLines)
+	bestScore, bestStart := -1.0, -1
+	for i := 0; i+k <= len(cLines); i++ {
+		if s := windowScore(cLines, oLines, i); s > bestScore {
+			bestScore, bestStart = s, i
+		}
+	}
+	if bestStart < 0 {
+		return "", 0, 3, fmt.Errorf("old_string not found")
+	}
+	secondScore := -1.0
+	for i := 0; i+k <= len(cLines); i++ {
+		if absInt(i-bestStart) < k {
+			continue // overlaps the best window
+		}
+		if s := windowScore(cLines, oLines, i); s > secondScore {
+			secondScore = s
+		}
+	}
+	if bestScore < fuzzyAccept || (secondScore >= 0 && bestScore-secondScore < fuzzyMargin) {
+		region := strings.Join(cLines[bestStart:bestStart+k], "\n")
+		return "", 0, 3, fmt.Errorf("no confident match for old_string (best similarity %.2f at lines %d-%d). Closest current text:\n%s\nCopy it exactly (whitespace included) and retry", bestScore, bestStart+1, bestStart+k, region)
+	}
+
+	out := append([]string(nil), cLines...)
+	fileIndent := leadingWS(out[bestStart])
+	oldIndent := leadingWS(oLines[0])
+	repl := strings.Split(reindentBlock(newNorm, oldIndent, fileIndent), "\n")
+	out = append(out[:bestStart], append(repl, out[bestStart+k:]...)...)
+	joined := strings.Join(out, "\n")
+	if useCRLF {
+		joined = strings.ReplaceAll(joined, "\n", "\r\n")
+	}
+	return joined, 1, 3, nil
+}
+
+// windowScore is the mean per-line similarity of the k-line window of cLines
+// starting at start against oLines.
+func windowScore(cLines, oLines []string, start int) float64 {
+	sum := 0.0
+	for j := range oLines {
+		sum += lineSimilarity(cLines[start+j], oLines[j])
+	}
+	return sum / float64(len(oLines))
+}
+
+// lineSimilarity is 1 - normalized Levenshtein distance over trimmed lines.
+func lineSimilarity(a, b string) float64 {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if a == b {
+		return 1
+	}
+	maxLen := len(a)
+	if len(b) > maxLen {
+		maxLen = len(b)
+	}
+	if maxLen == 0 {
+		return 1
+	}
+	return 1 - float64(levenshtein(a, b))/float64(maxLen)
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func EditFileTool() Tool {
@@ -1794,10 +1878,17 @@ func EditFileTool() Tool {
 			}
 			updated, count, tier, err := applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
 			if err != nil {
-				if tier == 2 {
+				if tier >= 2 {
 					return "", fmt.Errorf("%w in %s", err, a.Path)
 				}
 				return "", fmt.Errorf("%s: %w", a.Path, err)
+			}
+			// Verify-before-write: if the file parsed cleanly before the edit,
+			// reject (don't write) an edit that would break its syntax.
+			if verifyBytes(a.Path, data) == nil {
+				if verr := verifyBytes(a.Path, []byte(updated)); verr != nil {
+					return "", fmt.Errorf("edit rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix old_string/new_string and retry", a.Path, verr)
+				}
 			}
 			info, err := os.Stat(a.Path)
 			mode := os.FileMode(0o644)
@@ -1809,10 +1900,17 @@ func EditFileTool() Tool {
 			}
 			hash, _ := calculateHash(a.Path)
 			tierNote := ""
-			if tier == 2 {
+			switch tier {
+			case 2:
 				tierNote = " (matched after whitespace-normalization; copy exact text next time for precision)"
+			case 3:
+				tierNote = " (matched by fuzzy similarity — verify the diff carefully)"
 			}
-			return fmt.Sprintf("edited %s: replaced %d occurrence(s)%s\nNew Hash: %s", a.Path, count, tierNote, hash), nil
+			result := fmt.Sprintf("edited %s: replaced %d occurrence(s)%s\nNew Hash: %s", a.Path, count, tierNote, hash)
+			if diff := unifiedDiff(string(data), updated, a.Path); diff != "" {
+				result += "\n" + diff
+			}
+			return result, nil
 		},
 	}
 }
@@ -2669,7 +2767,7 @@ func FindSymbolTool() Tool {
 			argv = append(argv, ".")
 			cmd := exec.CommandContext(ctx, "grep", argv...)
 			out, _ := cmd.CombinedOutput()
-			text := strings.TrimSpace(stripANSI(string(out)))
+			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 100)
 			if text == "" {
 				return fmt.Sprintf("symbol %q not found in project", a.Symbol), nil
 			}

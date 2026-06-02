@@ -20,11 +20,12 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Model    string         `json:"model"`
-	Messages []Message      `json:"messages"`
-	Stream   bool           `json:"stream"` // Set to true for streaming
-	Tools    []mcp.Tool     `json:"tools,omitempty"`
-	Options  map[string]any `json:"options,omitempty"`
+	Model    string          `json:"model"`
+	Messages []Message       `json:"messages"`
+	Stream   bool            `json:"stream"` // Set to true for streaming
+	Tools    []mcp.Tool      `json:"tools,omitempty"`
+	Options  map[string]any  `json:"options,omitempty"`
+	Format   json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
 }
 
 type ChatResponse struct {
@@ -314,6 +315,36 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 	}()
 
 	return respChan, errChan
+}
+
+// ChatOnce performs a single non-streaming chat completion. It's used for
+// constrained-decoding escalation (req.Format set to a JSON schema) where we
+// need one complete, schema-valid object rather than a token stream.
+func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	req.Stream = false
+	urlPath := generatePath("chatResponse", o)
+	jsonData, err := json.Marshal(req)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("failed to marshal chat request: %v", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("failed to create http request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(httpReq)
+	if err != nil {
+		return ChatResponse{}, fmt.Errorf("http request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ChatResponse{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	var out ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ChatResponse{}, fmt.Errorf("failed to decode response: %v", err)
+	}
+	return out, nil
 }
 
 func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {

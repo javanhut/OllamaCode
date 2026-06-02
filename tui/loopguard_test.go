@@ -45,9 +45,9 @@ func TestSalvageJSON(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{`{"a":1}`, `{"a":1}`},                                  // already valid: unchanged
-		{"```json\n{\"a\":1}\n```", `{"a":1}`},                  // fenced
-		{`{"a":1,}`, `{"a":1}`},                                 // trailing comma
+		{`{"a":1}`, `{"a":1}`},                                   // already valid: unchanged
+		{"```json\n{\"a\":1}\n```", `{"a":1}`},                   // fenced
+		{`{"a":1,}`, `{"a":1}`},                                  // trailing comma
 		{"here you go: {\"path\":\"x\"} thanks", `{"path":"x"}`}, // surrounding prose
 	}
 	for _, c := range cases {

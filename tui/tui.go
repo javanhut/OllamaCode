@@ -208,6 +208,7 @@ var readOnlyToolNames = map[string]bool{
 	"hash_file":             true,
 	"process_list":          true,
 	"disk_usage":            true,
+	"spawn_subagent":        true,
 }
 
 // exploreExtraToolNames are tools available in explore mode in addition to
@@ -439,6 +440,8 @@ type Model struct {
 	lastRagBlock     string // injected via buildDynamicContext; reused across tool re-invokes
 	ragMu            sync.Mutex
 	ragChanged       map[string]bool // paths changed since last reindex (hook-populated)
+
+	ckpt checkpointStore // per-turn file snapshots for /undo
 	kvStore          *storage.KVStore
 	memory           *memory.Store
 	mdCache          map[string]string
@@ -474,6 +477,7 @@ var slashCommands = []struct {
 	{"/load", "load a saved session by name"},
 	{"/sessions", "list saved sessions"},
 	{"/archive", "retrieve compressed archive"},
+	{"/undo", "revert the last turn's file changes"},
 	{"/verbose", "toggle detailed tool output"},
 }
 
@@ -601,6 +605,7 @@ func New() *Model {
 	}
 
 	registry.Register(m.switchModeTool())
+	registry.Register(m.spawnSubagentTool())
 	registry.SetFileChangeHook(m.noteFileChanged)
 	if m.modelName != "" {
 		m.resolveProfile()
@@ -1285,42 +1290,70 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.content != "" {
 			m.streamBuf.WriteString(msg.content)
-			m.refreshTranscript()
 		}
 		finalAssistant := m.streamBuf.String()
-		if len(finalAssistant) > 0 {
-			m.history = append(m.history, api.Message{
-				Role:    "assistant",
-				Content: finalAssistant,
-			})
-		}
 		m.streamBuf.Reset()
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
-		m.refreshTranscript()
-		if m.companion != nil && finalAssistant != "" {
-			_ = m.companion.Speak(finalAssistant)
-		}
-		if wasAtBottom {
-			m.viewport.GotoBottom()
-		}
 
-		// Trigger compaction if close to limit. Prefer the model's real token
-		// count when we have it; fall back to the estimate as a backstop.
-		if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
-			cmds = append(cmds, m.compactContext())
-		}
-
-		if len(m.queue) > 0 {
-			next := m.queue[0]
-			m.queue = m.queue[1:]
-			m.history = append(m.history, api.Message{Role: "user", Content: next})
-			m.logActivity("Message (dequeued): " + next)
-			m.resetTurnGuards()
-			cmds = append(cmds, m.startStream())
+		// Model-agnostic fallback: some Ollama templates surface tool calls as
+		// TEXT instead of via the native channel. If the assistant's message is
+		// actually a tool call, route it through the same execution path as a
+		// native call (guarded by the step budget so it can't loop forever).
+		if parsed := m.tools.ParseToolCallsFromContent(finalAssistant); len(parsed) > 0 && m.stepCount < m.maxSteps {
+			m.history = append(m.history, api.Message{
+				Role:      "assistant",
+				Content:   finalAssistant,
+				ToolCalls: parsed,
+			})
+			m.pending = &pendingBatch{
+				calls:   parsed,
+				results: make([]api.Message, len(parsed)),
+				started: make([]bool, len(parsed)),
+			}
+			m.busySince = time.Now()
+			if cmd := m.processPendingTools(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			m.refreshTranscript()
-			m.viewport.GotoBottom()
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
+		} else {
+			if len(finalAssistant) > 0 {
+				m.history = append(m.history, api.Message{
+					Role:    "assistant",
+					Content: finalAssistant,
+				})
+			}
+			m.refreshTranscript()
+			if m.companion != nil && finalAssistant != "" {
+				_ = m.companion.Speak(finalAssistant)
+			}
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
+
+			// Turn complete: bank any file changes as one undoable checkpoint.
+			m.finalizeCheckpoint(m.lastUserMessage())
+
+			// Trigger compaction if close to limit. Prefer the model's real
+			// token count when we have it; fall back to the estimate.
+			if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
+				cmds = append(cmds, m.compactContext())
+			}
+
+			if len(m.queue) > 0 {
+				next := m.queue[0]
+				m.queue = m.queue[1:]
+				m.history = append(m.history, api.Message{Role: "user", Content: next})
+				m.logActivity("Message (dequeued): " + next)
+				m.resetTurnGuards()
+				cmds = append(cmds, m.startStream())
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+			}
 		}
 
 	case compactDoneMsg:
@@ -1359,6 +1392,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stream = nil
 		m.compacting = false
 		m.busySince = time.Time{}
+		m.finalizeCheckpoint(m.lastUserMessage())
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
 
@@ -1585,6 +1619,16 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.lastError = ""
 			m.refreshTranscript()
 			m.viewport.GotoTop()
+			return m, nil
+		case "/undo":
+			m.input.Reset()
+			summary, touched := m.undoLast()
+			m.toast = summary
+			for _, p := range touched {
+				m.noteFileChanged([]string{p}) // keep the RAG index in sync
+			}
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
 			return m, nil
 		case "/help", "/?":
 			m.input.Reset()
@@ -2319,6 +2363,21 @@ func (m *Model) fetchModels() tea.Cmd {
 		}
 		return modelsLoadedMsg{models: names}
 	}
+}
+
+// lastUserMessage returns the text of the most recent user message, truncated
+// for use as a checkpoint label.
+func (m *Model) lastUserMessage() string {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "user" {
+			s := m.history[i].Content
+			if len(s) > 48 {
+				s = s[:48] + "…"
+			}
+			return s
+		}
+	}
+	return "last turn"
 }
 
 func (m *Model) submit() tea.Cmd {
@@ -3300,7 +3359,19 @@ func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
 	// Best-effort repair of almost-valid JSON arguments before dispatch.
 	call.Function.Arguments = salvageJSON(call.Function.Arguments)
+	// Checkpoint affected files before a mutating tool runs, so /undo can revert.
+	if paths := mcp.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
+		m.snapshotBeforeMutate(paths)
+	}
 	result, err := m.tools.Invoke(context.Background(), call)
+	// Last-resort escalation: if the failure is an argument problem, ask the
+	// model for schema-valid arguments via constrained decoding and retry once.
+	if err != nil && m.shouldFormatRepair(call, err) {
+		if fixed, ok := m.repairArgsViaFormat(call); ok {
+			call.Function.Arguments = fixed
+			result, err = m.tools.Invoke(context.Background(), call)
+		}
+	}
 	if err != nil {
 		result = repairHint(call, err)
 	}

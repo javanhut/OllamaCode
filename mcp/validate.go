@@ -208,6 +208,40 @@ func contains(xs []string, s string) bool {
 	return false
 }
 
+// Lookup returns the registered tool by name.
+func (r *Registry) Lookup(name string) (Tool, bool) {
+	t, ok := r.tools[name]
+	return t, ok
+}
+
+// JSONSchema renders the tool's parameter schema as a JSON-schema object,
+// suitable for Ollama's `format` field (constrained decoding of the arguments).
+func (f Function) JSONSchema() json.RawMessage {
+	props := map[string]any{}
+	for name, p := range f.Parameters.Properties {
+		entry := map[string]any{}
+		if p.Type != "" {
+			entry["type"] = p.Type
+		}
+		if p.Description != "" {
+			entry["description"] = p.Description
+		}
+		if len(p.Enum) > 0 {
+			entry["enum"] = p.Enum
+		}
+		props[name] = entry
+	}
+	schema := map[string]any{"type": "object", "properties": props}
+	if len(f.Parameters.Required) > 0 {
+		schema["required"] = f.Parameters.Required
+	}
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return json.RawMessage(`{"type":"object"}`)
+	}
+	return b
+}
+
 // Names returns the registered tool names, sorted.
 func (r *Registry) Names() []string {
 	out := make([]string, 0, len(r.tools))

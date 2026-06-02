@@ -9,15 +9,26 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
 
 - **Streaming chat** with local Ollama models
 - **Built-in tool calling** — the model can read, write, edit, delete, move, and copy files; run shell commands; search with `grep` and `find`
+- **Tuned for open-weight models** — a robustness layer makes weak/local models (Qwen-Coder, DeepSeek, GLM, Llama) behave:
+  - **Tool-call repair** — malformed JSON arguments are salvaged; schema validation returns named, actionable errors; hallucinated tool names get "did you mean…" suggestions
+  - **Text tool-call fallback** — models whose template emits tool calls as text (instead of the native channel) still work; calls are parsed from `<tool_call>`, `<function=…>`, or fenced JSON, with guardrails so prose is never hijacked
+  - **Constrained-decoding escalation** — on repeated bad arguments, the model is re-asked with a JSON schema (`format`) to force a valid object
+- **Loop safety** — a per-turn step budget, plus repeated-call and oscillation detection, stop a confused model from looping forever
+- **Reliable edits** — `edit_file` matches in tiers (exact → whitespace/indent-tolerant → fuzzy similarity), rejects edits that would break a file's syntax before writing, and returns a unified diff
+- **Auto-RAG** — relevant code is embedded and retrieved automatically each turn (no tool call needed); the index refreshes incrementally as files change
+- **Per-model profiles** — context length (`num_ctx`) and tool support are discovered from Ollama's `/api/show` instead of hardcoded; sampling options are configurable per model
+- **Sub-agents** — delegate read-only investigations (`spawn_subagent`) that run a bounded child loop and report back, without cluttering the main context
+- **Checkpoints & undo** — file changes are snapshotted per turn; `/undo` reverts the last turn's edits
 - **Three safety modes:**
   - `explore` — read-only; the model can only inspect files and directories
   - `plan` — read + session notes; the model can outline a plan without touching files
   - `write` — full access; destructive operations require your approval before running
 - **Permission prompts** — in write mode, each destructive tool call is presented for approve/deny before execution
+- **Context management** — token-budgeted prompt assembly (never exceeds `num_ctx`), KV-prefix-cache-friendly ordering, and proactive Huffman-compressed compaction
 - **Session notes** — a persistent scratchpad the model uses to track decisions and context across turns
 - **Mouse support** — click and drag to select text, auto-scrolls at edges, copies on release
 - **Voice companion (optional)** — a small Gio popup window that captures your microphone for speech-to-text into the input box and speaks Layla's replies aloud via TTS
-- **Slash commands** — `/help`, `/settings`, `/model`, `/notes`, `/clear`, `/copy`, `/companion`, `/quit`
+- **Slash commands** — `/help`, `/settings`, `/model`, `/notes`, `/clear`, `/copy`, `/undo`, `/companion`, `/quit`
 
 ## Requirements
 
@@ -61,6 +72,21 @@ Run the binary and connect to your Ollama instance:
 | `OLLAMA_COMPANION_PIPER_BIN` | Path to `piper` (default: `/opt/piper-tts/piper`, `~/.cache/piper/piper`, or `$PATH`) |
 | `OLLAMA_COMPANION_PIPER_MODEL` | Path to a piper `.onnx` voice (default: first match in `~/.cache/piper/`) |
 
+### Configuration
+
+Settings persist to `~/.config/ollama_code/config.json`. Most are written automatically (host, model, per-model profiles), but you can edit the file to tune behavior:
+
+| Field | Description |
+|---|---|
+| `host` | Ollama URL (defaults to `http://localhost:11434` when empty) |
+| `model` | Last-selected chat model |
+| `max_steps` | Tool-call budget per user turn before the agent stops and summarizes (default `25`) |
+| `embed_model` | Embedding model used for auto-RAG (default `nomic-embed-text`) |
+| `auto_rag` | Set to `false` to disable automatic retrieval (default enabled) |
+| `profiles` | Per-model `{num_ctx, supports_tools, temperature, top_p, num_predict}`, auto-discovered from `/api/show` and cached; edit to override sampling |
+
+> **Auto-RAG** needs an embedding model pulled in Ollama (e.g. `ollama pull nomic-embed-text`). If it's missing, retrieval silently disables itself — the manual `code_index` / `semantic_search` tools remain available as a fallback.
+
 ### Keyboard Shortcuts
 
 | Key | Action |
@@ -83,6 +109,9 @@ Run the binary and connect to your Ollama instance:
 | `/notes` | View session notes |
 | `/clear` | Reset the conversation |
 | `/copy` | Copy last assistant response to clipboard |
+| `/undo` | Revert the file changes made during the last turn |
+| `/save` / `/load` / `/sessions` | Save, load, and list conversation sessions |
+| `/archive` | Retrieve a Huffman-compressed history archive |
 | `/companion` | Toggle the voice companion popup (STT in → input, replies → TTS) |
 | `/quit` | Exit |
 
@@ -186,21 +215,36 @@ go test ./api
 
 ```
 ├── api/
-│   └── api.go               # Ollama HTTP client (chat, streaming, models)
+│   └── api.go               # Ollama HTTP client (chat, streaming, embed, /api/show, ChatOnce)
 ├── mcp/
-│   ├── mcp.go               # Tool registry and 30+ built-in filesystem/shell tools
-│   └── external.go          # JSON-RPC stdio bridge for external MCP servers
+│   ├── mcp.go               # Tool registry and 45+ built-in tools
+│   ├── validate.go          # Arg validation, nearest-tool (levenshtein), JSON schema
+│   ├── parse.go             # Parse tool calls emitted as text (model-agnostic fallback)
+│   ├── verify.go            # Pre-write syntax gate (go/parser, json)
+│   ├── diff.go              # LCS unified diff for edit_file
+│   ├── codeintel.go         # Comment-filter + output caps for code search
+│   └── external.go          # JSON-RPC stdio bridge (dormant; not wired to config)
 ├── tui/
-│   └── tui.go               # Bubbletea TUI (modals, viewport, input, modes)
+│   ├── tui.go               # Bubbletea TUI (modals, viewport, input, modes, agent loop)
+│   ├── profile.go           # Per-model profiles + dynamic num_ctx
+│   ├── tokens.go            # Token estimation
+│   ├── assemble.go          # Token-budgeted prompt assembly
+│   ├── loopguard.go         # Step cap, repeat/oscillation guards, JSON salvage, repair hints
+│   ├── format_repair.go     # Constrained-decoding (format) escalation
+│   ├── rag.go               # Auto-RAG: lazy build, per-turn retrieval, incremental reindex
+│   ├── subagent.go          # spawn_subagent tool (read-only)
+│   └── checkpoint.go        # Per-turn file snapshots for /undo
 ├── internal/
+│   ├── agent/               # Headless agent loop (shared by sub-agents and eval)
+│   ├── semantic/            # Embedding index: build, search, incremental reindex
 │   ├── companion/           # CLI-side client that manages the companion subprocess
 │   ├── huffman/             # Context compaction codec
 │   ├── memory/              # Long-term user memory store
 │   └── storage/             # Session KV store
 ├── companion/               # GUI logic (Gio): orb, audio capture, STT, TTS, IPC
 ├── cmd/
-│   └── companion/
-│       └── main.go          # Entry point for the `ollama-companion` binary
+│   ├── companion/main.go    # Entry point for the `ollama-companion` binary
+│   └── eval/main.go         # Headless benchmark harness
 ├── main.go                  # Entry point for `ollama-code`
 └── go.mod                   # Module definition and dependencies
 ```
@@ -211,19 +255,33 @@ go test ./api
 |---|---|
 | `read_file` | Read a file with optional line range |
 | `write_file` | Create or overwrite a file |
-| `edit_file` | Replace exact text snippet in a file |
+| `edit_file` | Replace a snippet — tiered matching (exact → whitespace-tolerant → fuzzy), syntax-gated, returns a diff |
 | `append_file` | Append text to a file |
 | `delete_file` | Delete a file or directory |
-| `move_file` | Move or rename a file/directory |
-| `copy_file` | Copy a file |
-| `list_directory` | List directory entries |
-| `find_files` | Walk directory tree matching a glob pattern |
-| `grep` | Search for regex patterns in files |
-| `file_info` | Get metadata for a path |
-| `make_directory` | Create directories |
-| `touch` | Create empty file or update mtime |
-| `run_shell` | Run arbitrary shell commands |
-| `get_working_directory` | Return the current working directory |
+| `move_file` / `copy_file` | Move/rename or copy a file |
+| `list_directory` / `find_files` | List entries / walk a tree matching a glob |
+| `grep` | Search for regex patterns (output-capped) |
+| `file_info` / `get_working_directory` | Path metadata / current directory |
+| `make_directory` / `touch` | Create directories / empty files |
+| `run_shell` | Run shell commands (read-only allowlist in explore mode) |
+| `find_symbol` / `code_definition` / `code_references` / `code_hover` | Code intelligence (comment-filtered, capped) |
+| `code_index` / `semantic_search` | Build and query the embedding index (also used automatically by auto-RAG) |
+| `spawn_subagent` | Delegate a read-only investigation to a bounded child agent |
+| `web_fetch` / `web_search` / `web_crawl` | Fetch and search the web |
+| `git_*` | `status`, `diff`, `log`, `add`, `commit`, `branch`, `checkout`, `pull`, `push`, `stash`, `merge`, `reset`, `remote` |
+
+All tool arguments are schema-validated before dispatch, and file-mutating tools are snapshotted so `/undo` can revert them.
+
+## Evaluation
+
+`cmd/eval` is a small, self-contained benchmark that runs scripted coding tasks through the headless agent loop against a model, so you can compare models and catch regressions:
+
+```bash
+go run ./cmd/eval -model qwen2.5-coder:7b
+go run ./cmd/eval -model deepseek-coder-v2 -host http://localhost:11434
+```
+
+It reports pass/fail, step count, and timing per task. Requires Ollama with the named model pulled.
 
 ## License
 
