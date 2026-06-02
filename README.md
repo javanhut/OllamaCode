@@ -13,6 +13,7 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
   - **Tool-call repair** — malformed JSON arguments are salvaged; schema validation returns named, actionable errors; hallucinated tool names get "did you mean…" suggestions
   - **Text tool-call fallback** — models whose template emits tool calls as text (instead of the native channel) still work; calls are parsed from `<tool_call>`, `<function=…>`, or fenced JSON, with guardrails so prose is never hijacked
   - **Constrained-decoding escalation** — on repeated bad arguments, the model is re-asked with a JSON schema (`format`) to force a valid object
+- **Verification gate** — when a turn edits files, the harness auto-runs a compile check (`go build`, `cargo check`, `tsc --noEmit`, or a configured command) before letting the turn end. A failing build is fed back and the model is **forced to keep fixing** until it's green or a retry cap is hit — so a weak model can't declare success on code that never compiled. When no objective check exists, it's challenged to prove it verified its work.
 - **Loop safety** — a per-turn step budget, plus repeated-call and oscillation detection, stop a confused model from looping forever
 - **Reliable edits** — `edit_file` matches in tiers (exact → whitespace/indent-tolerant → fuzzy similarity), rejects edits that would break a file's syntax before writing, and returns a unified diff
 - **Auto-RAG** — relevant code is embedded and retrieved automatically each turn (no tool call needed); the index refreshes incrementally as files change
@@ -85,6 +86,8 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | `embed_model` | Embedding model used for auto-RAG (default `nomic-embed-text`) |
 | `auto_rag` | Set to `false` to disable automatic retrieval (default enabled) |
 | `dream` | Set to `false` to disable idle dream mode (default enabled) |
+| `verify` | Set to `false` to disable the auto compile-check after edits (default enabled) |
+| `verify_cmd` | Override the auto-detected compile check, e.g. `"go build ./... && go test ./..."` |
 | `profiles` | Per-model `{num_ctx, supports_tools, temperature, top_p, num_predict}`, auto-discovered from `/api/show` and cached; edit to override sampling |
 
 > **Auto-RAG** needs an embedding model pulled in Ollama (e.g. `ollama pull nomic-embed-text`). If it's missing, retrieval silently disables itself — the manual `code_index` / `semantic_search` tools remain available as a fallback.
@@ -114,6 +117,7 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | `/undo` | Revert the file changes made during the last turn |
 | `/clearnotes` | Clear the session notes scratchpad (also `/notes clear`) |
 | `/dreams` / `/dream` | Show the idle dream log / toggle dream mode |
+| `/verify` | Toggle the auto compile-check after edits |
 | `/save` / `/load` / `/sessions` | Save, load, and list conversation sessions |
 | `/archive` | Retrieve a Huffman-compressed history archive |
 | `/companion` | Toggle the voice companion popup (STT in → input, replies → TTS) |

@@ -12,7 +12,7 @@ import (
 
 // Loop-safety tunables.
 const (
-	defaultMaxSteps     = 25 // tool-call rounds per user turn before we stop
+	defaultMaxSteps     = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
 	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
 	recentCallsKept     = 12 // fingerprint ring length for oscillation detection
 )
@@ -33,6 +33,9 @@ func (m *Model) resetTurnGuards() {
 	m.suppressToolsOnce = false
 	m.lastStepTool = ""
 	m.sameToolStreak = 0
+	m.turnTouchedFiles = false
+	m.verifyAttempts = 0
+	m.challengedThisTurn = false
 	for k := range m.failedCalls {
 		delete(m.failedCalls, k)
 	}

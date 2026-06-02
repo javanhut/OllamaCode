@@ -254,6 +254,8 @@ type config struct {
 	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
 	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
 	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
+	Verify     *bool                   `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
+	VerifyCmd  string                  `json:"verify_cmd,omitempty"`  // override the auto-detected check
 	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
 }
 
@@ -425,14 +427,18 @@ type Model struct {
 	compacting     bool   // guards against overlapping compaction passes
 
 	// Loop safety (reset each user turn).
-	stepCount         int            // tool-call rounds since the last user message
-	maxSteps          int            // budget per turn (cfg.MaxSteps, default 25)
-	recentCalls       []string       // ring of recent call fingerprints (oscillation)
-	failedCalls       map[string]int // fingerprint -> consecutive failure count
-	oscillationWarned bool           // corrective nudge emitted once per turn
-	suppressToolsOnce bool           // next stream sends no tools (step budget hit)
-	lastStepTool      string         // tool name of the previous step's batch
-	sameToolStreak    int            // consecutive steps calling only that tool
+	stepCount          int            // tool-call rounds since the last user message
+	maxSteps           int            // budget per turn (cfg.MaxSteps, default 25)
+	recentCalls        []string       // ring of recent call fingerprints (oscillation)
+	failedCalls        map[string]int // fingerprint -> consecutive failure count
+	oscillationWarned  bool           // corrective nudge emitted once per turn
+	suppressToolsOnce  bool           // next stream sends no tools (step budget hit)
+	lastStepTool       string         // tool name of the previous step's batch
+	sameToolStreak     int            // consecutive steps calling only that tool
+	turnTouchedFiles   bool           // a file-mutating tool succeeded this turn
+	verifying          bool           // a compile check is running
+	verifyAttempts     int            // failed compile checks this turn
+	challengedThisTurn bool           // self-check challenge already issued this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -495,6 +501,7 @@ var slashCommands = []struct {
 	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},
+	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 }
 
@@ -1040,6 +1047,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyDream(msg)
 		return m, nil
 
+	case verifyDoneMsg:
+		m.verifying = false
+		if msg.ok {
+			m.toast = "verified ✓ " + msg.label
+			cmds = append(cmds, m.endTurnTail()...)
+			m.refreshTranscript()
+			return m, tea.Batch(cmds...)
+		}
+		m.verifyAttempts++
+		if m.verifyAttempts >= maxVerifyAttempts {
+			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
+				"[VERIFICATION STILL FAILING after %d attempts] `%s` does not pass:\n\n%s\n\nStop editing. Explain to the user in plain text what is broken and why you couldn't fix it — do not claim it works.",
+				m.verifyAttempts, msg.label, msg.output)})
+			m.suppressToolsOnce = true
+		} else {
+			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
+				"[VERIFICATION FAILED] You are NOT done — `%s` failed. Read the errors, fix the actual cause (don't blame the tools), then it will be re-checked:\n\n%s",
+				msg.label, msg.output)})
+		}
+		m.busySince = time.Now()
+		cmds = append(cmds, m.startStream())
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return m, tea.Batch(cmds...)
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1290,8 +1322,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pending != nil {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
-			if strings.HasPrefix(msg.result.Content, "error:") && msg.index < len(m.pending.calls) {
-				m.failedCalls[callFingerprint(m.pending.calls[msg.index])]++
+			if msg.index < len(m.pending.calls) {
+				call := m.pending.calls[msg.index]
+				if strings.HasPrefix(msg.result.Content, "error:") {
+					m.failedCalls[callFingerprint(call)]++
+				} else if len(mcp.MutatedPaths(call.Function.Name, call.Function.Arguments)) > 0 {
+					m.turnTouchedFiles = true // a file edit succeeded → verify before finishing
+				}
 			}
 			if msg.modeSwitch != nil && !strings.HasPrefix(msg.result.Content, "error:") {
 				m.applyModeTransition(msg.modeSwitch.target, msg.modeSwitch.reason)
@@ -1369,21 +1406,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Turn complete: bank any file changes as one undoable checkpoint.
 			m.finalizeCheckpoint(m.lastUserMessage())
 
-			// Trigger compaction if close to limit. Prefer the model's real
-			// token count when we have it; fall back to the estimate.
-			if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
-				cmds = append(cmds, m.compactContext())
-			}
-
-			if len(m.queue) > 0 {
-				next := m.queue[0]
-				m.queue = m.queue[1:]
-				m.history = append(m.history, api.Message{Role: "user", Content: next})
-				m.logActivity("Message (dequeued): " + next)
-				m.resetTurnGuards()
-				cmds = append(cmds, m.startStream())
+			// Verification gate: if this turn edited files, don't let it end on
+			// broken code — run a compile check (or challenge the model to prove
+			// it verified). On failure this re-invokes the model to keep fixing.
+			if vc := m.maybeVerifyGate(); vc != nil {
+				cmds = append(cmds, vc)
 				m.refreshTranscript()
-				m.viewport.GotoBottom()
+			} else {
+				cmds = append(cmds, m.endTurnTail()...)
 			}
 		}
 
@@ -1689,6 +1719,22 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.history = append(m.history, api.Message{Role: "system", Content: m.dreamLog()})
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
+			return m, nil
+		case "/verify":
+			m.input.Reset()
+			on := !m.verifyOn()
+			m.cfg.Verify = &on
+			saveConfig(m.cfg)
+			if on {
+				cmd, label, ok := m.verifyCommand()
+				if ok {
+					m.toast = "verify on — will run `" + cmd + "` (" + label + ") after edits"
+				} else {
+					m.toast = "verify on — no auto-check for this project; set verify_cmd in config"
+				}
+			} else {
+				m.toast = "verify off"
+			}
 			return m, nil
 		case "/undo":
 			m.input.Reset()
@@ -2687,6 +2733,12 @@ SELF-REVIEW & SKEPTICISM (treat your own notes, memory, and plans as fallible):
 - Distinguish a cheap re-check from real stalling. Re-reading the one file you're about to edit is cheap — do it. Re-litigating a settled decision for the tenth time with no new information is the stall — don't. The tell is whether a verification would cost a tool call or two and could change your next move; if so, it's worth it.
 - Argue with yourself before you argue with the user. If you catch yourself asserting something confidently this session without having actually checked it, check it. Unverified confidence is the failure mode you most need to guard against — "I don't know, let me look" beats a wrong answer delivered with swagger.
 
+VERIFY BEFORE YOU CLAIM DONE (non-negotiable):
+- Writing code is not finishing. You are NOT done until you have RUN the verification and SEEN it pass: for code, that means it compiles/builds (and ideally the tests pass). Build it. Run it. Read the output.
+- A failed build or test is YOUR code being wrong — not the tool being flaky, not the environment being unstable, not a "distraction." When a command exits non-zero or a build fails, read the error, find the real cause, and fix it. Never wave a compile error away. Never declare success on something you haven't seen succeed.
+- Do not narrate success you haven't witnessed ("the system is done", "this is robust"). Describe only what you actually verified. If you couldn't verify it, say exactly that and what's left.
+- Work the problem fully before stopping. Decompose it, take the next concrete step, check the result, and continue — a real fix usually takes several rounds. Stopping early with a confident summary is the most common way to ship broken work.
+
 MEMORY (this is important — read carefully):
 
 You have THREE memory surfaces. Use them deliberately.
@@ -2827,6 +2879,8 @@ func (m *Model) footerView() string {
 		status = fmt.Sprintf(" %s THINKING%s ", m.spinner.View(), m.elapsedSuffix())
 	case m.streaming:
 		status = fmt.Sprintf(" %s STREAMING%s ", m.spinner.View(), m.elapsedSuffix())
+	case m.verifying:
+		status = fmt.Sprintf(" %s VERIFYING%s ", m.spinner.View(), m.elapsedSuffix())
 	case m.dreaming:
 		status = fmt.Sprintf(" %s DREAMING ", m.spinner.View())
 	case m.asleep:
