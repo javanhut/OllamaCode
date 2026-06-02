@@ -31,6 +31,7 @@ import (
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
+	"github.com/javanhut/ollama_code/internal/semantic"
 	"github.com/javanhut/ollama_code/internal/session"
 	"github.com/javanhut/ollama_code/internal/storage"
 	"github.com/javanhut/ollama_code/mcp"
@@ -247,6 +248,22 @@ type config struct {
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
 	Verbose  bool     `json:"verbose,omitempty"`
+
+	MaxSteps   int                     `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
+	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
+	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
+	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
+}
+
+// ModelProfile holds per-model settings discovered from /api/show (and cached)
+// plus optional sampling overrides, so num_ctx and tool support adapt to the
+// actual model instead of a hardcoded value.
+type ModelProfile struct {
+	NumCtx        int      `json:"num_ctx"`
+	SupportsTools bool     `json:"supports_tools"`
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"top_p,omitempty"`
+	NumPredict    *int     `json:"num_predict,omitempty"`
 }
 
 func (m *Model) logActivity(s string) {
@@ -371,6 +388,7 @@ type Model struct {
 	models    []string
 	picker    int
 	modelName string
+	profile   ModelProfile
 	pending   *pendingBatch
 
 	history    []api.Message
@@ -399,8 +417,28 @@ type Model struct {
 	height    int
 	ready     bool
 
-	totalTokens      int
-	contextLimit     int
+	totalTokens    int
+	contextLimit   int
+	archiveSummary string // rolling summary of compacted-away history (volatile tail)
+	compacting     bool   // guards against overlapping compaction passes
+
+	// Loop safety (reset each user turn).
+	stepCount         int            // tool-call rounds since the last user message
+	maxSteps          int            // budget per turn (cfg.MaxSteps, default 25)
+	recentCalls       []string       // ring of recent call fingerprints (oscillation)
+	failedCalls       map[string]int // fingerprint -> consecutive failure count
+	oscillationWarned bool           // corrective nudge emitted once per turn
+	suppressToolsOnce bool           // next stream sends no tools (step budget hit)
+
+	// Auto-RAG. Published indexes are treated immutable; background reindex
+	// works on a Clone and delivers a replacement via ragRefreshedMsg.
+	ragIndex         *semantic.Index
+	ragReady         bool
+	ragBuilding      bool
+	lastRagQuery     string
+	lastRagBlock     string // injected via buildDynamicContext; reused across tool re-invokes
+	ragMu            sync.Mutex
+	ragChanged       map[string]bool // paths changed since last reindex (hook-populated)
 	kvStore          *storage.KVStore
 	memory           *memory.Store
 	mdCache          map[string]string
@@ -553,13 +591,20 @@ func New() *Model {
 		gitBranch:    getGitBranch(),
 		transcript:   &strings.Builder{},
 		streamBuf:    &strings.Builder{},
-		contextLimit: 124000,
+		contextLimit: defaultContextLimit,
+		profile:      ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
+		maxSteps:     maxStepsFromConfig(cfg),
+		failedCalls:  make(map[string]int),
 		kvStore:      kv,
 		memory:       mem,
 		mdCache:      make(map[string]string),
 	}
 
 	registry.Register(m.switchModeTool())
+	registry.SetFileChangeHook(m.noteFileChanged)
+	if m.modelName != "" {
+		m.resolveProfile()
+	}
 	m.input.Focus()
 	return m
 }
@@ -1210,6 +1255,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pending != nil {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
+			if strings.HasPrefix(msg.result.Content, "error:") && msg.index < len(m.pending.calls) {
+				m.failedCalls[callFingerprint(m.pending.calls[msg.index])]++
+			}
 			if msg.modeSwitch != nil && !strings.HasPrefix(msg.result.Content, "error:") {
 				m.applyModeTransition(msg.modeSwitch.target, msg.modeSwitch.reason)
 				m.layout()
@@ -1258,8 +1306,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		}
 
-		// Trigger compaction if close to limit
-		if m.totalTokens > m.contextLimit*9/10 {
+		// Trigger compaction if close to limit. Prefer the model's real token
+		// count when we have it; fall back to the estimate as a backstop.
+		if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
 			cmds = append(cmds, m.compactContext())
 		}
 
@@ -1268,26 +1317,47 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queue = m.queue[1:]
 			m.history = append(m.history, api.Message{Role: "user", Content: next})
 			m.logActivity("Message (dequeued): " + next)
+			m.resetTurnGuards()
 			cmds = append(cmds, m.startStream())
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 		}
 
 	case compactDoneMsg:
+		m.compacting = false
 		m.toast = "context compacted"
-		// Replace the first 'index' messages with a single summary message
-		summaryMsg := api.Message{
-			Role:    "system",
-			Content: "ARCHIVE SUMMARY (Prior history was compacted to save tokens):\n\n" + msg.summary,
+		// Store the summary in the volatile tail (archiveSummary) and DROP the
+		// compacted messages, rather than prepending a system message into
+		// history. This keeps m.history append-only so the KV-cache prefix
+		// (systemPrompt + unchanged history) never shifts.
+		idx := msg.index
+		if idx > len(m.history) {
+			idx = len(m.history)
 		}
-		newHistory := append([]api.Message{summaryMsg}, m.history[msg.index:]...)
-		m.history = newHistory
+		m.archiveSummary = msg.summary
+		m.history = append([]api.Message(nil), m.history[idx:]...)
 		m.refreshTranscript()
+
+	case ragLoadedMsg:
+		m.applyRagLoaded(msg)
+
+	case ragRefreshedMsg:
+		m.applyRagRefreshed(msg)
+
+	case ragRetrievedMsg:
+		// Retrieval finished for a user turn; record the block and start the
+		// model call now that relevant context is in hand.
+		m.lastRagQuery = msg.query
+		m.lastRagBlock = msg.block
+		cmds = append(cmds, m.startStream())
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
 
 	case chatErrMsg:
 		m.lastError = fmt.Sprintf("error: %v", msg.err)
 		m.streaming = false
 		m.stream = nil
+		m.compacting = false
 		m.busySince = time.Time{}
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
@@ -1297,6 +1367,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queue = m.queue[1:]
 			m.history = append(m.history, api.Message{Role: "user", Content: next})
 			m.logActivity("Message (dequeued): " + next)
+			m.resetTurnGuards()
 			cmds = append(cmds, m.startStream())
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
@@ -1419,6 +1490,7 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modelName = m.models[m.picker]
 		m.cfg.Model = m.modelName
 		saveConfig(m.cfg)
+		m.resolveProfile()
 		m.state = stateChat
 		m.input.Focus()
 		m.layout()
@@ -1666,6 +1738,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.cfg.Model = m.modelName
 			saveConfig(m.cfg)
+			m.resolveProfile()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			m.toast = "loaded session '" + name + "'"
@@ -2259,28 +2332,48 @@ func (m *Model) submit() tea.Cmd {
 	m.historyIndex = len(m.userHistory)
 	m.logActivity("Message: " + value)
 	m.lastError = ""
+	m.resetTurnGuards()
 
 	m.input.Reset()
 	m.input.SetHeight(minInputLines)
 	m.layout()
 
-	cmd := m.startStream()
+	// Proactively compact in the background when the estimated history has
+	// crossed the threshold. The current turn is still protected by
+	// assembleMessages' hard ceiling; this keeps older context as a summary
+	// instead of letting it get hard-dropped on later turns.
+	var cmds []tea.Cmd
+	if m.shouldCompact() {
+		if c := m.compactContext(); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	// Auto-RAG: when the index is ready, embed the query and inject relevant
+	// code before streaming (the model call fires on ragRetrievedMsg). When it
+	// isn't ready yet, stream immediately and build the index in the background.
+	cmds = append(cmds, m.startStreamWithRAGGate(value)...)
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
-	return cmd
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) compactContext() tea.Cmd {
-	if len(m.history) < 6 {
+	if len(m.history) < 6 || m.compacting {
 		return nil
 	}
 
+	m.compacting = true
 	m.toast = "compacting & compressing..."
 
 	mid := len(m.history) / 2
 	toCompact := m.history[:mid]
 
 	var conversation strings.Builder
+	// Carry the prior rolling summary forward so repeated compactions don't lose
+	// older context (it no longer lives in m.history).
+	if m.archiveSummary != "" {
+		conversation.WriteString("[prior summary]: " + m.archiveSummary + "\n")
+	}
 	for _, msg := range toCompact {
 		conversation.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
@@ -2349,15 +2442,12 @@ func (m *Model) waitForStream() tea.Cmd {
 	}
 }
 
-func (m *Model) startStream() tea.Cmd {
-	// 1. Static base system prompt (keeps prefix cache hot)
-	msgs := make([]api.Message, 0, len(m.history)+2)
-	msgs = append(msgs, api.Message{Role: "system", Content: systemPrompt})
-
-	// 2. Append conversation history
-	msgs = append(msgs, m.history...)
-
-	// 3. Append dynamic instructions and notes at the end of the history
+// buildDynamicContext renders the volatile, per-turn system message that is
+// always sent LAST so the static prefix (systemPrompt + append-only history)
+// stays byte-stable for KV prefix caching. All content that varies turn-to-turn
+// — mode hint, rolling archive summary, retrieved RAG context, memory, notes —
+// belongs here, never spliced into the prefix.
+func (m *Model) buildDynamicContext(ragBlock string) string {
 	var dynamicContext strings.Builder
 	dynamicContext.WriteString(fmt.Sprintf("Current mode: %s — %s.\n", m.mode, m.mode.hint()))
 	switch m.mode {
@@ -2367,6 +2457,14 @@ func (m *Model) startStream() tea.Cmd {
 		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Use this mode to outline the change: scope, files to touch, risks, the exact diff strategy. Do NOT call run_shell — it is unavailable here. When the plan is solid, call switch_mode(\"write\", ...) to execute it.\n")
 	case WriteMode:
 		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Execute the plan from your session notes; don't re-derive it.\n")
+	}
+
+	if m.archiveSummary != "" {
+		dynamicContext.WriteString(fmt.Sprintf("\n[ARCHIVE SUMMARY] (earlier conversation, compacted to save tokens):\n%s\n", m.archiveSummary))
+	}
+
+	if ragBlock != "" {
+		dynamicContext.WriteString("\n" + ragBlock + "\n")
 	}
 
 	if m.memory != nil {
@@ -2384,17 +2482,25 @@ func (m *Model) startStream() tea.Cmd {
 	}
 	dynamicContext.WriteString(fmt.Sprintf("\nSession notes (your persistent scratchpad for this repository):\n%s\n", notes))
 	dynamicContext.WriteString("\nUse your session notes tools (read/update/append_session_notes) to record important decisions, project state, and file hashes. This scratchpad is visible to you in every turn and helps you stay on track when the conversation gets long.")
+	return dynamicContext.String()
+}
 
-	msgs = append(msgs, api.Message{Role: "system", Content: dynamicContext.String()})
+func (m *Model) startStream() tea.Cmd {
+	// Token-budgeted assembly: static prompt + newest-fitting history + volatile
+	// tail (including the auto-RAG block). Guarantees we never exceed num_ctx.
+	msgs := m.assembleMessages(m.ragBlockForTurn())
 
+	var tools []mcp.Tool
+	if m.profile.SupportsTools && !m.suppressToolsOnce {
+		tools = m.toolsForMode()
+	}
+	m.suppressToolsOnce = false
 	ctx, cancel := context.WithCancel(context.Background())
 	respCh, errCh := m.host.ContinuousChat(ctx, api.ChatRequest{
 		Model:    m.modelName,
 		Messages: msgs,
-		Tools:    m.toolsForMode(),
-		Options: map[string]any{
-			"num_ctx": m.contextLimit,
-		},
+		Tools:    tools,
+		Options:  m.chatOptions(),
 	})
 	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel}
 	m.streaming = true
@@ -3136,10 +3242,10 @@ func hasOutputRedirect(s string) bool {
 // identify the leading binary of each pipeline segment.
 func splitShellSegments(command string) []string {
 	var (
-		segments  []string
-		cur       strings.Builder
-		inSingle  bool
-		inDouble  bool
+		segments []string
+		cur      strings.Builder
+		inSingle bool
+		inDouble bool
 	)
 	flush := func() {
 		segments = append(segments, strings.TrimSpace(cur.String()))
@@ -3192,9 +3298,11 @@ func extractShellCommand(raw json.RawMessage) string {
 
 func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
+	// Best-effort repair of almost-valid JSON arguments before dispatch.
+	call.Function.Arguments = salvageJSON(call.Function.Arguments)
 	result, err := m.tools.Invoke(context.Background(), call)
 	if err != nil {
-		result = fmt.Sprintf("error: %v. Please check the arguments and try again.", err)
+		result = repairHint(call, err)
 	}
 	return api.Message{
 		Role:     "tool",
@@ -3221,6 +3329,28 @@ func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending.done >= len(m.pending.calls) {
 		m.history = append(m.history, m.pending.results...)
 		m.pending = nil
+
+		// No-progress nudge: the model is alternating between the same two
+		// actions. Tell it once, rather than letting it spin.
+		if !m.oscillationWarned && isOscillating(m.recentCalls) {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions without making progress. Stop, state your blocker explicitly, and try a different approach.",
+			})
+			m.oscillationWarned = true
+		}
+
+		// Step budget: cap tool-call rounds per user turn so a confused model
+		// can't loop forever burning tokens.
+		m.stepCount++
+		if m.stepCount >= m.maxSteps {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed.",
+			})
+			m.suppressToolsOnce = true
+		}
+
 		cmd := m.startStream()
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
@@ -3286,6 +3416,20 @@ func (m *Model) processPendingTools() tea.Cmd {
 			}
 		}
 
+		// Short-circuit a call that has already failed identically: re-running
+		// it won't help and just burns a round-trip.
+		fp := callFingerprint(call)
+		if m.failedCalls[fp] >= maxSameCallFailures {
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  fmt.Sprintf("error: you already called %q with these exact arguments %d times and it failed each time. Do not repeat it — change the arguments or use a different approach.", call.Function.Name, m.failedCalls[fp]),
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+			continue
+		}
+
 		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] && !exploreShellPrechecked {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
@@ -3294,6 +3438,10 @@ func (m *Model) processPendingTools() tea.Cmd {
 			break
 		}
 
+		m.recentCalls = append(m.recentCalls, fp)
+		if len(m.recentCalls) > recentCallsKept {
+			m.recentCalls = m.recentCalls[len(m.recentCalls)-recentCallsKept:]
+		}
 		m.pending.started[i] = true
 		cmds = append(cmds, m.invokeToolCmd(i, call))
 	}
@@ -3787,14 +3935,14 @@ func configPath() string {
 func loadConfig() config {
 	var c config
 	path := configPath()
-	if path == "" {
-		return c
+	if path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			_ = json.Unmarshal(data, &c)
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return c
+	if strings.TrimSpace(c.Host) == "" {
+		c.Host = DefaultHost
 	}
-	_ = json.Unmarshal(data, &c)
 	return c
 }
 

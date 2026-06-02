@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/javanhut/ollama_code/mcp"
 )
@@ -56,6 +57,51 @@ type ModelListResponse struct {
 
 type VersionResponse struct {
 	Version string `json:"version"`
+}
+
+type ShowModelRequest struct {
+	Model string `json:"model"`
+}
+
+// ShowModelResponse is the subset of Ollama's /api/show payload we use to
+// discover a model's true context length and capabilities.
+type ShowModelResponse struct {
+	Capabilities []string       `json:"capabilities"`
+	ModelInfo    map[string]any `json:"model_info"`
+	Details      struct {
+		Family string `json:"family"`
+	} `json:"details"`
+}
+
+// ContextLength scans model_info for the architecture-specific
+// "<family>.context_length" key (e.g. "llama.context_length") and returns it,
+// or 0 if not reported.
+func (r *ShowModelResponse) ContextLength() int {
+	for k, v := range r.ModelInfo {
+		if !strings.HasSuffix(k, ".context_length") {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			return int(n)
+		case int:
+			return n
+		case json.Number:
+			i, _ := n.Int64()
+			return int(i)
+		}
+	}
+	return 0
+}
+
+// SupportsTools reports whether the model advertises native tool-calling.
+func (r *ShowModelResponse) SupportsTools() bool {
+	for _, c := range r.Capabilities {
+		if c == "tools" {
+			return true
+		}
+	}
+	return false
 }
 
 type EmbedRequest struct {
@@ -136,6 +182,27 @@ func (o OllamaHost) GetOllamaVersion() (string, error) {
 	}
 
 	return versionResp.Version, nil
+}
+
+func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
+	urlPath := generatePath("showModelDetails", o)
+	jsonData, err := json.Marshal(ShowModelRequest{Model: model})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal show request: %v", err)
+	}
+	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("http request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	var showResp ShowModelResponse
+	if err := json.NewDecoder(resp.Body).Decode(&showResp); err != nil {
+		return nil, fmt.Errorf("failed to decode show response: %v", err)
+	}
+	return &showResp, nil
 }
 
 func (o OllamaHost) GetModelList() (*ModelListResponse, error) {

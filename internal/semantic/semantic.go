@@ -144,6 +144,85 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 	return &Index{Root: root, Model: model, Chunks: chunks}, nil
 }
 
+// chunkFile splits a file's contents into overlapping line-windows, matching
+// BuildIndex's chunking parameters. Returns nil for binary files.
+func chunkFile(rel string, data []byte) []Chunk {
+	if isBinary(data) {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	const chunkSize, overlap = 100, 20
+	var chunks []Chunk
+	for i := 0; i < len(lines); i += chunkSize - overlap {
+		end := i + chunkSize
+		if end > len(lines) {
+			end = len(lines)
+		}
+		chunks = append(chunks, Chunk{
+			Path:      rel,
+			StartLine: i + 1,
+			EndLine:   end,
+			Text:      strings.Join(lines[i:end], "\n"),
+		})
+		if end == len(lines) {
+			break
+		}
+	}
+	return chunks
+}
+
+// Clone returns a deep-enough copy: a new Index with a fresh Chunks slice. The
+// per-chunk Embedding slices are shared (treated as immutable). Used so a
+// background reindex can mutate a copy without racing readers of the published
+// index.
+func (idx *Index) Clone() *Index {
+	out := &Index{Root: idx.Root, Model: idx.Model}
+	out.Chunks = append([]Chunk(nil), idx.Chunks...)
+	return out
+}
+
+// RemoveFile drops all chunks belonging to rel (relative path).
+func (idx *Index) RemoveFile(rel string) {
+	out := idx.Chunks[:0]
+	for _, c := range idx.Chunks {
+		if c.Path != rel {
+			out = append(out, c)
+		}
+	}
+	idx.Chunks = out
+}
+
+// ReindexFile re-embeds a single file: it drops the file's existing chunks and,
+// if the file still exists and is non-binary, re-chunks and re-embeds it. A
+// missing file is treated as a pure removal. Intended to be called on a cloned
+// index from a background goroutine.
+func (idx *Index) ReindexFile(root, rel string, embedder func([]string) ([][]float32, error)) error {
+	idx.RemoveFile(rel)
+	data, err := os.ReadFile(filepath.Join(root, rel))
+	if err != nil {
+		return nil // file gone/unreadable: removal only
+	}
+	chunks := chunkFile(rel, data)
+	if len(chunks) == 0 {
+		return nil
+	}
+	texts := make([]string, len(chunks))
+	for i, c := range chunks {
+		texts[i] = c.Text
+	}
+	embs, err := embedder(texts)
+	if err != nil {
+		return err
+	}
+	for i := range chunks {
+		if i < len(embs) {
+			chunks[i].Embedding = embs[i]
+		}
+	}
+	idx.Chunks = append(idx.Chunks, chunks...)
+	return nil
+}
+
 type Result struct {
 	Chunk
 	Score float64
