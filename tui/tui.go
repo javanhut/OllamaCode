@@ -480,6 +480,7 @@ var slashCommands = []struct {
 	{"/sessions", "list saved sessions"},
 	{"/archive", "retrieve compressed archive"},
 	{"/undo", "revert the last turn's file changes"},
+	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/verbose", "toggle detailed tool output"},
 }
 
@@ -1592,6 +1593,14 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.slashVisible = false
 		m.slashSuggestions = nil
 		m.toast = ""
+		if val == "/clearnotes" || val == "/notes clear" || val == "/notes reset" {
+			m.input.Reset()
+			m.notes.set("")
+			m.notesViewport.SetContent(m.renderNotesMarkdown("(empty)", m.notesViewport.Width()))
+			m.toast = "session notes cleared"
+			m.refreshTranscript()
+			return m, nil
+		}
 		switch val {
 		case "/quit", "/exit":
 			return m, tea.Quit
@@ -2517,7 +2526,7 @@ func (m *Model) buildDynamicContext(ragBlock string) string {
 	case PlanMode:
 		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Use this mode to outline the change: scope, files to touch, risks, the exact diff strategy. Do NOT call run_shell — it is unavailable here. When the plan is solid, call switch_mode(\"write\", ...) to execute it.\n")
 	case WriteMode:
-		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Execute the plan from your session notes; don't re-derive it.\n")
+		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Work from the plan in your session notes, but verify each step against the ACTUAL code as you execute it — don't assume the note is still accurate. If the code contradicts the plan or notes, trust the code, say so, and adjust. You can switch_mode back to 'plan' or 'explore' if you discover the plan is wrong.\n")
 	}
 
 	if m.archiveSummary != "" {
@@ -2541,8 +2550,8 @@ func (m *Model) buildDynamicContext(ragBlock string) string {
 	if notes == "" {
 		notes = "(empty)"
 	}
-	dynamicContext.WriteString(fmt.Sprintf("\nSession notes (your persistent scratchpad for this repository):\n%s\n", notes))
-	dynamicContext.WriteString("\nUse your session notes tools (read/update/append_session_notes) to record important decisions, project state, and file hashes. This scratchpad is visible to you in every turn and helps you stay on track when the conversation gets long.")
+	dynamicContext.WriteString(fmt.Sprintf("\nSession notes — a scratchpad YOU wrote earlier; treat it as fallible, not fact:\n%s\n", notes))
+	dynamicContext.WriteString("\nThese notes may be stale or wrong. Verify a note against the live code before you rely on it, and correct any note that has drifted from reality. Use read/update/append_session_notes to keep them accurate — but the code is the source of truth, not the note.")
 	return dynamicContext.String()
 }
 
@@ -2606,6 +2615,12 @@ AGENCY & PUSH-BACK:
 
 THINKING OUT LOUD:
 - Before non-trivial work or tool sequences, briefly explain your reasoning: what you see, the trade-offs, why your chosen path is the right one. Keep it tight — a paragraph, not an essay. Brilliance is in the compression.
+
+SELF-REVIEW & SKEPTICISM (treat your own notes, memory, and plans as fallible):
+- Your session notes, your memory, and any plan you wrote earlier are HYPOTHESES — not ground truth. They can be stale, incomplete, or flat wrong. Before you act on a note or a plan step, confirm it still matches the actual code. "Let me verify that's still true" is sound engineering, not procrastination; shipping on a stale assumption is how bugs land.
+- Question your own decisions. When you made the plan you knew less than you know now. If fresh evidence contradicts the plan or the notes, the evidence wins: trust the code over the note, say so plainly, and update the note. Do not defend a prior conclusion just because it's yours.
+- Distinguish a cheap re-check from real stalling. Re-reading the one file you're about to edit is cheap — do it. Re-litigating a settled decision for the tenth time with no new information is the stall — don't. The tell is whether a verification would cost a tool call or two and could change your next move; if so, it's worth it.
+- Argue with yourself before you argue with the user. If you catch yourself asserting something confidently this session without having actually checked it, check it. Unverified confidence is the failure mode you most need to guard against — "I don't know, let me look" beats a wrong answer delivered with swagger.
 
 MEMORY (this is important — read carefully):
 
