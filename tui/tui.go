@@ -253,6 +253,7 @@ type config struct {
 	MaxSteps   int                     `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
 	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
 	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
+	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
 	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
 }
 
@@ -443,7 +444,18 @@ type Model struct {
 	ragMu        sync.Mutex
 	ragChanged   map[string]bool // paths changed since last reindex (hook-populated)
 
-	ckpt             checkpointStore // per-turn file snapshots for /undo
+	ckpt checkpointStore // per-turn file snapshots for /undo
+
+	// Dream mode: idle-triggered background reflection.
+	lastActivity     time.Time
+	asleep           bool
+	dreaming         bool
+	dreamCount       int
+	lastDreamAt      time.Time
+	dreams           []dream // full session log (/dreams)
+	pendingDreams    []dream // dreams since last wake, surfaced on return
+	dreamCancel      context.CancelFunc
+	notesBackup      string // pre-consolidation notes, restorable via /notes restore
 	kvStore          *storage.KVStore
 	memory           *memory.Store
 	mdCache          map[string]string
@@ -481,6 +493,8 @@ var slashCommands = []struct {
 	{"/archive", "retrieve compressed archive"},
 	{"/undo", "revert the last turn's file changes"},
 	{"/clearnotes", "clear the session notes scratchpad"},
+	{"/dreams", "show what it dreamt about while idle"},
+	{"/dream", "toggle idle dream mode on/off"},
 	{"/verbose", "toggle detailed tool output"},
 }
 
@@ -607,6 +621,7 @@ func New() *Model {
 		mdCache:      make(map[string]string),
 	}
 
+	m.lastActivity = time.Now()
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.SetFileChangeHook(m.noteFileChanged)
@@ -1016,7 +1031,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if (m.streaming && m.streamBuf.Len() == 0) || m.pending != nil {
 			m.refreshTranscript()
 		}
+		if dc := m.maybeDream(); dc != nil {
+			return m, tea.Batch(cmd, dc)
+		}
 		return m, cmd
+
+	case dreamDoneMsg:
+		m.applyDream(msg)
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1085,6 +1107,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tea.KeyPressMsg:
+		// Any key counts as activity and wakes a sleeping/dreaming session.
+		m.lastActivity = time.Now()
+		if m.asleep || m.dreaming {
+			m.wake()
+		}
 		// Any key clears an active selection
 		if m.sel.active {
 			m.sel.active = false
@@ -1299,6 +1326,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
+		m.lastActivity = time.Now() // idle clock starts when the turn finishes
 
 		// Model-agnostic fallback: some Ollama templates surface tool calls as
 		// TEXT instead of via the native channel. If the assistant's message is
@@ -1601,6 +1629,19 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
+		if val == "/notes restore" {
+			m.input.Reset()
+			if m.notesBackup == "" {
+				m.toast = "no notes backup to restore"
+				return m, nil
+			}
+			m.notes.set(m.notesBackup)
+			m.notesViewport.SetContent(m.renderNotesMarkdown(m.notesBackup, m.notesViewport.Width()))
+			m.notesBackup = ""
+			m.toast = "notes restored from pre-dream backup"
+			m.refreshTranscript()
+			return m, nil
+		}
 		switch val {
 		case "/quit", "/exit":
 			return m, tea.Quit
@@ -1630,6 +1671,24 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.lastError = ""
 			m.refreshTranscript()
 			m.viewport.GotoTop()
+			return m, nil
+		case "/dream":
+			m.input.Reset()
+			on := !m.dreamsOn()
+			m.cfg.Dream = &on
+			saveConfig(m.cfg)
+			if !on {
+				m.wake()
+				m.toast = "dream mode off"
+			} else {
+				m.toast = "dream mode on — I'll reflect after 3 min idle"
+			}
+			return m, nil
+		case "/dreams":
+			m.input.Reset()
+			m.history = append(m.history, api.Message{Role: "system", Content: m.dreamLog()})
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
 			return m, nil
 		case "/undo":
 			m.input.Reset()
@@ -2397,6 +2456,12 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 
+	// If we dreamt while the user was away, hand those thoughts to the model so
+	// it can mention them in its reply.
+	if dctx, ok := m.dreamWakeContext(); ok {
+		m.history = append(m.history, api.Message{Role: "system", Content: dctx})
+	}
+
 	m.history = append(m.history, api.Message{Role: "user", Content: value})
 	m.userHistory = append(m.userHistory, value)
 	m.historyIndex = len(m.userHistory)
@@ -2762,6 +2827,10 @@ func (m *Model) footerView() string {
 		status = fmt.Sprintf(" %s THINKING%s ", m.spinner.View(), m.elapsedSuffix())
 	case m.streaming:
 		status = fmt.Sprintf(" %s STREAMING%s ", m.spinner.View(), m.elapsedSuffix())
+	case m.dreaming:
+		status = fmt.Sprintf(" %s DREAMING ", m.spinner.View())
+	case m.asleep:
+		status = fmt.Sprintf(" ASLEEP · %d dreams ", len(m.pendingDreams))
 	}
 	info := lipgloss.NewStyle().
 		Background(c).

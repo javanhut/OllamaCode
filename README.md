@@ -19,6 +19,7 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
 - **Per-model profiles** — context length (`num_ctx`) and tool support are discovered from Ollama's `/api/show` instead of hardcoded; sampling options are configurable per model
 - **Sub-agents** — delegate read-only investigations (`spawn_subagent`) that run a bounded child loop and report back, without cluttering the main context
 - **Checkpoints & undo** — file changes are snapshotted per turn; `/undo` reverts the last turn's edits
+- **Dream mode** — after 3 minutes idle it drifts into background reflection: it dreams up candidate fixes and ideas, consolidates its notes, and promotes memory. Any prompt wakes it, and it tells you what it thought about while you were away (`/dreams` for the log, `/dream` to toggle, `/notes restore` to undo a consolidation)
 - **Three safety modes:**
   - `explore` — read-only; the model can only inspect files and directories
   - `plan` — read + session notes; the model can outline a plan without touching files
@@ -83,6 +84,7 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | `max_steps` | Tool-call budget per user turn before the agent stops and summarizes (default `25`) |
 | `embed_model` | Embedding model used for auto-RAG (default `nomic-embed-text`) |
 | `auto_rag` | Set to `false` to disable automatic retrieval (default enabled) |
+| `dream` | Set to `false` to disable idle dream mode (default enabled) |
 | `profiles` | Per-model `{num_ctx, supports_tools, temperature, top_p, num_predict}`, auto-discovered from `/api/show` and cached; edit to override sampling |
 
 > **Auto-RAG** needs an embedding model pulled in Ollama (e.g. `ollama pull nomic-embed-text`). If it's missing, retrieval silently disables itself — the manual `code_index` / `semantic_search` tools remain available as a fallback.
@@ -110,6 +112,8 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | `/clear` | Reset the conversation |
 | `/copy` | Copy last assistant response to clipboard |
 | `/undo` | Revert the file changes made during the last turn |
+| `/clearnotes` | Clear the session notes scratchpad (also `/notes clear`) |
+| `/dreams` / `/dream` | Show the idle dream log / toggle dream mode |
 | `/save` / `/load` / `/sessions` | Save, load, and list conversation sessions |
 | `/archive` | Retrieve a Huffman-compressed history archive |
 | `/companion` | Toggle the voice companion popup (STT in → input, replies → TTS) |
