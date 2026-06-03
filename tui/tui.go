@@ -485,7 +485,23 @@ type Model struct {
 	companionSender func(tea.Msg)
 	lastRenderTime  time.Time
 	busySince       time.Time
+	faceFrame       int
+	faceLastKey     time.Time
 }
+
+type faceTickMsg time.Time
+
+type faceMood int
+
+const (
+	faceMoodNeutral faceMood = iota
+	faceMoodHappy
+	faceMoodConcerned
+	faceMoodFrustrated
+	faceMoodConfused
+	faceMoodSurprised
+	faceMoodFocused
+)
 
 var slashCommands = []struct {
 	name string
@@ -637,6 +653,9 @@ func New() *Model {
 		kvStore:      kv,
 		memory:       mem,
 		mdCache:      make(map[string]string),
+		expandTools:  true,
+		lastActivity: time.Now(),
+		faceLastKey:  time.Now(),
 	}
 
 	m.lastActivity = time.Now()
@@ -1036,13 +1055,17 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return m.spinner.Tick
+	return tea.Batch(m.spinner.Tick, m.nextFaceTick())
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case faceTickMsg:
+		m.faceFrame++
+		return m, m.nextFaceTick()
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -1152,6 +1175,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Any key counts as activity and wakes a sleeping/dreaming session.
 		m.lastActivity = time.Now()
+		m.faceLastKey = time.Now()
 		if m.asleep || m.dreaming {
 			m.wake()
 		}
@@ -2434,7 +2458,8 @@ func (m *Model) layout() {
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
 	footerH := lipgloss.Height(m.footerView())
-	inputH := m.input.Height() + 1
+	faceBoxH := 5
+	inputH := max(faceBoxH, m.input.Height()+1)
 	vpH := m.height - headerH - footerH - inputH
 	if vpH < 1 {
 		vpH = 1
@@ -3900,6 +3925,98 @@ func lastAssistantMessage(history []api.Message) string {
 	return ""
 }
 
+func (m *Model) currentFaceMood() faceMood {
+	return inferFaceMood(m.history)
+}
+
+func inferFaceMood(history []api.Message) faceMood {
+	type moodScore struct {
+		mood  faceMood
+		score int
+	}
+	scores := map[faceMood]int{}
+	seen := 0
+	for i := len(history) - 1; i >= 0 && seen < 6; i-- {
+		msg := history[i]
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+		text := strings.ToLower(msg.Content)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		seen++
+		weight := 7 - seen
+		if msg.Role == "user" {
+			weight += 2
+		}
+		for mood, words := range faceMoodKeywords {
+			hits := keywordHits(text, words)
+			if hits > 0 {
+				scores[mood] += hits * weight
+			}
+		}
+	}
+	if len(scores) == 0 {
+		return faceMoodNeutral
+	}
+	ranked := []moodScore{
+		{faceMoodFrustrated, scores[faceMoodFrustrated]},
+		{faceMoodConfused, scores[faceMoodConfused]},
+		{faceMoodConcerned, scores[faceMoodConcerned]},
+		{faceMoodSurprised, scores[faceMoodSurprised]},
+		{faceMoodHappy, scores[faceMoodHappy]},
+		{faceMoodFocused, scores[faceMoodFocused]},
+	}
+	best := ranked[0]
+	for _, s := range ranked[1:] {
+		if s.score > best.score {
+			best = s
+		}
+	}
+	if best.score < 5 {
+		return faceMoodNeutral
+	}
+	return best.mood
+}
+
+var faceMoodKeywords = map[faceMood][]string{
+	faceMoodHappy: {
+		"thanks", "thank you", "great", "nice", "awesome", "excellent", "perfect",
+		"works", "working", "fixed", "good", "love", "happy", "glad",
+	},
+	faceMoodConcerned: {
+		"worried", "concerned", "risky", "risk", "danger", "careful", "broken",
+		"fails", "failing", "failed", "error", "bug", "issue", "problem", "blocked",
+	},
+	faceMoodFrustrated: {
+		"annoyed", "frustrated", "mad", "angry", "upset", "ugh", "wtf", "terrible",
+		"awful", "bad", "doesnt work", "doesn't work", "not working", "still broken",
+	},
+	faceMoodConfused: {
+		"confused", "why", "what happened", "not sure", "unclear", "lost",
+		"question", "doesn't make sense", "doesnt make sense", "how come",
+	},
+	faceMoodSurprised: {
+		"wow", "surprised", "unexpected", "suddenly", "weird", "strange",
+		"really?", "seriously", "no way",
+	},
+	faceMoodFocused: {
+		"fix", "implement", "debug", "investigate", "ship", "build", "test",
+		"verify", "review", "patch", "change", "update",
+	},
+}
+
+func keywordHits(text string, keywords []string) int {
+	hits := 0
+	for _, kw := range keywords {
+		if strings.Contains(text, kw) {
+			hits++
+		}
+	}
+	return hits
+}
+
 func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
@@ -3939,6 +4056,10 @@ func (m *Model) inputView() string {
 	if width <= 0 {
 		width = lipgloss.Width(m.input.View())
 	}
+
+	faceBox := m.faceView()
+	faceW := lipgloss.Width(faceBox)
+
 	c := m.mode.color()
 	label := "message"
 	if m.streaming {
@@ -3950,10 +4071,14 @@ func (m *Model) inputView() string {
 		Bold(true).
 		Padding(0, 1).
 		Render(label)
-	inputW := max(1, width-lipgloss.Width(prefix))
+
+	inputW := max(1, width-faceW-lipgloss.Width(prefix)-2)
 	input := inputBandStyle.Width(inputW).Render(m.input.View())
+
+	bottomBar := lipgloss.JoinHorizontal(lipgloss.Center, prefix+input, "  ", faceBox)
+
 	suggestions := m.slashSuggestionsView()
-	return suggestions + "\n" + prefix + input
+	return suggestions + "\n" + bottomBar
 }
 
 func (m *Model) welcomePanel() string {
@@ -4265,6 +4390,135 @@ func Run() error {
 	return err
 }
 
+func (m *Model) nextFaceTick() tea.Cmd {
+	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
+		return faceTickMsg(t)
+	})
+}
+
+func (m *Model) faceView() string {
+	var face string
+	var label string
+
+	// Determine state
+	state := 1 // awake
+	if m.streaming {
+		state = 3 // talking
+	} else if m.pending != nil {
+		state = 2 // thinking
+	} else if time.Since(m.faceLastKey) > 10*time.Second {
+		state = 0 // sleeping
+	}
+
+	switch state {
+	case 0: // sleeping
+		label = "sleeping..."
+		frames := []string{
+			"( -_ -) zZZ",
+			"( -_ -)  zZZ",
+			"( u_ u)   zZZ",
+			"( u_ u)    zZZ",
+		}
+		face = frames[m.faceFrame%len(frames)]
+	case 2: // thinking
+		label = "thinking"
+		frames := []string{
+			"( ಠ_ಠ )",
+			"( ఠ_ఠ )",
+			"( ಠ~ಠ )",
+			"( ⊙_⊙ )",
+		}
+		face = frames[m.faceFrame%len(frames)]
+	case 3: // talking
+		label = "speaking"
+		frames := []string{
+			"( ^_^) ",
+			"( ^o^) ",
+			"( ^_^) ",
+			"( ^▽^) ",
+		}
+		face = frames[m.faceFrame%len(frames)]
+	default: // awake / typing
+		mood := m.currentFaceMood()
+		label, face = faceMoodFrame(mood, m.faceFrame)
+	}
+
+	c := m.mode.color()
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c).
+		Width(18).
+		Height(2).
+		Align(lipgloss.Center, lipgloss.Center)
+
+	// Combine face and sub-label
+	content := fmt.Sprintf("%s\n%s", face, lipgloss.NewStyle().Faint(true).Width(18).Height(1).Align(lipgloss.Center).Render(label))
+	return boxStyle.Render(content)
+}
+
+func faceMoodFrame(mood faceMood, frame int) (string, string) {
+	label := "active"
+	frames := []string{
+		"( •_• )",
+		"( o_o )",
+		"( •_• )",
+		"( ◉_◉ )",
+		"( •_• )",
+		"( ￢_￢ )",
+	}
+	switch mood {
+	case faceMoodHappy:
+		label = "pleased"
+		frames = []string{
+			"( ^_^ )",
+			"( ^‿^ )",
+			"( ^_^ )",
+			"( ^▽^ )",
+		}
+	case faceMoodConcerned:
+		label = "concerned"
+		frames = []string{
+			"( o_o )",
+			"( O_O )",
+			"( o_o )",
+			"( •_•;)",
+		}
+	case faceMoodFrustrated:
+		label = "frustrated"
+		frames = []string{
+			"( >_< )",
+			"( ಠ_ಠ )",
+			"( >_< )",
+			"( -_-#)",
+		}
+	case faceMoodConfused:
+		label = "puzzled"
+		frames = []string{
+			"( ?_? )",
+			"( @_@ )",
+			"( ?_? )",
+			"( o_O )",
+		}
+	case faceMoodSurprised:
+		label = "surprised"
+		frames = []string{
+			"( O_O )",
+			"( o_o )",
+			"( O_O )",
+			"( 0_0 )",
+		}
+	case faceMoodFocused:
+		label = "focused"
+		frames = []string{
+			"( •_• )",
+			"( •_•)>",
+			"( •_• )",
+			"( •̀_•́)",
+		}
+	}
+	return label, frames[frame%len(frames)]
+}
+
 func (m *Model) shouldPromptPermission(call mcp.ToolCall) bool {
 	if m.pending.allowAll {
 		return false
@@ -4274,16 +4528,13 @@ func (m *Model) shouldPromptPermission(call mcp.ToolCall) bool {
 	}
 	if m.mode == AutoMode {
 		var args map[string]any
-		_ = json.Unmarshal(call.Function.Arguments, &args)
-
-		if p, ok := args["path"].(string); ok && p != "" {
-			if !m.isPathInTrustedFolder(p) {
-				return true
-			}
-		}
-		if wd, ok := args["working_dir"].(string); ok && wd != "" {
-			if !m.isPathInTrustedFolder(wd) {
-				return true
+		if err := json.Unmarshal(call.Function.Arguments, &args); err == nil {
+			for _, key := range []string{"path", "dest", "destination", "new_path", "to", "source", "src", "working_dir"} {
+				if p, ok := args[key].(string); ok && p != "" {
+					if !m.isPathInTrustedFolder(p) {
+						return true
+					}
+				}
 			}
 		}
 		return false

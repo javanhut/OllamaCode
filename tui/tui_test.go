@@ -319,6 +319,79 @@ func TestInputDynamicHeightGrowsOnWrappedText(t *testing.T) {
 	}
 }
 
+func TestInferFaceMoodFromRecentConversation(t *testing.T) {
+	tests := []struct {
+		name    string
+		history []api.Message
+		want    faceMood
+	}{
+		{
+			name: "neutral",
+			history: []api.Message{
+				{Role: "user", Content: "show me the repository status"},
+			},
+			want: faceMoodNeutral,
+		},
+		{
+			name: "focused",
+			history: []api.Message{
+				{Role: "user", Content: "please implement the fix and verify it"},
+			},
+			want: faceMoodFocused,
+		},
+		{
+			name: "frustrated",
+			history: []api.Message{
+				{Role: "user", Content: "it still doesnt work and I am frustrated"},
+			},
+			want: faceMoodFrustrated,
+		},
+		{
+			name: "latest happy turn wins",
+			history: []api.Message{
+				{Role: "user", Content: "this is broken and not working"},
+				{Role: "assistant", Content: "I patched it."},
+				{Role: "user", Content: "great, thanks, it works now"},
+			},
+			want: faceMoodHappy,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inferFaceMood(tt.history); got != tt.want {
+				t.Fatalf("expected mood %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestFaceMoodFrameLabels(t *testing.T) {
+	tests := []struct {
+		mood  faceMood
+		label string
+	}{
+		{faceMoodNeutral, "active"},
+		{faceMoodHappy, "pleased"},
+		{faceMoodConcerned, "concerned"},
+		{faceMoodFrustrated, "frustrated"},
+		{faceMoodConfused, "puzzled"},
+		{faceMoodSurprised, "surprised"},
+		{faceMoodFocused, "focused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			label, face := faceMoodFrame(tt.mood, 0)
+			if label != tt.label {
+				t.Fatalf("expected label %q, got %q", tt.label, label)
+			}
+			if strings.TrimSpace(face) == "" {
+				t.Fatal("expected non-empty face")
+			}
+		})
+	}
+}
+
 func TestAutoModePromptBypass(t *testing.T) {
 	m := &Model{
 		mode:  AutoMode,
@@ -348,5 +421,16 @@ func TestAutoModePromptBypass(t *testing.T) {
 	}
 	if !m.shouldPromptPermission(callOutside) {
 		t.Error("expected shouldPromptPermission to be true for path outside trusted folder")
+	}
+
+	// Test destination outside workspace (untrusted folder) for move_file
+	callMoveOutside := mcp.ToolCall{
+		Function: mcp.ToolCallFunction{
+			Name:      "move_file",
+			Arguments: json.RawMessage(`{"source":"src/main.go","destination":"../../outside.txt"}`),
+		},
+	}
+	if !m.shouldPromptPermission(callMoveOutside) {
+		t.Error("expected shouldPromptPermission to be true for destination outside trusted folder")
 	}
 }
