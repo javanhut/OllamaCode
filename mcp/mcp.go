@@ -1589,30 +1589,7 @@ func RunShellTool() Tool {
 			if timeout > 300*time.Second {
 				timeout = 300 * time.Second
 			}
-			cctx, cancel := context.WithTimeout(ctx, timeout)
-			defer cancel()
-			cmd := exec.CommandContext(cctx, "sh", "-c", a.Command)
-			if a.WorkingDir != "" {
-				cmd.Dir = a.WorkingDir
-			}
-			if a.Stdin != "" {
-				cmd.Stdin = strings.NewReader(a.Stdin)
-			}
-			out, err := cmd.CombinedOutput()
-			text := strings.TrimRight(string(out), "\n")
-			if err != nil {
-				if cctx.Err() == context.DeadlineExceeded {
-					return text + "\n[timed out after " + timeout.String() + "]", nil
-				}
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					return fmt.Sprintf("%s\n[exit %d]", text, exitErr.ExitCode()), nil
-				}
-				return "", err
-			}
-			if text == "" {
-				return "[ok]", nil
-			}
-			return text, nil
+			return runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, timeout)
 		},
 	}
 }

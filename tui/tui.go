@@ -347,6 +347,12 @@ type pendingBatch struct {
 	preview  string
 }
 
+var (
+	defaultToolCallTimeout = 5 * time.Minute
+	shellToolTimeoutGrace  = 5 * time.Second
+	modelStreamIdleTimeout = 10 * time.Minute
+)
+
 const notesFile = ".ollama_notes.md"
 
 type sessionNotes struct {
@@ -2682,6 +2688,11 @@ func (m *Model) waitForStream() tea.Cmd {
 				return chatDoneMsg{}
 			}
 			return chatErrMsg{err: err}
+		case <-time.After(modelStreamIdleTimeout):
+			if s.cancel != nil {
+				s.cancel()
+			}
+			return chatErrMsg{err: fmt.Errorf("model stream idle timeout after %s with no response", modelStreamIdleTimeout)}
 		}
 	}
 }
@@ -3561,7 +3572,7 @@ func extractShellCommand(raw json.RawMessage) string {
 	return a.Command
 }
 
-func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
+func (m *Model) invokeTool(ctx context.Context, call mcp.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
 	// Best-effort repair of almost-valid JSON arguments before dispatch.
 	call.Function.Arguments = salvageJSON(call.Function.Arguments)
@@ -3569,13 +3580,13 @@ func (m *Model) invokeTool(call mcp.ToolCall) api.Message {
 	if paths := mcp.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
 		m.snapshotBeforeMutate(paths)
 	}
-	result, err := m.tools.Invoke(context.Background(), call)
+	result, err := m.tools.Invoke(ctx, call)
 	// Last-resort escalation: if the failure is an argument problem, ask the
 	// model for schema-valid arguments via constrained decoding and retry once.
 	if err != nil && m.shouldFormatRepair(call, err) {
 		if fixed, ok := m.repairArgsViaFormat(call); ok {
 			call.Function.Arguments = fixed
-			result, err = m.tools.Invoke(context.Background(), call)
+			result, err = m.tools.Invoke(ctx, call)
 		}
 	}
 	if err != nil {
@@ -3594,8 +3605,49 @@ func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
 		if call.Function.Name == "switch_mode" {
 			req, _ = parseModeSwitchArgs(call.Function.Arguments)
 		}
-		return toolResultMsg{index: index, result: m.invokeTool(call), modeSwitch: req}
+
+		timeout := toolCallTimeout(call)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		done := make(chan api.Message, 1)
+		go func() {
+			done <- m.invokeTool(ctx, call)
+		}()
+
+		select {
+		case result := <-done:
+			return toolResultMsg{index: index, result: result, modeSwitch: req}
+		case <-ctx.Done():
+			return toolResultMsg{
+				index: index,
+				result: api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  fmt.Sprintf("error: tool %q timed out after %s. Treat this as a stuck call: do not retry the same arguments blindly; inspect state, use a narrower command or shorter timeout, and continue with another approach.", call.Function.Name, timeout),
+				},
+				modeSwitch: nil,
+			}
+		}
 	}
+}
+
+func toolCallTimeout(call mcp.ToolCall) time.Duration {
+	if call.Function.Name != "run_shell" {
+		return defaultToolCallTimeout
+	}
+	var a struct {
+		TimeoutSec float64 `json:"timeout_sec"`
+	}
+	_ = json.Unmarshal(call.Function.Arguments, &a)
+	timeout := 30 * time.Second
+	if a.TimeoutSec > 0 {
+		timeout = time.Duration(a.TimeoutSec * float64(time.Second))
+	}
+	if timeout > 300*time.Second {
+		timeout = 300 * time.Second
+	}
+	return timeout + shellToolTimeoutGrace
 }
 
 func (m *Model) processPendingTools() tea.Cmd {

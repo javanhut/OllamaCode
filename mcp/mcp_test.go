@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistry(t *testing.T) {
@@ -31,6 +32,68 @@ func TestRegistry(t *testing.T) {
 	_, err := r.Invoke(ctx, call)
 	if err == nil {
 		t.Error("expected error for nonexistent file, got nil")
+	}
+}
+
+func TestRunShellToolReturnsOutput(t *testing.T) {
+	r := NewRegistry()
+	r.Register(RunShellTool())
+
+	resp, err := r.Invoke(context.Background(), ToolCall{
+		Function: ToolCallFunction{
+			Name:      "run_shell",
+			Arguments: json.RawMessage(`{"command":"printf hello"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("run_shell failed: %v", err)
+	}
+	if resp != "hello" {
+		t.Fatalf("expected output, got %q", resp)
+	}
+}
+
+func TestRunShellToolTimeout(t *testing.T) {
+	r := NewRegistry()
+	r.Register(RunShellTool())
+
+	start := time.Now()
+	resp, err := r.Invoke(context.Background(), ToolCall{
+		Function: ToolCallFunction{
+			Name:      "run_shell",
+			Arguments: json.RawMessage(`{"command":"sleep 5","timeout_sec":0.2}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("run_shell failed: %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("timeout took too long: %s", time.Since(start))
+	}
+	if !strings.Contains(resp, "[timed out after 200ms]") {
+		t.Fatalf("expected timeout marker, got %q", resp)
+	}
+}
+
+func TestRunShellToolTimeoutKillsBackgroundChildren(t *testing.T) {
+	r := NewRegistry()
+	r.Register(RunShellTool())
+
+	start := time.Now()
+	resp, err := r.Invoke(context.Background(), ToolCall{
+		Function: ToolCallFunction{
+			Name:      "run_shell",
+			Arguments: json.RawMessage(`{"command":"sleep 5 & wait","timeout_sec":0.2}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("run_shell failed: %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("background child kept command stuck for %s; response %q", time.Since(start), resp)
+	}
+	if !strings.Contains(resp, "[timed out after 200ms]") {
+		t.Fatalf("expected timeout marker, got %q", resp)
 	}
 }
 

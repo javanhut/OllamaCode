@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -132,6 +133,49 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 	}
 	if m.state != statePermission {
 		t.Fatalf("expected permission state, got %v", m.state)
+	}
+}
+
+func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
+	oldTimeout := defaultToolCallTimeout
+	defaultToolCallTimeout = 50 * time.Millisecond
+	defer func() { defaultToolCallTimeout = oldTimeout }()
+
+	m := &Model{
+		tools: mcp.NewRegistry(),
+		cfg:   config{Host: DefaultHost},
+	}
+	m.tools.Register(mcp.Tool{
+		Type: "function",
+		Function: mcp.Function{
+			Name: "stuck_tool",
+			Parameters: mcp.Schema{
+				Type: "object",
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			time.Sleep(500 * time.Millisecond)
+			return "late", nil
+		},
+	})
+
+	start := time.Now()
+	raw := m.invokeToolCmd(0, mcp.ToolCall{
+		Function: mcp.ToolCallFunction{
+			Name:      "stuck_tool",
+			Arguments: json.RawMessage(`{}`),
+		},
+	})()
+	if time.Since(start) > 250*time.Millisecond {
+		t.Fatalf("watchdog took too long: %s", time.Since(start))
+	}
+
+	msg, ok := raw.(toolResultMsg)
+	if !ok {
+		t.Fatalf("expected toolResultMsg, got %T", raw)
+	}
+	if !strings.Contains(msg.result.Content, `tool "stuck_tool" timed out after 50ms`) {
+		t.Fatalf("expected timeout result, got %q", msg.result.Content)
 	}
 }
 
