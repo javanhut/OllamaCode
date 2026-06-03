@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/javanhut/ollama_code/internal/gitignore"
 	"github.com/javanhut/ollama_code/internal/semantic"
 	"golang.org/x/net/html"
 )
@@ -564,7 +565,7 @@ func WebCrawlTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "web_crawl",
+			Name:        "web_crawl",
 			Description: "Fetch a web page and follow links to the same domain up to max_depth. Returns a combined summary of all crawled pages as plain text. Useful for exploring documentation sites.",
 			Parameters: Schema{
 				Type: "object",
@@ -665,7 +666,7 @@ func WebSearchAPITool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "web_search_api",
+			Name:        "web_search_api",
 			Description: "Search the web using Serper.dev API (Google-quality results). Set SEARCH_API_KEY env var with your Serper API key. Falls back to DuckDuckGo scraping if no key is configured. Returns structured results with titles, snippets, and URLs.",
 			Parameters: Schema{
 				Type: "object",
@@ -748,7 +749,7 @@ func CodeDefinitionTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "code_definition",
+			Name:        "code_definition",
 			Description: "Find where a symbol is defined. Give it a file path and line number, and it extracts the symbol name at that position then searches the project for its definition. Works for Go, Rust, Python, C/C++, JS/TS, Zig, and more.",
 			Parameters: Schema{
 				Type: "object",
@@ -824,7 +825,7 @@ func CodeReferencesTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "code_references",
+			Name:        "code_references",
 			Description: "Find all usages of a symbol across the project. Give it a file and line number; it extracts the symbol name and greps for all references (excluding comments). Use this to understand how a function or type is used before modifying it.",
 			Parameters: Schema{
 				Type: "object",
@@ -894,7 +895,7 @@ func CodeHoverTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "code_hover",
+			Name:        "code_hover",
 			Description: "Show the definition context surrounding a symbol. Give it a file and line number; it finds the symbol at that line and returns its full definition block — function signature, struct fields, class definition, etc. Use this to quickly understand what something is without reading the whole file.",
 			Parameters: Schema{
 				Type: "object",
@@ -1173,15 +1174,20 @@ func readDirRecursive(root string) (string, error) {
 		truncated    bool
 	)
 
+	gi := gitignore.NewMatcher(root)
+
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if path != root && readDirSkipDirs[name] {
+		if path != root && gi.IsIgnored(path) {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			filesSkipped++
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if !d.Type().IsRegular() {
@@ -1471,7 +1477,7 @@ func GrepTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "grep",
+			Name:        "grep",
 			Description: "Search for a regex pattern in files. Returns matching lines prefixed with file:line. ANSI color codes are stripped from output. Use this to find code patterns, usages, TODOs, or any text across the project.",
 			Parameters: Schema{
 				Type: "object",
@@ -1550,7 +1556,7 @@ func RunShellTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "run_shell",
+			Name:        "run_shell",
 			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s.",
 			Parameters: Schema{
 				Type: "object",
@@ -1849,11 +1855,13 @@ func EditFileTool() Tool {
 				Type: "object",
 				Properties: map[string]Property{
 					"path":        {Type: "string", Description: "Path to the file."},
-					"old_string":  {Type: "string", Description: "Text currently in the file. Exact whitespace is preferred but indentation differences are tolerated."},
+					"old_string":  {Type: "string", Description: "Text currently in the file. Optional if start_line/end_line are specified. Exact whitespace is preferred but indentation differences are tolerated."},
 					"new_string":  {Type: "string", Description: "Replacement text."},
-					"replace_all": {Type: "boolean", Description: "Replace every occurrence. Default false."},
+					"replace_all": {Type: "boolean", Description: "Replace every occurrence (only applies when using old_string). Default false."},
+					"start_line":  {Type: "number", Description: "Optional first line to replace (1-indexed, inclusive). Use instead of old_string for precise edits."},
+					"end_line":    {Type: "number", Description: "Optional last line to replace (1-indexed, inclusive). Use instead of old_string for precise edits."},
 				},
-				Required: []string{"path", "old_string", "new_string"},
+				Required: []string{"path", "new_string"},
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
@@ -1862,6 +1870,8 @@ func EditFileTool() Tool {
 				OldString  string `json:"old_string"`
 				NewString  string `json:"new_string"`
 				ReplaceAll bool   `json:"replace_all"`
+				StartLine  int    `json:"start_line"`
+				EndLine    int    `json:"end_line"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -1869,25 +1879,52 @@ func EditFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
-			if a.OldString == "" {
-				return "", fmt.Errorf("old_string is required (use write_file or append_file to add new content)")
-			}
 			data, err := os.ReadFile(a.Path)
 			if err != nil {
 				return "", err
 			}
-			updated, count, tier, err := applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
-			if err != nil {
-				if tier >= 2 {
-					return "", fmt.Errorf("%w in %s", err, a.Path)
+
+			var updated string
+			var count int
+			var tier int
+
+			if a.StartLine != 0 || a.EndLine != 0 {
+				if a.StartLine < 1 || a.EndLine < 1 {
+					return "", fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
 				}
-				return "", fmt.Errorf("%s: %w", a.Path, err)
+				lines := strings.Split(string(data), "\n")
+				if a.StartLine > len(lines) || a.EndLine > len(lines) {
+					return "", fmt.Errorf("start_line %d or end_line %d exceeds file length %d", a.StartLine, a.EndLine, len(lines))
+				}
+				if a.StartLine > a.EndLine {
+					return "", fmt.Errorf("start_line %d is greater than end_line %d", a.StartLine, a.EndLine)
+				}
+				var newLines []string
+				newLines = append(newLines, lines[:a.StartLine-1]...)
+				newLines = append(newLines, a.NewString)
+				newLines = append(newLines, lines[a.EndLine:]...)
+				updated = strings.Join(newLines, "\n")
+				count = 1
+				tier = 1
+			} else {
+				if a.OldString == "" {
+					return "", fmt.Errorf("old_string is required when start_line/end_line are not specified (use write_file to replace or write new content)")
+				}
+				var editErr error
+				updated, count, tier, editErr = applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
+				if editErr != nil {
+					if tier >= 2 {
+						return "", fmt.Errorf("%w in %s", editErr, a.Path)
+					}
+					return "", fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
+				}
 			}
+
 			// Verify-before-write: if the file parsed cleanly before the edit,
 			// reject (don't write) an edit that would break its syntax.
 			if verifyBytes(a.Path, data) == nil {
 				if verr := verifyBytes(a.Path, []byte(updated)); verr != nil {
-					return "", fmt.Errorf("edit rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix old_string/new_string and retry", a.Path, verr)
+					return "", fmt.Errorf("edit rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix start_line/end_line/new_string and retry", a.Path, verr)
 				}
 			}
 			info, err := os.Stat(a.Path)
@@ -1900,11 +1937,15 @@ func EditFileTool() Tool {
 			}
 			hash, _ := calculateHash(a.Path)
 			tierNote := ""
-			switch tier {
-			case 2:
-				tierNote = " (matched after whitespace-normalization; copy exact text next time for precision)"
-			case 3:
-				tierNote = " (matched by fuzzy similarity — verify the diff carefully)"
+			if a.StartLine != 0 || a.EndLine != 0 {
+				tierNote = fmt.Sprintf(" (replaced lines %d to %d)", a.StartLine, a.EndLine)
+			} else {
+				switch tier {
+				case 2:
+					tierNote = " (matched after whitespace-normalization; copy exact text next time for precision)"
+				case 3:
+					tierNote = " (matched by fuzzy similarity — verify the diff carefully)"
+				}
 			}
 			result := fmt.Sprintf("edited %s: replaced %d occurrence(s)%s\nNew Hash: %s", a.Path, count, tierNote, hash)
 			if diff := unifiedDiff(string(data), updated, a.Path); diff != "" {
@@ -1996,7 +2037,7 @@ func CopyFileTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "copy_file",
+			Name:        "copy_file",
 			Description: "Copy a file or directory recursively. Uses cp -r for directories. Parent directories are created automatically for the destination.",
 			Parameters: Schema{
 				Type: "object",
@@ -2040,9 +2081,9 @@ func FindFilesTool() Tool {
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"pattern":   {Type: "string", Description: "Glob pattern matched against the basename. Use '*' for anything."},
-					"path":      {Type: "string", Description: "Root directory to search. Defaults to '.'."},
-					"max_depth": {Type: "number", Description: "Maximum directory depth (0 = root only). Default 10."},
+					"pattern":        {Type: "string", Description: "Glob pattern matched against the basename. Use '*' for anything."},
+					"path":           {Type: "string", Description: "Root directory to search. Defaults to '.'."},
+					"max_depth":      {Type: "number", Description: "Maximum directory depth (0 = root only). Default 10."},
 					"include_hidden": {Type: "boolean", Description: "Descend into dot-directories (default false). .git/node_modules stay skipped."},
 				},
 				Required: []string{"pattern"},
@@ -2070,18 +2111,19 @@ func FindFilesTool() Tool {
 				maxDepth = *a.MaxDepth
 			}
 			rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
+			gi := gitignore.NewMatcher(root)
 			var matches []string
 			err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 				if err != nil {
 					return nil
 				}
-				name := info.Name()
-				if name == ".git" || name == "node_modules" {
+				if p != root && gi.IsIgnored(p) {
 					if info.IsDir() {
 						return filepath.SkipDir
 					}
 					return nil
 				}
+				name := info.Name()
 				if !a.IncludeHidden && strings.HasPrefix(name, ".") && p != root {
 					if info.IsDir() {
 						return filepath.SkipDir
@@ -2177,7 +2219,7 @@ func WebFetchTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "web_fetch",
+			Name:        "web_fetch",
 			Description: "Fetch a web page and return its content as clean plain text. HTML pages are converted to readable text — scripts, styles, and markup are stripped. Use this to read documentation, blog posts, or any web content. Returns the HTTP status code followed by the extracted text.",
 			Parameters: Schema{
 				Type: "object",
@@ -2236,13 +2278,13 @@ func GetProjectTreeTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "get_project_tree",
+			Name:        "get_project_tree",
 			Description: "Return an ASCII tree of the project directory with proper branch markers (├── / └──). Directories are suffixed with '/'. Skipped dirs like .git/node_modules show a count note. Capped at max_depth and max_entries to stay readable.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"path":       {Type: "string", Description: "Root directory. Defaults to '.'."},
-					"max_depth":  {Type: "number", Description: "Maximum directory depth. Default 4, max 8."},
+					"path":        {Type: "string", Description: "Root directory. Defaults to '.'."},
+					"max_depth":   {Type: "number", Description: "Maximum directory depth. Default 4, max 8."},
 					"max_entries": {Type: "number", Description: "Maximum entries to output. Default 200."},
 				},
 			},
@@ -2273,6 +2315,7 @@ func GetProjectTreeTool() Tool {
 				isDir   bool
 				skipped bool
 			}
+			gi := gitignore.NewMatcher(root)
 			var entries []entry
 			skippedDirs := 0
 			rootDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
@@ -2285,17 +2328,19 @@ func GetProjectTreeTool() Tool {
 				if rel == "." {
 					return nil
 				}
+				if path != root && gi.IsIgnored(path) {
+					if d.IsDir() {
+						skippedDirs++
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				depth := strings.Count(filepath.Clean(path), string(os.PathSeparator)) - rootDepth
 				if depth > a.MaxDepth {
 					if d.IsDir() {
 						return filepath.SkipDir
 					}
 					return nil
-				}
-				name := d.Name()
-				if d.IsDir() && (name == ".git" || name == "node_modules" || name == "vendor" || name == "build" || name == "target" || name == "__pycache__" || name == ".venv" || name == "dist") {
-					skippedDirs++
-					return filepath.SkipDir
 				}
 				entries = append(entries, entry{rel: rel, isDir: d.IsDir()})
 				return nil
@@ -2397,7 +2442,7 @@ func AskUserTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "ask_user",
+			Name:        "ask_user",
 			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Include clear options in the question to make it easy for the user to answer. After calling this, STOP and wait — the user's next message will contain their answer.",
 			Parameters: Schema{
 				Type: "object",
@@ -2424,14 +2469,13 @@ func AskUserTool() Tool {
 	}
 }
 
-
 func GitStatusTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_status",
+			Name:        "git_status",
 			Description: "Show full git status: current branch, upstream tracking, staged/unstaged/untracked changes, and stash count. Use this to understand repo state before any git operations.",
-			Parameters: Schema{Type: "object", Properties: map[string]Property{}},
+			Parameters:  Schema{Type: "object", Properties: map[string]Property{}},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var out strings.Builder
@@ -2488,7 +2532,7 @@ func GitDiffTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_diff",
+			Name:        "git_diff",
 			Description: "Show git diff. By default shows unstaged changes. Use staged=true for staged changes. Use from_commit/to_commit to compare specific commits. Use path to filter to specific files or directories.",
 			Parameters: Schema{
 				Type: "object",
@@ -2543,16 +2587,16 @@ func GitLogTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_log",
+			Name:        "git_log",
 			Description: "Show git commit history with graph, author, and date. Filter by author, path, or date range. Use this to understand project history and find specific changes.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"count":   {Type: "number", Description: "Number of commits to show. Default 10, max 50."},
-					"author":  {Type: "string", Description: "Filter by author name or email."},
-					"path":    {Type: "string", Description: "Only show commits touching this file/directory."},
-					"since":   {Type: "string", Description: "Show commits more recent than this date (e.g. '2024-01-01' or '2 weeks ago')."},
-					"grep":    {Type: "string", Description: "Filter commits whose message matches this pattern."},
+					"count":  {Type: "number", Description: "Number of commits to show. Default 10, max 50."},
+					"author": {Type: "string", Description: "Filter by author name or email."},
+					"path":   {Type: "string", Description: "Only show commits touching this file/directory."},
+					"since":  {Type: "string", Description: "Show commits more recent than this date (e.g. '2024-01-01' or '2 weeks ago')."},
+					"grep":   {Type: "string", Description: "Filter commits whose message matches this pattern."},
 				},
 			},
 		},
@@ -2630,7 +2674,7 @@ func GitCommitTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_commit",
+			Name:        "git_commit",
 			Description: "Record changes to the git repository. Use all=true to auto-stage all modified/deleted files. Use amend=true to amend the previous commit (keep same message or provide a new one). Without flags, commits only previously staged changes.",
 			Parameters: Schema{
 				Type: "object",
@@ -2672,7 +2716,7 @@ func WebSearchTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "web_search",
+			Name:        "web_search",
 			Description: "Search the web for a query using DuckDuckGo. Returns numbered results with title, snippet, and URL. Use this to find current information, documentation, or anything you don't already know. Be specific in your query for best results.",
 			Parameters: Schema{
 				Type: "object",
@@ -2726,7 +2770,7 @@ func FindSymbolTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "find_symbol",
+			Name:        "find_symbol",
 			Description: "Search for a symbol definition across the project. Matches Go func/method/type/var/const, Rust fn/struct/trait/enum/impl/type, Python class/def, C/C++ functions, Java/TS classes, and more. Use this to locate where things are defined.",
 			Parameters: Schema{
 				Type: "object",
@@ -2762,7 +2806,7 @@ func FindSymbolTool() Tool {
 			)
 			argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", "--exclude-dir=vendor", "--exclude-dir=target", pattern}
 			if a.FileTypes != "" {
-				argv = append(argv, "--include=" + a.FileTypes)
+				argv = append(argv, "--include="+a.FileTypes)
 			}
 			argv = append(argv, ".")
 			cmd := exec.CommandContext(ctx, "grep", argv...)
@@ -2780,7 +2824,7 @@ func GitBranchTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_branch",
+			Name:        "git_branch",
 			Description: "List, create, or delete git branches. With no arguments, lists all local branches (current marked with *). Use action='create' with a name to create a new branch. Use action='delete' to delete a branch (safe — refuses if not merged). Use remote=true to list remote branches.",
 			Parameters: Schema{
 				Type: "object",
@@ -2839,7 +2883,7 @@ func GitCheckoutTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_checkout",
+			Name:        "git_checkout",
 			Description: "Switch to a branch, create-and-switch to a new one, or restore files. Use new_branch=true with target to create a branch and switch to it. Use target with a file path to restore that file from HEAD.",
 			Parameters: Schema{
 				Type: "object",
@@ -2880,7 +2924,7 @@ func GitPullTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_pull",
+			Name:        "git_pull",
 			Description: "Fetch from and integrate with a remote repository. Uses rebase by default for a clean linear history. Specify remote and branch, or defaults to the current upstream.",
 			Parameters: Schema{
 				Type: "object",
@@ -2928,7 +2972,7 @@ func GitPushTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_push",
+			Name:        "git_push",
 			Description: "Push commits to a remote repository. By default pushes current branch to the same-named remote branch. Use set_upstream=true on first push of a new branch. Uses --force-with-lease for safer force push.",
 			Parameters: Schema{
 				Type: "object",
@@ -2976,7 +3020,7 @@ func GitStashTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_stash",
+			Name:        "git_stash",
 			Description: "Stash working changes to switch contexts. Actions: 'push' (save changes, default), 'pop' (restore and remove latest), 'list' (show all stashes), 'drop' (delete latest). Optional message to label the stash.",
 			Parameters: Schema{
 				Type: "object",
@@ -3030,7 +3074,7 @@ func GitMergeTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_merge",
+			Name:        "git_merge",
 			Description: "Merge a branch into the current branch. Use no_ff=true to always create a merge commit. Returns the merge result or conflict information.",
 			Parameters: Schema{
 				Type: "object",
@@ -3071,7 +3115,7 @@ func GitResetTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_reset",
+			Name:        "git_reset",
 			Description: "Unstage files or reset HEAD. With a path, unstages that file from the index. With a commit ref, resets HEAD to that commit. Modes: 'soft' (keep changes staged), 'mixed' (keep changes unstaged - default), 'hard' (DESTRUCTIVE: discard changes).",
 			Parameters: Schema{
 				Type: "object",
@@ -3132,7 +3176,7 @@ func GitRemoteTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "git_remote",
+			Name:        "git_remote",
 			Description: "Manage remote repositories. With no arguments, lists all remotes with their URLs (-v). Use action='add' to add a new remote, action='remove' to delete one, or action='show' to inspect a specific remote.",
 			Parameters: Schema{
 				Type: "object",
@@ -3190,7 +3234,7 @@ func ProcessListTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "process_list",
+			Name:        "process_list",
 			Description: "List running processes sorted by memory usage. Returns PID, CPU%, MEM%, and command. Filter by name to find specific processes. Use this to check if servers, builds, or background tasks are still running.",
 			Parameters: Schema{
 				Type: "object",
@@ -3245,7 +3289,7 @@ func ProcessKillTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "process_kill",
+			Name:        "process_kill",
 			Description: "Kill a running process by PID or name. Default signal is 15 (SIGTERM - graceful). Use signal=9 for SIGKILL (force). Use by_name=true to kill all processes matching a name via pkill.",
 			Parameters: Schema{
 				Type: "object",
@@ -3259,9 +3303,9 @@ func ProcessKillTool() Tool {
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var a struct {
-				Target  string `json:"target"`
-				Signal  int    `json:"signal"`
-				ByName  bool   `json:"by_name"`
+				Target string `json:"target"`
+				Signal int    `json:"signal"`
+				ByName bool   `json:"by_name"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -3294,7 +3338,7 @@ func DiskUsageTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
-			Name: "disk_usage",
+			Name:        "disk_usage",
 			Description: "Show disk usage for filesystems or directories. Omit path to see all mounted filesystems (df -h). Provide a path to see directory usage (du). Use max_depth to control how deep du recurses. Use this to check available space before large operations.",
 			Parameters: Schema{
 				Type: "object",
@@ -3330,7 +3374,6 @@ func DiskUsageTool() Tool {
 		},
 	}
 }
-
 
 func joinLines(s []string) string {
 	if len(s) == 0 {
@@ -3400,9 +3443,9 @@ func SemanticSearchTool(embedder Embedder) Tool {
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"query":  {Type: "string", Description: "Natural language query."},
-					"top_k":  {Type: "number", Description: "Number of results to return. Default 5."},
-					"model":  {Type: "string", Description: "Embedding model used for the index (default: nomic-embed-text). Must match the model passed to code_index."},
+					"query": {Type: "string", Description: "Natural language query."},
+					"top_k": {Type: "number", Description: "Number of results to return. Default 5."},
+					"model": {Type: "string", Description: "Embedding model used for the index (default: nomic-embed-text). Must match the model passed to code_index."},
 				},
 				Required: []string{"query"},
 			},
@@ -3451,4 +3494,3 @@ func SemanticSearchTool(embedder Embedder) Tool {
 		},
 	}
 }
-

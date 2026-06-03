@@ -121,6 +121,52 @@ func TestEditFile(t *testing.T) {
 	}
 }
 
+func TestEditFile_LineRange(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mcp-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	r := NewRegistry()
+	r.Register(WriteFileTool())
+	r.Register(EditFileTool())
+	r.Register(ReadFileTool())
+
+	path := filepath.Join(tmpDir, "edit_range.txt")
+	initial := "one\ntwo\nthree\nfour\nfive"
+
+	// Write initial
+	writeArgs, _ := json.Marshal(map[string]string{
+		"path":    path,
+		"content": initial,
+	})
+	r.Invoke(ctx, ToolCall{Function: ToolCallFunction{Name: "write_file", Arguments: writeArgs}})
+
+	// Edit line 3 to 4
+	editArgs, _ := json.Marshal(map[string]any{
+		"path":       path,
+		"start_line": 3,
+		"end_line":   4,
+		"new_string": "THREE\nFOUR",
+	})
+	_, err = r.Invoke(ctx, ToolCall{
+		Function: ToolCallFunction{Name: "edit_file", Arguments: editArgs},
+	})
+	if err != nil {
+		t.Fatalf("edit_file line range failed: %v", err)
+	}
+
+	// Verify
+	readArgs, _ := json.Marshal(map[string]string{"path": path})
+	resp, _ := r.Invoke(ctx, ToolCall{Function: ToolCallFunction{Name: "read_file", Arguments: readArgs}})
+	expected := "one\ntwo\nTHREE\nFOUR\nfive"
+	if resp != expected {
+		t.Errorf("expected %q, got %q", expected, resp)
+	}
+}
+
 func TestGrep(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "mcp-test-*")
 	if err != nil {

@@ -318,3 +318,35 @@ func TestInputDynamicHeightGrowsOnWrappedText(t *testing.T) {
 		t.Fatalf("expected wrapped input to grow beyond %d line, got %d", minInputLines, input.Height())
 	}
 }
+
+func TestAutoModePromptBypass(t *testing.T) {
+	m := &Model{
+		mode:  AutoMode,
+		state: stateChat,
+		pending: &pendingBatch{
+			allowAll: false,
+		},
+	}
+
+	// Test path inside workspace (trusted folder)
+	callInside := mcp.ToolCall{
+		Function: mcp.ToolCallFunction{
+			Name:      "write_file",
+			Arguments: json.RawMessage(`{"path":"src/main.go","content":"hello"}`),
+		},
+	}
+	if m.shouldPromptPermission(callInside) {
+		t.Error("expected shouldPromptPermission to be false for path inside trusted folder")
+	}
+
+	// Test path outside workspace (untrusted folder)
+	callOutside := mcp.ToolCall{
+		Function: mcp.ToolCallFunction{
+			Name:      "write_file",
+			Arguments: json.RawMessage(`{"path":"../../outside.txt","content":"hello"}`),
+		},
+	}
+	if !m.shouldPromptPermission(callOutside) {
+		t.Error("expected shouldPromptPermission to be true for path outside trusted folder")
+	}
+}

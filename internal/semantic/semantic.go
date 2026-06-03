@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/javanhut/ollama_code/internal/gitignore"
+	"golang.org/x/sync/errgroup"
 )
 
 type Chunk struct {
@@ -63,28 +66,27 @@ func LoadIndex(root string) (*Index, error) {
 func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)) (*Index, error) {
 	var chunks []Chunk
 	var batch []string
-	var batchMeta []struct{ idx int; start int; end int; path string }
-
-	// Reuse skip dirs from mcp package logic
-	skipDirs := map[string]bool{
-		".git": true, ".svn": true, ".hg": true, ".bzr": true,
-		"node_modules": true, "vendor": true, "target": true,
-		"dist": true, "build": true, "out": true, "bin": true, "obj": true,
-		"__pycache__": true, ".venv": true, "venv": true,
-		".idea": true, ".vscode": true,
-		".next": true, ".nuxt": true,
-		"coverage": true, ".cache": true, ".terraform": true,
+	var batchMeta []struct {
+		idx   int
+		start int
+		end   int
+		path  string
 	}
+
+	gi := gitignore.NewMatcher(root)
 
 	var fileCount int
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
 		}
-		if d.IsDir() {
-			if path != root && skipDirs[d.Name()] {
+		if path != root && gi.IsIgnored(path) {
+			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if !d.Type().IsRegular() {
@@ -108,7 +110,10 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 			}
 			text := strings.Join(lines[i:end], "\n")
 			batch = append(batch, text)
-			batchMeta = append(batchMeta, struct{ idx, start, end int; path string }{idx: len(chunks), start: i + 1, end: end, path: rel})
+			batchMeta = append(batchMeta, struct {
+				idx, start, end int
+				path            string
+			}{idx: len(chunks), start: i + 1, end: end, path: rel})
 			chunks = append(chunks, Chunk{Path: rel, StartLine: i + 1, EndLine: end, Text: text})
 			if end == len(lines) {
 				break
@@ -125,20 +130,31 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 		return nil, fmt.Errorf("no text files found in %s", root)
 	}
 
+	var g errgroup.Group
+	g.SetLimit(4)
+
 	batchSize := 10
 	for i := 0; i < len(batch); i += batchSize {
+		start := i
 		end := i + batchSize
 		if end > len(batch) {
 			end = len(batch)
 		}
-		embs, err := embedder(batch[i:end])
-		if err != nil {
-			return nil, fmt.Errorf("embedding batch %d-%d failed: %w", i, end, err)
-		}
-		for j, emb := range embs {
-			meta := batchMeta[i+j]
-			chunks[meta.idx].Embedding = emb
-		}
+		g.Go(func() error {
+			embs, err := embedder(batch[start:end])
+			if err != nil {
+				return fmt.Errorf("embedding batch %d-%d failed: %w", start, end, err)
+			}
+			for j, emb := range embs {
+				meta := batchMeta[start+j]
+				chunks[meta.idx].Embedding = emb
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return &Index{Root: root, Model: model, Chunks: chunks}, nil

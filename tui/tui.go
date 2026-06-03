@@ -112,6 +112,7 @@ const (
 	ExploreMode Mode = iota
 	PlanMode
 	WriteMode
+	AutoMode
 )
 
 func (m Mode) String() string {
@@ -122,6 +123,8 @@ func (m Mode) String() string {
 		return "plan"
 	case WriteMode:
 		return "write"
+	case AutoMode:
+		return "auto"
 	}
 	return "?"
 }
@@ -134,6 +137,8 @@ func (m Mode) hint() string {
 		return "read + notes"
 	case WriteMode:
 		return "writes need approval"
+	case AutoMode:
+		return "autonomous (unlimited changes in workspace)"
 	}
 	return ""
 }
@@ -157,6 +162,8 @@ func (m Mode) color() color.Color {
 		return lipgloss.Color("220") // Yellow
 	case WriteMode:
 		return lipgloss.Color("196") // Red
+	case AutoMode:
+		return lipgloss.Color("129") // Purple
 	}
 	return lipgloss.Color("39")
 }
@@ -169,6 +176,8 @@ func parseMode(s string) (Mode, bool) {
 		return PlanMode, true
 	case "write":
 		return WriteMode, true
+	case "auto":
+		return AutoMode, true
 	default:
 		return ExploreMode, false
 	}
@@ -503,6 +512,8 @@ var slashCommands = []struct {
 	{"/dream", "toggle idle dream mode on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
+	{"/auto", "switch to autonomous mode"},
+	{"/mode", "switch mode (explore, plan, write, auto)"},
 }
 
 func (m *Model) updateSlashSuggestions() {
@@ -1369,7 +1380,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TEXT instead of via the native channel. If the assistant's message is
 		// actually a tool call, route it through the same execution path as a
 		// native call (guarded by the step budget so it can't loop forever).
-		if parsed := m.tools.ParseToolCallsFromContent(finalAssistant); len(parsed) > 0 && m.stepCount < m.maxSteps {
+		limit := m.maxSteps
+		if m.mode == AutoMode {
+			limit = 100
+		}
+		if parsed := m.tools.ParseToolCallsFromContent(finalAssistant); len(parsed) > 0 && m.stepCount < limit {
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
 				Content:   finalAssistant,
@@ -1672,7 +1687,25 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
+		if strings.HasPrefix(val, "/mode") {
+			m.input.Reset()
+			args := strings.TrimSpace(strings.TrimPrefix(val, "/mode"))
+			if target, ok := parseMode(args); ok {
+				m.applyModeTransition(target, "switched by user")
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+			} else {
+				m.toast = "invalid mode: " + args + " (choose explore, plan, write, auto)"
+			}
+			return m, nil
+		}
 		switch val {
+		case "/auto":
+			m.input.Reset()
+			m.applyModeTransition(AutoMode, "switched by user")
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, nil
 		case "/quit", "/exit":
 			return m, tea.Quit
 		case "/settings":
@@ -1894,6 +1927,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					m.mode = PlanMode
 				case "write":
 					m.mode = WriteMode
+				case "auto":
+					m.mode = AutoMode
 				}
 			}
 			m.cfg.Model = m.modelName
@@ -2114,6 +2149,7 @@ func (m *Model) helpModal() string {
 		{"explore", "read-only — model can only inspect"},
 		{"plan", "read + update session notes"},
 		{"write", "all tools; writes need your approval"},
+		{"auto", "autonomous — unlimited changes in workspace"},
 		{"tab", "cycle modes"},
 		{"", ""},
 		{"", "Slash commands"},
@@ -2127,6 +2163,8 @@ func (m *Model) helpModal() string {
 		{"/save", "save current conversation to named session"},
 		{"/load", "load a saved session"},
 		{"/sessions", "list saved sessions"},
+		{"/auto", "switch to autonomous mode"},
+		{"/mode", "switch mode (explore, plan, write, auto)"},
 		{"/quit", "exit"},
 		{"", ""},
 		{"", "Keys"},
@@ -2638,6 +2676,8 @@ func (m *Model) buildDynamicContext(ragBlock string) string {
 		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Use this mode to outline the change: scope, files to touch, risks, the exact diff strategy. Do NOT call run_shell — it is unavailable here. When the plan is solid, call switch_mode(\"write\", ...) to execute it.\n")
 	case WriteMode:
 		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Work from the plan in your session notes, but verify each step against the ACTUAL code as you execute it — don't assume the note is still accurate. If the code contradicts the plan or notes, trust the code, say so, and adjust. You can switch_mode back to 'plan' or 'explore' if you discover the plan is wrong.\n")
+	case AutoMode:
+		dynamicContext.WriteString("AUTO: autonomous execution mode. You have access to all tools (writing, editing, shell commands, process control). Changes under the trusted workspace directory are automatically executed without prompting the user. You are in a semi-autonomous loop; please continue executing tools and solving the task step-by-step until the goal is fully achieved. When the problem is solved, stop calling tools and summarize your changes to the user in plain text.\n")
 	}
 
 	if m.archiveSummary != "" {
@@ -2788,7 +2828,7 @@ TOOL SELECTION (you should know these cold):
   - read_file is your default for *content*. It accepts files AND directories — pointing it at a directory reads every text file under it recursively, skipping noisy dirs like .git/node_modules/vendor/build. One call, full picture.
   - list_directory is ONLY for when the user explicitly asks "what's in this folder" or wants the structure itself. If you actually want to know what the code says, read_file the directory — don't list-then-read. That's two calls when one would do.
 - Create: write_file (new files ONLY), touch, make_directory.
-- Modify: edit_file (surgical replace — ALWAYS prefer this), append_file (add to end). Rewriting a whole file with write_file when edit_file would do is lazy, and you don't do lazy.
+- Modify: edit_file (surgical replace — ALWAYS prefer this. Supports optional start_line and end_line coordinates to edit line-ranges directly, which avoids whitespace matching errors), append_file (add to end). Rewriting a whole file with write_file when edit_file would do is lazy, and you don't do lazy.
 - Move/Rename: move_file. Copy: copy_file. Delete: delete_file (treat this one with the respect a loaded gun deserves).
 - Shell: run_shell. Read the command before you send it. Twice if it has 'rm', 'sudo', 'force', or a redirect.
 
@@ -3314,7 +3354,7 @@ func (m *Model) toolAllowedInMode(name string) bool {
 		return readOnlyToolNames[name] || exploreExtraToolNames[name]
 	case PlanMode:
 		return readOnlyToolNames[name] || planExtraToolNames[name]
-	case WriteMode:
+	case WriteMode, AutoMode:
 		return true
 	}
 	return false
@@ -3578,7 +3618,11 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Step budget: cap tool-call rounds per user turn so a confused model
 		// can't loop forever burning tokens.
 		m.stepCount++
-		if m.stepCount >= m.maxSteps {
+		limit := m.maxSteps
+		if m.mode == AutoMode {
+			limit = 100
+		}
+		if m.stepCount >= limit {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: "[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed.",
@@ -3637,6 +3681,15 @@ func (m *Model) processPendingTools() tea.Cmd {
 				m.pending.started[i] = true
 				m.pending.done++
 				continue
+			case req.target == AutoMode:
+				m.pending.results[i] = api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  "error: transition to 'auto' mode can only be triggered by the user explicitly, not via tool call.",
+				}
+				m.pending.started[i] = true
+				m.pending.done++
+				continue
 			case req.target == m.mode:
 				// Redundant switch: succeed as a no-op rather than erroring, so a
 				// confused model doesn't spin retrying the same switch.
@@ -3669,7 +3722,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
-		if !m.pending.allowAll && destructiveToolNames[call.Function.Name] && !exploreShellPrechecked {
+		if m.shouldPromptPermission(call) && !exploreShellPrechecked {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
 			m.state = statePermission
@@ -4210,4 +4263,53 @@ func Run() error {
 		m.companion = nil
 	}
 	return err
+}
+
+func (m *Model) shouldPromptPermission(call mcp.ToolCall) bool {
+	if m.pending.allowAll {
+		return false
+	}
+	if !destructiveToolNames[call.Function.Name] {
+		return false
+	}
+	if m.mode == AutoMode {
+		var args map[string]any
+		_ = json.Unmarshal(call.Function.Arguments, &args)
+
+		if p, ok := args["path"].(string); ok && p != "" {
+			if !m.isPathInTrustedFolder(p) {
+				return true
+			}
+		}
+		if wd, ok := args["working_dir"].(string); ok && wd != "" {
+			if !m.isPathInTrustedFolder(wd) {
+				return true
+			}
+		}
+		return false
+	}
+	// For all other modes (Explore, Plan, Write), prompt for all destructive tools
+	return true
+}
+
+func (m *Model) isPathInTrustedFolder(targetPath string) bool {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	absCwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return false
+	}
+	var absTarget string
+	if filepath.IsAbs(targetPath) {
+		absTarget = filepath.Clean(targetPath)
+	} else {
+		absTarget = filepath.Clean(filepath.Join(absCwd, targetPath))
+	}
+	rel, err := filepath.Rel(absCwd, absTarget)
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
 }

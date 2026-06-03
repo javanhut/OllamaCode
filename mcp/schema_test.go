@@ -18,13 +18,13 @@ func TestJSONSchema_EditFile(t *testing.T) {
 	if schema.Type != "object" {
 		t.Fatalf("expected object type, got %q", schema.Type)
 	}
-	for _, want := range []string{"path", "old_string", "new_string", "replace_all"} {
+	for _, want := range []string{"path", "old_string", "new_string", "replace_all", "start_line", "end_line"} {
 		if _, ok := schema.Properties[want]; !ok {
 			t.Errorf("missing property %q in schema", want)
 		}
 	}
-	if len(schema.Required) != 3 {
-		t.Fatalf("expected 3 required fields, got %v", schema.Required)
+	if len(schema.Required) != 2 {
+		t.Fatalf("expected 2 required fields, got %v", schema.Required)
 	}
 }
 

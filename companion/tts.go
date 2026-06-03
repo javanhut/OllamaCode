@@ -101,7 +101,7 @@ func readPiperSampleRate(path string) (int, bool) {
 // request. Calling Speak while one is playing kills it and starts a new one.
 type TTS struct {
 	cfg      TTSConfig
-	suppress *atomic.Bool  // STT ignores mic while TTS is talking
+	suppress *atomic.Bool   // STT ignores mic while TTS is talking
 	levels   chan<- float32 // RMS of TTS audio for the visualizer
 
 	mu      sync.Mutex

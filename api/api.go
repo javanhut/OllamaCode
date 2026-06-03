@@ -106,8 +106,8 @@ func (r *ShowModelResponse) SupportsTools() bool {
 }
 
 type EmbedRequest struct {
-	Model  string   `json:"model"`
-	Input  []string `json:"input"`
+	Model string   `json:"model"`
+	Input []string `json:"input"`
 }
 
 type EmbedResponse struct {

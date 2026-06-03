@@ -2,6 +2,8 @@ package huffman
 
 import (
 	"container/heap"
+	"encoding/base64"
+	"encoding/binary"
 	"strings"
 )
 
@@ -37,6 +39,14 @@ func BuildTree(text string) *Node {
 		pq = append(pq, &Node{Char: char, Freq: freq})
 	}
 	heap.Init(&pq)
+
+	if pq.Len() == 1 {
+		child := heap.Pop(&pq).(*Node)
+		return &Node{
+			Freq: child.Freq,
+			Left: child,
+		}
+	}
 
 	for pq.Len() > 1 {
 		left := heap.Pop(&pq).(*Node)
@@ -104,8 +114,60 @@ func Decode(encoded string, root *Node) string {
 }
 
 type CompressedData struct {
-	Encoded string         `json:"encoded"`
-	Tree    *Node          `json:"tree"`
+	Encoded string `json:"encoded"`
+	Tree    *Node  `json:"tree"`
+}
+
+func pack(bitStr string) []byte {
+	n := len(bitStr)
+	numBytes := 4 + (n+7)/8
+	buf := make([]byte, numBytes)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(n))
+
+	for i := 0; i < n; i++ {
+		if bitStr[i] == '1' {
+			buf[4+i/8] |= (1 << (7 - (i % 8)))
+		}
+	}
+	return buf
+}
+
+func unpack(buf []byte) string {
+	if len(buf) < 4 {
+		return ""
+	}
+	n := int(binary.BigEndian.Uint32(buf[0:4]))
+	expectedBytes := 4 + (n+7)/8
+	if len(buf) < expectedBytes {
+		n = (len(buf) - 4) * 8
+		if n < 0 {
+			return ""
+		}
+	}
+	var sb strings.Builder
+	sb.Grow(n)
+	for i := 0; i < n; i++ {
+		b := buf[4+i/8]
+		bit := (b >> (7 - (i % 8))) & 1
+		if bit == 1 {
+			sb.WriteByte('1')
+		} else {
+			sb.WriteByte('0')
+		}
+	}
+	return sb.String()
+}
+
+func isLegacyBitString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' && s[i] != '1' {
+			return false
+		}
+	}
+	return true
 }
 
 func Compress(text string) (*CompressedData, error) {
@@ -113,8 +175,10 @@ func Compress(text string) (*CompressedData, error) {
 		return &CompressedData{}, nil
 	}
 	encoded, root := Encode(text)
+	packed := pack(encoded)
+	b64 := base64.StdEncoding.EncodeToString(packed)
 	return &CompressedData{
-		Encoded: encoded,
+		Encoded: b64,
 		Tree:    root,
 	}, nil
 }
@@ -123,5 +187,13 @@ func Decompress(data *CompressedData) string {
 	if data == nil || data.Encoded == "" {
 		return ""
 	}
-	return Decode(data.Encoded, data.Tree)
+	if isLegacyBitString(data.Encoded) {
+		return Decode(data.Encoded, data.Tree)
+	}
+	packed, err := base64.StdEncoding.DecodeString(data.Encoded)
+	if err != nil {
+		return Decode(data.Encoded, data.Tree)
+	}
+	bitStr := unpack(packed)
+	return Decode(bitStr, data.Tree)
 }

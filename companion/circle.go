@@ -15,13 +15,13 @@ import (
 
 // Color states for the orb.
 var (
-	orbIdle      = Circle                                                    // default deep sky blue
-	orbListening = color.NRGBA{R: 0x40, G: 0xE8, B: 0xFF, A: 0xFF}           // bright cyan
-	orbMuted     = color.NRGBA{R: 0x44, G: 0x4A, B: 0x55, A: 0xFF}           // dim gray-blue
-	haloColor    = color.NRGBA{R: 0x40, G: 0xE8, B: 0xFF, A: 0x50}           // listening halo
-	muteOnDot    = color.NRGBA{R: 0xE6, G: 0x4A, B: 0x4A, A: 0xFF}           // red when muted
-	muteOffDot   = color.NRGBA{R: 0x90, G: 0x9A, B: 0xB0, A: 0xC0}           // gray when unmuted
-	muteRing     = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x40}           // subtle outline
+	orbIdle      = Circle                                          // default deep sky blue
+	orbListening = color.NRGBA{R: 0x40, G: 0xE8, B: 0xFF, A: 0xFF} // bright cyan
+	orbMuted     = color.NRGBA{R: 0x44, G: 0x4A, B: 0x55, A: 0xFF} // dim gray-blue
+	haloColor    = color.NRGBA{R: 0x40, G: 0xE8, B: 0xFF, A: 0x50} // listening halo
+	muteOnDot    = color.NRGBA{R: 0xE6, G: 0x4A, B: 0x4A, A: 0xFF} // red when muted
+	muteOffDot   = color.NRGBA{R: 0x90, G: 0x9A, B: 0xB0, A: 0xC0} // gray when unmuted
+	muteRing     = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0x40} // subtle outline
 )
 
 // Render draws the entire companion frame: background, listening halo, the
