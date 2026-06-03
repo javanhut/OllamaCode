@@ -1687,7 +1687,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
-		if strings.HasPrefix(val, "/mode") {
+		if val == "/mode" || strings.HasPrefix(val, "/mode ") {
 			m.input.Reset()
 			args := strings.TrimSpace(strings.TrimPrefix(val, "/mode"))
 			if target, ok := parseMode(args); ok {
