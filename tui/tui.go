@@ -348,9 +348,13 @@ type pendingBatch struct {
 }
 
 var (
-	defaultToolCallTimeout = 5 * time.Minute
-	shellToolTimeoutGrace  = 5 * time.Second
-	modelStreamIdleTimeout = 10 * time.Minute
+	defaultToolCallTimeout   = 2 * time.Minute
+	localInspectToolTimeout  = 30 * time.Second
+	localMutatingToolTimeout = 90 * time.Second
+	networkToolTimeout       = 2 * time.Minute
+	longRunningToolTimeout   = 10 * time.Minute
+	shellToolTimeoutGrace    = 5 * time.Second
+	modelStreamIdleTimeout   = 3 * time.Minute
 )
 
 const notesFile = ".ollama_notes.md"
@@ -3633,9 +3637,29 @@ func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
 }
 
 func toolCallTimeout(call mcp.ToolCall) time.Duration {
-	if call.Function.Name != "run_shell" {
+	switch call.Function.Name {
+	case "run_shell":
+		return shellToolCallTimeout(call)
+	case "git_status", "git_diff", "git_log", "git_show", "git_branch",
+		"read_file", "list_directory", "find_files", "grep", "find_symbol", "file_info",
+		"get_working_directory", "process_list", "disk_usage", "system_info",
+		"read_session_notes", "recall":
+		return localInspectToolTimeout
+	case "write_file", "edit_file", "append_file", "apply_diff", "delete_file", "move_file",
+		"copy_file", "make_directory", "touch", "git_add", "git_commit", "git_checkout",
+		"git_stash", "git_merge", "git_reset", "git_remote", "process_kill",
+		"update_session_notes", "append_session_notes", "remember", "forget":
+		return localMutatingToolTimeout
+	case "web_search", "web_fetch", "code_index", "semantic_search":
+		return networkToolTimeout
+	case "spawn_subagent":
+		return longRunningToolTimeout
+	default:
 		return defaultToolCallTimeout
 	}
+}
+
+func shellToolCallTimeout(call mcp.ToolCall) time.Duration {
 	var a struct {
 		TimeoutSec float64 `json:"timeout_sec"`
 	}

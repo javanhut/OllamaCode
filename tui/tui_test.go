@@ -179,6 +179,47 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 	}
 }
 
+func TestToolCallTimeoutPolicy(t *testing.T) {
+	tests := []struct {
+		name string
+		call mcp.ToolCall
+		want time.Duration
+	}{
+		{
+			name: "compat git_show is short",
+			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+				Name:      "git_show",
+				Arguments: json.RawMessage(`{}`),
+			}},
+			want: localInspectToolTimeout,
+		},
+		{
+			name: "shell requested timeout gets cleanup grace",
+			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+				Name:      "run_shell",
+				Arguments: json.RawMessage(`{"timeout_sec":1}`),
+			}},
+			want: time.Second + shellToolTimeoutGrace,
+		},
+		{
+			name: "unknown tools do not get long budget",
+			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+				Name:      "custom_tool",
+				Arguments: json.RawMessage(`{}`),
+			}},
+			want: defaultToolCallTimeout,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolCallTimeout(tt.call); got != tt.want {
+				t.Fatalf("expected %s, got %s", tt.want, got)
+			}
+		})
+	}
+}
+
 func TestSelectedTranscriptLineUsesSelectionRange(t *testing.T) {
 	m := &Model{
 		transcript: &strings.Builder{},
