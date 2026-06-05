@@ -319,6 +319,12 @@ type compactDoneMsg struct {
 type modelsLoadedMsg struct {
 	models []string
 }
+
+// modelsAutoMsg carries the model list fetched at startup so the first available
+// model can be auto-loaded when none is configured.
+type modelsAutoMsg struct {
+	models []string
+}
 type connectErrMsg struct{ err error }
 
 type companionTranscriptMsg struct{ text string }
@@ -1065,7 +1071,12 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, m.nextFaceTick())
+	cmds := []tea.Cmd{m.spinner.Tick, m.nextFaceTick()}
+	// If no model is configured, try to load the first one we can find.
+	if strings.TrimSpace(m.modelName) == "" {
+		cmds = append(cmds, m.autoLoadModels())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1234,15 +1245,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
-		// Tab: complete slash command if autocomplete is visible, else cycle mode.
+		// Shift+Tab: cycle the slash-command menu backwards when it's open.
+		if msg.String() == "shift+tab" && m.slashVisible && len(m.slashSuggestions) > 0 {
+			n := len(m.slashSuggestions)
+			m.slashSelected = (m.slashSelected - 1 + n) % n
+			return m, nil
+		}
+		// Tab: cycle the slash-command menu forwards if open, else cycle mode.
 		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			if m.slashVisible && len(m.slashSuggestions) > 0 {
-				// Complete with current suggestion
-				m.input.SetValue(m.slashSuggestions[m.slashSelected])
-				m.input.CursorEnd()
-				m.slashVisible = false
-				m.slashSuggestions = nil
-				m.slashSelected = 0
+				m.slashSelected = (m.slashSelected + 1) % len(m.slashSuggestions)
 				return m, nil
 			}
 			changed := m.applyModeTransition(m.mode.next(), "")
@@ -1273,6 +1285,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePermission:
 			return m.updatePermission(msg)
 		case stateChat:
+			// Enter accepts the highlighted slash command into the input (so args
+			// can be added); a second Enter then runs it.
+			if msg.String() == "enter" && m.slashVisible && len(m.slashSuggestions) > 0 {
+				m.input.SetValue(m.slashSuggestions[m.slashSelected])
+				m.input.CursorEnd()
+				m.slashVisible = false
+				m.slashSuggestions = nil
+				m.slashSelected = 0
+				m.layout()
+				return m, nil
+			}
 			if msg.String() == "enter" {
 				return m.updateChatKey(msg)
 			}
@@ -1310,6 +1333,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.state = stateModelPicker
+		return m, nil
+
+	case modelsAutoMsg:
+		m.models = msg.models
+		// Auto-load the first available model if none is configured yet.
+		if strings.TrimSpace(m.modelName) == "" && len(msg.models) > 0 {
+			m.modelName = msg.models[0]
+			m.cfg.Model = m.modelName
+			saveConfig(m.cfg)
+			m.resolveProfile()
+			m.toast = "loaded model " + m.modelName
+			m.refreshTranscript()
+		}
 		return m, nil
 
 	case connectErrMsg:
@@ -1565,11 +1601,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	case stateChat:
 		prevH := m.input.Height()
+		prevSlash := len(m.slashSuggestions)
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
 		m.updateSlashSuggestions()
-		if m.input.Height() != prevH {
+		// Relayout when the input grows/shrinks or the slash menu's height changes
+		// so the viewport stays sized correctly above the (taller) input area.
+		if m.input.Height() != prevH || len(m.slashSuggestions) != prevSlash {
 			m.layout()
 		}
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -2579,6 +2618,24 @@ func (m *Model) fetchModels() tea.Cmd {
 			names = append(names, mod.Name)
 		}
 		return modelsLoadedMsg{models: names}
+	}
+}
+
+// autoLoadModels fetches the model list at startup so the first available model
+// can be selected automatically. Connection errors are swallowed (returns an
+// empty list) so the app simply stays in its "no model loaded" state.
+func (m *Model) autoLoadModels() tea.Cmd {
+	host := m.host
+	return func() tea.Msg {
+		list, err := host.GetModelList()
+		if err != nil {
+			return modelsAutoMsg{}
+		}
+		names := make([]string, 0, len(list.Models))
+		for _, mod := range list.Models {
+			names = append(names, mod.Name)
+		}
+		return modelsAutoMsg{models: names}
 	}
 }
 
@@ -4121,37 +4178,54 @@ func keywordHits(text string, keywords []string) int {
 	return hits
 }
 
+func slashDesc(name string) string {
+	for _, c := range slashCommands {
+		if c.name == name {
+			return c.desc
+		}
+	}
+	return ""
+}
+
 func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	sugStyle := lipgloss.NewStyle().
+	rowStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Padding(0, 1)
+		Foreground(lipgloss.Color("252"))
 	selStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("39")).
 		Foreground(lipgloss.Color("232")).
-		Bold(true).
-		Padding(0, 1)
-	mutedStyle := lipgloss.NewStyle().
+		Bold(true)
+	hintStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("245")).
-		Padding(0, 1)
+		Italic(true)
 
-	b.WriteString("\n")
-	for i, s := range m.slashSuggestions {
-		if i == m.slashSelected {
-			b.WriteString(selStyle.Render(s))
-		} else {
-			b.WriteString(sugStyle.Render(s))
+	// Width the rows to the widest command + description so the highlight bar is
+	// a clean vertical block.
+	nameW, descW := 0, 0
+	for _, s := range m.slashSuggestions {
+		if w := lipgloss.Width(s); w > nameW {
+			nameW = w
 		}
-		if i < len(m.slashSuggestions)-1 {
-			b.WriteString(" ")
+		if w := lipgloss.Width(slashDesc(s)); w > descW {
+			descW = w
 		}
 	}
-	b.WriteString("  ")
-	b.WriteString(mutedStyle.Render("tab to complete"))
+	lineW := nameW + descW + 4
+
+	var b strings.Builder
+	for i, s := range m.slashSuggestions {
+		text := fmt.Sprintf(" %-*s  %s", nameW, s, slashDesc(s))
+		st := rowStyle
+		if i == m.slashSelected {
+			st = selStyle
+		}
+		b.WriteString(st.Width(lineW).Render(text))
+		b.WriteString("\n")
+	}
+	b.WriteString(hintStyle.Render(" tab/shift+tab to cycle · enter to select "))
 	return b.String()
 }
 
