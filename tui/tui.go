@@ -4548,6 +4548,25 @@ func centerCells(s string, w int) string {
 	return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(s)
 }
 
+// inputGazeDir maps the cursor's horizontal position in the input bar to an eye
+// direction, so the mascot's eyes follow along as you type: left of the bar ->
+// look left, middle -> center, right -> look right.
+func (m *Model) inputGazeDir() eyeDir {
+	w := m.input.Width()
+	if w <= 0 {
+		return eyeCenter
+	}
+	rel := float64(m.input.LineInfo().CharOffset) / float64(w)
+	switch {
+	case rel < 0.34:
+		return eyeLeft
+	case rel > 0.66:
+		return eyeRight
+	default:
+		return eyeCenter
+	}
+}
+
 func (m *Model) faceView() string {
 	var dir eyeDir
 	var lid eyeLid
@@ -4561,10 +4580,10 @@ func (m *Model) faceView() string {
 		dir, lid = eyeCenter, lidClosed
 		z := []string{"z    ", " zZ  ", "  zZ ", "   zZ"}
 		mouth = z[(f/2)%len(z)] // slow drift
-	case m.streaming: // responding — talking
+	case m.streaming: // responding — mouth opens and closes while talking
 		label = "speaking"
 		dir, lid = eyeCenter, lidOpen
-		talk := []string{" --- ", " ooo ", " --- ", " www "}
+		talk := []string{"-----", "[ - ]", "[   ]", "[ - ]"}
 		mouth = talk[f%len(talk)]
 	case m.pending != nil: // working — focused on the task
 		label = "focused"
@@ -4575,14 +4594,19 @@ func (m *Model) faceView() string {
 	default: // model loaded & idle — active, expression reflects recent activity
 		label, mouth = faceMoodFrame(m.currentFaceMood(), f)
 		lid = lidOpen
-		// Mostly still: a brief glance and a single blink per ~7s cycle.
-		switch f % 16 {
-		case 4, 5:
-			dir = eyeLeft
-		case 11, 12:
-			dir = eyeRight
-		default:
-			dir = eyeCenter
+		if strings.TrimSpace(m.input.Value()) != "" {
+			// Follow the cursor: eyes track where you are in the input bar.
+			dir = m.inputGazeDir()
+		} else {
+			// Idle: mostly still, a brief glance per ~7s cycle.
+			switch f % 16 {
+			case 4, 5:
+				dir = eyeLeft
+			case 11, 12:
+				dir = eyeRight
+			default:
+				dir = eyeCenter
+			}
 		}
 		if f%16 == 8 {
 			lid = lidClosed // single slow blink
