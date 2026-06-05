@@ -2024,6 +2024,8 @@ func (m *Model) View() tea.View {
 		return v
 	}
 	base := m.viewChat()
+	// Paint the animated mascot on top of the composed view, pinned bottom-right.
+	base = m.overlayFace(base)
 	switch m.state {
 	case stateSettings:
 		v.SetContent(m.overlayModal(base, m.settingsModal()))
@@ -2039,6 +2041,30 @@ func (m *Model) View() tea.View {
 		v.SetContent(base)
 	}
 	return v
+}
+
+// overlayFace paints the animated mascot box on top of the base view, pinned to
+// the bottom-right corner just above the input band and footer so it never
+// covers the prompt or the mode line. It sits ON TOP of the chat (an overlay),
+// not behind it.
+func (m *Model) overlayFace(base string) string {
+	if m.width <= 0 || m.height <= 0 {
+		return base
+	}
+	face := m.faceView()
+	fw := lipgloss.Width(face)
+	fh := lipgloss.Height(face)
+	footerH := lipgloss.Height(m.footerView())
+	inputH := lipgloss.Height(m.inputView())
+	col := m.width - fw - 1
+	row := m.height - footerH - inputH - fh
+	if col < 0 {
+		col = 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	return overlay(base, face, col, row)
 }
 
 func (m *Model) overlayModal(base, modal string) string {
@@ -2468,8 +2494,10 @@ func (m *Model) layout() {
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
 	footerH := lipgloss.Height(m.footerView())
-	faceBoxH := 5
-	inputH := max(faceBoxH, m.input.Height()+1)
+	inputH := lipgloss.Height(m.inputView())
+	if inputH < 2 {
+		inputH = 2
+	}
 	vpH := m.height - headerH - footerH - inputH
 	if vpH < 1 {
 		vpH = 1
@@ -4133,9 +4161,6 @@ func (m *Model) inputView() string {
 		width = lipgloss.Width(m.input.View())
 	}
 
-	faceBox := m.faceView()
-	faceW := lipgloss.Width(faceBox)
-
 	c := m.mode.color()
 	label := "message"
 	if m.streaming {
@@ -4148,10 +4173,11 @@ func (m *Model) inputView() string {
 		Padding(0, 1).
 		Render(label)
 
-	inputW := max(1, width-faceW-lipgloss.Width(prefix)-2)
+	// The mascot is drawn separately as a corner overlay (see overlayFace), so
+	// the input takes the full width here.
+	inputW := max(1, width-lipgloss.Width(prefix)-2)
 	input := inputBandStyle.Width(inputW).Render(m.input.View())
-
-	bottomBar := lipgloss.JoinHorizontal(lipgloss.Center, prefix+input, "  ", faceBox)
+	bottomBar := prefix + input
 
 	suggestions := m.slashSuggestionsView()
 	return suggestions + "\n" + bottomBar
@@ -4467,132 +4493,136 @@ func Run() error {
 }
 
 func (m *Model) nextFaceTick() tea.Cmd {
-	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg {
 		return faceTickMsg(t)
 	})
 }
 
-func (m *Model) faceView() string {
-	var face string
-	var label string
+type eyeDir int
 
-	// Determine state
-	state := 1 // awake
-	if m.streaming {
-		state = 3 // talking
-	} else if m.pending != nil {
-		state = 2 // thinking
-	} else if time.Since(m.faceLastKey) > 10*time.Second {
-		state = 0 // sleeping
+const (
+	eyeCenter eyeDir = iota
+	eyeLeft
+	eyeRight
+)
+
+type eyeLid int
+
+const (
+	lidOpen eyeLid = iota
+	lidHalf
+	lidClosed
+)
+
+// pupilCell returns the 3-cell interior of one eye with the pupil placed
+// left, center, or right (see face.txt: |0  |, | 0 |, |  0|).
+func pupilCell(dir eyeDir) string {
+	switch dir {
+	case eyeLeft:
+		return "0  "
+	case eyeRight:
+		return "  0"
+	default:
+		return " 0 "
 	}
-
-	switch state {
-	case 0: // sleeping
-		label = "sleeping..."
-		frames := []string{
-			"( -_ -) zZZ",
-			"( -_ -)  zZZ",
-			"( u_ u)   zZZ",
-			"( u_ u)    zZZ",
-		}
-		face = frames[m.faceFrame%len(frames)]
-	case 2: // thinking
-		label = "thinking"
-		frames := []string{
-			"( ಠ_ಠ )",
-			"( ఠ_ఠ )",
-			"( ಠ~ಠ )",
-			"( ⊙_⊙ )",
-		}
-		face = frames[m.faceFrame%len(frames)]
-	case 3: // talking
-		label = "speaking"
-		frames := []string{
-			"( ^_^) ",
-			"( ^o^) ",
-			"( ^_^) ",
-			"( ^▽^) ",
-		}
-		face = frames[m.faceFrame%len(frames)]
-	default: // awake / typing
-		mood := m.currentFaceMood()
-		label, face = faceMoodFrame(mood, m.faceFrame)
-	}
-
-	c := m.mode.color()
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(c).
-		Width(18).
-		Height(2).
-		Align(lipgloss.Center, lipgloss.Center)
-
-	// Combine face and sub-label
-	content := fmt.Sprintf("%s\n%s", face, lipgloss.NewStyle().Faint(true).Width(18).Height(1).Align(lipgloss.Center).Render(label))
-	return boxStyle.Render(content)
 }
 
-func faceMoodFrame(mood faceMood, frame int) (string, string) {
-	label := "active"
-	frames := []string{
-		"( •_• )",
-		"( o_o )",
-		"( •_• )",
-		"( ◉_◉ )",
-		"( •_• )",
-		"( ￢_￢ )",
+// renderEyes returns 4 lines (each 12 cells wide) of ASCII eyes, following the
+// design in face.txt: a pair of boxed eyes whose pupils look left/center/right,
+// with open, half-lidded (sleepy/indifferent), or closed (blink/sleep) lids.
+func renderEyes(dir eyeDir, lid eyeLid) []string {
+	blank := strings.Repeat(" ", 12)
+	pair := func(eye string) string { return eye + "  " + eye }
+	switch lid {
+	case lidClosed:
+		return []string{blank, pair(" --- "), pair(" --- "), blank}
+	case lidHalf:
+		return []string{pair(" ___ "), pair("|" + pupilCell(dir) + "|"), pair(" --- "), blank}
+	default: // open
+		return []string{pair(" --- "), pair("|   |"), pair("|" + pupilCell(dir) + "|"), pair(" --- ")}
 	}
+}
+
+// centerCells pads s to exactly w cells, centered.
+func centerCells(s string, w int) string {
+	return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(s)
+}
+
+func (m *Model) faceView() string {
+	var dir eyeDir
+	var lid eyeLid
+	var mouth string
+	var label string
+
+	f := m.faceFrame
+	switch {
+	case strings.TrimSpace(m.modelName) == "": // no model loaded — asleep
+		label = "sleeping..."
+		dir, lid = eyeCenter, lidClosed
+		z := []string{"z    ", " zZ  ", "  zZ ", "   zZ"}
+		mouth = z[(f/2)%len(z)] // slow drift
+	case m.streaming: // responding — talking
+		label = "speaking"
+		dir, lid = eyeCenter, lidOpen
+		talk := []string{" --- ", " ooo ", " --- ", " www "}
+		mouth = talk[f%len(talk)]
+	case m.pending != nil: // working — focused on the task
+		label = "focused"
+		lid = lidOpen
+		glance := []eyeDir{eyeLeft, eyeCenter, eyeRight, eyeCenter}
+		dir = glance[(f/3)%len(glance)] // slow, deliberate look
+		mouth = " --- "
+	default: // model loaded & idle — active, expression reflects recent activity
+		label, mouth = faceMoodFrame(m.currentFaceMood(), f)
+		lid = lidOpen
+		// Mostly still: a brief glance and a single blink per ~7s cycle.
+		switch f % 16 {
+		case 4, 5:
+			dir = eyeLeft
+		case 11, 12:
+			dir = eyeRight
+		default:
+			dir = eyeCenter
+		}
+		if f%16 == 8 {
+			lid = lidClosed // single slow blink
+		}
+	}
+
+	lines := renderEyes(dir, lid)
+	lines = append(lines, "", centerCells(mouth, 12))
+	art := strings.Join(lines, "\n")
+
+	labelLine := lipgloss.NewStyle().Faint(true).Width(12).Align(lipgloss.Center).Render(label)
+
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.mode.color()).
+		Padding(0, 1).
+		Align(lipgloss.Center)
+	return boxStyle.Render(art + "\n" + labelLine)
+}
+
+// faceMoodFrame maps a conversation mood to the mascot's (label, mouth). The
+// eyes are rendered separately by renderEyes; the mood is expressed through the
+// mouth shape. frame is accepted for call-site symmetry but moods are static.
+func faceMoodFrame(mood faceMood, frame int) (string, string) {
 	switch mood {
 	case faceMoodHappy:
-		label = "pleased"
-		frames = []string{
-			"( ^_^ )",
-			"( ^‿^ )",
-			"( ^_^ )",
-			"( ^▽^ )",
-		}
+		return "pleased", "\\___/"
 	case faceMoodConcerned:
-		label = "concerned"
-		frames = []string{
-			"( o_o )",
-			"( O_O )",
-			"( o_o )",
-			"( •_•;)",
-		}
+		return "concerned", " ___ "
 	case faceMoodFrustrated:
-		label = "frustrated"
-		frames = []string{
-			"( >_< )",
-			"( ಠ_ಠ )",
-			"( >_< )",
-			"( -_-#)",
-		}
+		return "frustrated", "/^^^\\"
 	case faceMoodConfused:
-		label = "puzzled"
-		frames = []string{
-			"( ?_? )",
-			"( @_@ )",
-			"( ?_? )",
-			"( o_O )",
-		}
+		return "puzzled", " ~?~ "
 	case faceMoodSurprised:
-		label = "surprised"
-		frames = []string{
-			"( O_O )",
-			"( o_o )",
-			"( O_O )",
-			"( 0_0 )",
-		}
+		return "surprised", "  O  "
 	case faceMoodFocused:
-		label = "focused"
-		frames = []string{
-			"( •_• )",
-			"( •_•)>",
-			"( •_• )",
-			"( •̀_•́)",
-		}
+		return "focused", " --- "
+	default:
+		return "active", " --- "
 	}
-	return label, frames[frame%len(frames)]
 }
 
 func (m *Model) shouldPromptPermission(call mcp.ToolCall) bool {

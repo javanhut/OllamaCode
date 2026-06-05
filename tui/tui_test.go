@@ -477,6 +477,38 @@ func TestFaceMoodFrameLabels(t *testing.T) {
 	}
 }
 
+// TestFaceAnimatesAcrossTicks drives faceTickMsg through Update and asserts the
+// rendered mascot actually changes over time (catches a frozen animation, not
+// just that faceFrame increments).
+func TestFaceAnimatesAcrossTicks(t *testing.T) {
+	states := map[string]func(*Model){
+		"idle":     func(m *Model) { m.modelName = "llama3" },
+		"thinking": func(m *Model) { m.modelName = "llama3"; m.pending = &pendingBatch{} },
+		"talking":  func(m *Model) { m.modelName = "llama3"; m.streaming = true },
+		"sleeping": func(m *Model) { m.modelName = "" }, // no model loaded
+	}
+
+	for name, setup := range states {
+		t.Run(name, func(t *testing.T) {
+			m := &Model{mode: ExploreMode}
+			setup(m)
+
+			seen := map[string]bool{}
+			for i := 0; i < 12; i++ {
+				seen[m.faceView()] = true
+				next, _ := m.Update(faceTickMsg(time.Now()))
+				m = next.(*Model)
+			}
+			if m.faceFrame == 0 {
+				t.Fatal("faceFrame did not advance on faceTickMsg")
+			}
+			if len(seen) < 2 {
+				t.Fatalf("expected the %s face to animate (multiple distinct frames), got %d", name, len(seen))
+			}
+		})
+	}
+}
+
 func TestAutoModePromptBypass(t *testing.T) {
 	m := &Model{
 		mode:  AutoMode,
