@@ -28,6 +28,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/backend"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
@@ -104,6 +105,7 @@ const (
 	stateHelp
 	statePermission
 	stateNotes
+	stateProvider
 )
 
 type Mode int
@@ -255,6 +257,8 @@ var destructiveToolNames = map[string]bool{
 
 type config struct {
 	Host     string   `json:"host"`
+	Provider string   `json:"provider,omitempty"` // "ollama" (default) or "mlx"
+	MLXHost  string   `json:"mlx_host,omitempty"` // base URL of the MLX bridge
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
 	Verbose  bool     `json:"verbose,omitempty"`
@@ -407,18 +411,20 @@ func (n *sessionNotes) appendLine(s string) {
 }
 
 type Model struct {
-	cfg       config
-	host      api.OllamaHost
-	tools     *mcp.Registry
-	notes     *sessionNotes
-	mode      Mode
-	state     state
-	urlInput  textinput.Model
-	models    []string
-	picker    int
-	modelName string
-	profile   ModelProfile
-	pending   *pendingBatch
+	cfg            config
+	host           api.Provider
+	mlx            *backend.MLXSupervisor // supervises the bundled MLX bridge process
+	tools          *mcp.Registry
+	notes          *sessionNotes
+	mode           Mode
+	state          state
+	urlInput       textinput.Model
+	models         []string
+	picker         int
+	providerPicker int
+	modelName      string
+	profile        ModelProfile
+	pending        *pendingBatch
 
 	history    []api.Message
 	transcript *strings.Builder
@@ -526,6 +532,7 @@ var slashCommands = []struct {
 	{"/quit", "exit the application"},
 	{"/exit", "exit the application"},
 	{"/settings", "change Ollama URL"},
+	{"/provider", "switch backend (ollama / mlx)"},
 	{"/model", "pick a model"},
 	{"/models", "pick a model"},
 	{"/clear", "reset the conversation"},
@@ -586,9 +593,17 @@ func (m *Model) updateSlashSuggestions() {
 
 func New() *Model {
 	cfg := loadConfig()
-	// ... (host setup ...)
-	host := api.OllamaHost{}
-	host.SetURI(cfg.Host)
+	if cfg.Provider == "" {
+		cfg.Provider = api.ProviderOllama
+	}
+	if cfg.MLXHost == "" {
+		cfg.MLXHost = backend.DefaultMLXURI
+	}
+	// Build the active backend client. MLX targets the bundled bridge; Ollama
+	// targets cfg.Host. Both satisfy api.Provider so the rest of the app is
+	// backend-agnostic.
+	mlxSup := backend.NewMLXSupervisor(0)
+	host := api.NewProvider(cfg.Provider, providerURI(cfg))
 
 	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
 	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
@@ -651,6 +666,7 @@ func New() *Model {
 	m := &Model{
 		cfg:          cfg,
 		host:         host,
+		mlx:          mlxSup,
 		tools:        registry,
 		notes:        notes,
 		mode:         ExploreMode,
@@ -1072,9 +1088,16 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.nextFaceTick()}
-	// If no model is configured, try to load the first one we can find.
-	if strings.TrimSpace(m.modelName) == "" {
-		cmds = append(cmds, m.autoLoadModels())
+	switch m.cfg.Provider {
+	case api.ProviderMLX:
+		// The MLX bridge must be brought up before any model can load.
+		m.statusMsg = "starting MLX backend…"
+		cmds = append(cmds, m.startMLXBackend(true))
+	default:
+		// If no model is configured, try to load the first one we can find.
+		if strings.TrimSpace(m.modelName) == "" {
+			cmds = append(cmds, m.autoLoadModels())
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -1268,6 +1291,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.state {
 		case stateSettings:
 			return m.updateSettings(msg)
+		case stateProvider:
+			return m.updateProvider(msg)
 		case stateModelPicker:
 			return m.updatePicker(msg)
 		case stateHelp:
@@ -1347,6 +1372,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 		}
 		return m, nil
+
+	case backendReadyMsg:
+		if msg.err != nil {
+			m.statusMsg = msg.err.Error()
+			m.statusErr = true
+			return m, nil
+		}
+		m.statusMsg = ""
+		m.statusErr = false
+		if msg.auto {
+			return m, m.autoLoadModels()
+		}
+		return m, m.fetchModels()
 
 	case connectErrMsg:
 		m.statusMsg = msg.err.Error()
@@ -1635,11 +1673,20 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			uri = DefaultHost
 		}
 		m.cfg.Host = uri
-		m.host.SetURI(uri)
 		saveConfig(m.cfg)
 		m.statusMsg = "connecting…"
 		m.statusErr = false
-		return m, m.fetchModels()
+		// When MLX is the active backend, "connect" brings the bridge up; the
+		// edited URL applies to Ollama and is saved for when it's selected.
+		if m.cfg.Provider == api.ProviderMLX {
+			m.state = stateChat
+			m.input.Focus()
+			m.statusMsg = "starting MLX backend…"
+			return m, m.startMLXBackend(false)
+		}
+		m.host.SetURI(uri)
+		// Start Ollama if it isn't already running, then load its models.
+		return m, m.ensureOllamaBackend(false)
 	}
 	var cmd tea.Cmd
 	m.urlInput, cmd = m.urlInput.Update(msg)
@@ -1785,6 +1832,13 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.state = stateSettings
 			m.urlInput.Focus()
+			return m, nil
+		case "/provider":
+			m.input.Reset()
+			m.providerPicker = providerIndex(m.cfg.Provider)
+			m.statusMsg = ""
+			m.statusErr = false
+			m.state = stateProvider
 			return m, nil
 		case "/model", "/models":
 			m.input.Reset()
@@ -2068,6 +2122,8 @@ func (m *Model) View() tea.View {
 	switch m.state {
 	case stateSettings:
 		v.SetContent(m.overlayModal(base, m.settingsModal()))
+	case stateProvider:
+		v.SetContent(m.overlayModal(base, m.providerModal()))
 	case stateModelPicker:
 		v.SetContent(m.overlayModal(base, m.pickerModal()))
 	case stateHelp:
@@ -2175,6 +2231,8 @@ func (m *Model) settingsModal() string {
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Connection", "esc", innerW))
 	b.WriteString("\n\n")
+	b.WriteString(modalMutedStyle.Render(truncatePlain(fmt.Sprintf("backend: %s  (/provider to switch)", m.cfg.Provider), innerW)))
+	b.WriteString("\n\n")
 	b.WriteString(modalMutedStyle.Render("URL"))
 	b.WriteString("\n")
 	b.WriteString(m.urlInput.View())
@@ -2254,6 +2312,7 @@ func (m *Model) helpModal() string {
 		{"", "Slash commands"},
 		{"/help", "show this screen"},
 		{"/settings", "change Ollama URL"},
+		{"/provider", "switch backend (ollama / mlx)"},
 		{"/model", "pick a model"},
 		{"/notes", "view session notes"},
 		{"/clear", "reset the conversation"},
@@ -2637,6 +2696,148 @@ func (m *Model) autoLoadModels() tea.Cmd {
 		}
 		return modelsAutoMsg{models: names}
 	}
+}
+
+// providerList is the set of selectable backends, in display order.
+var providerList = []string{api.ProviderOllama, api.ProviderMLX}
+
+func providerIndex(p string) int {
+	for i, name := range providerList {
+		if name == p {
+			return i
+		}
+	}
+	return 0
+}
+
+// providerURI returns the base URL for the configured backend.
+func providerURI(cfg config) string {
+	if cfg.Provider == api.ProviderMLX {
+		if cfg.MLXHost != "" {
+			return cfg.MLXHost
+		}
+		return backend.DefaultMLXURI
+	}
+	return cfg.Host
+}
+
+// backendReadyMsg reports the result of bringing a backend online. auto=true
+// means the follow-up should silently auto-load a model (startup); auto=false
+// opens the model picker (an explicit user switch).
+type backendReadyMsg struct {
+	provider string
+	auto     bool
+	err      error
+}
+
+// startMLXBackend launches and waits for the bundled MLX bridge. First run is
+// slow (uv provisions mlx_lm/mlx_vlm), hence the long timeout.
+func (m *Model) startMLXBackend(auto bool) tea.Cmd {
+	sup := m.mlx
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := sup.Start(ctx); err != nil {
+			return backendReadyMsg{provider: api.ProviderMLX, auto: auto, err: err}
+		}
+		if err := sup.WaitHealthy(ctx, 15*time.Minute); err != nil {
+			return backendReadyMsg{provider: api.ProviderMLX, auto: auto, err: err}
+		}
+		return backendReadyMsg{provider: api.ProviderMLX, auto: auto}
+	}
+}
+
+// ensureOllamaBackend starts `ollama serve` if it isn't already reachable.
+func (m *Model) ensureOllamaBackend(auto bool) tea.Cmd {
+	uri := m.cfg.Host
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := backend.EnsureOllama(ctx, uri, 25*time.Second); err != nil {
+			return backendReadyMsg{provider: api.ProviderOllama, auto: auto, err: err}
+		}
+		return backendReadyMsg{provider: api.ProviderOllama, auto: auto}
+	}
+}
+
+// updateProvider handles key input for the backend picker.
+func (m *Model) updateProvider(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.providerPicker > 0 {
+			m.providerPicker--
+		}
+		return m, nil
+	case "down", "j":
+		if m.providerPicker < len(providerList)-1 {
+			m.providerPicker++
+		}
+		return m, nil
+	case "esc":
+		m.state = stateChat
+		m.input.Focus()
+		return m, nil
+	case "enter":
+		sel := providerList[m.providerPicker]
+		m.cfg.Provider = sel
+		m.host = api.NewProvider(sel, providerURI(m.cfg))
+		saveConfig(m.cfg)
+		m.models = nil
+		m.state = stateChat
+		m.input.Focus()
+		if sel == api.ProviderMLX {
+			m.statusMsg = "starting MLX backend…"
+			m.statusErr = false
+			return m, m.startMLXBackend(false)
+		}
+		m.statusMsg = "connecting…"
+		m.statusErr = false
+		return m, m.ensureOllamaBackend(false)
+	}
+	return m, nil
+}
+
+// providerModal renders the backend picker overlay.
+func (m *Model) providerModal() string {
+	w := m.modalWidth()
+	innerW := w - 4
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Select backend", "esc", innerW))
+	b.WriteString("\n\n")
+
+	labels := map[string]string{
+		api.ProviderOllama: "ollama   — local Ollama server",
+		api.ProviderMLX:    "mlx      — Apple MLX (mlx_lm + mlx_vlm bridge)",
+	}
+	for i, name := range providerList {
+		marker := "  "
+		if name == m.cfg.Provider {
+			marker = modalAccentStyle.Render(" •")
+		}
+		row := truncatePlain(labels[name], innerW-4)
+		if i == m.providerPicker {
+			line := modalSelectStyle.Render(padCell(" "+row+" ", innerW-2))
+			b.WriteString(marker + line)
+		} else {
+			b.WriteString(marker + " " + modalBodyStyle.Render(padCell(row, innerW-3)))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	if m.statusMsg != "" {
+		style := modalMutedStyle
+		if m.statusErr {
+			style = modalErrorStyle
+		}
+		b.WriteString(style.Render(truncatePlain(m.statusMsg, innerW)))
+		b.WriteString("\n\n")
+	}
+	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("switch") +
+		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
+	b.WriteString(hint)
+	return modalStyle.Width(w).Render(b.String())
 }
 
 // lastUserMessage returns the text of the most recent user message, truncated
@@ -4562,6 +4763,9 @@ func Run() error {
 	if m.companion != nil {
 		_ = m.companion.Close()
 		m.companion = nil
+	}
+	if m.mlx != nil {
+		m.mlx.Stop()
 	}
 	return err
 }

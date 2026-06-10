@@ -90,17 +90,17 @@ func tasks() []task {
 }
 
 func main() {
-	model := flag.String("model", "", "Ollama model to evaluate (required)")
-	host := flag.String("host", "http://localhost:11434", "Ollama host URL")
+	model := flag.String("model", "", "model to evaluate (required)")
+	host := flag.String("host", "http://localhost:11434", "backend host URL")
+	provider := flag.String("provider", api.ProviderOllama, "backend: ollama or mlx")
 	steps := flag.Int("steps", 15, "max agent steps per task")
 	flag.Parse()
 	if *model == "" {
-		fmt.Fprintln(os.Stderr, "usage: eval -model <name> [-host url] [-steps n]")
+		fmt.Fprintln(os.Stderr, "usage: eval -model <name> [-host url] [-provider ollama|mlx] [-steps n]")
 		os.Exit(2)
 	}
 
-	h := api.OllamaHost{}
-	h.SetURI(*host)
+	h := api.NewProvider(*provider, *host)
 	reg := mcp.DefaultRegistry()
 
 	origWd, err := os.Getwd()
