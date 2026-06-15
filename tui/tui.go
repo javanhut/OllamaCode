@@ -106,6 +106,14 @@ const (
 	stateNotes
 )
 
+// settingsField identifies the focused input in the connection settings modal.
+type settingsField int
+
+const (
+	settingsFocusURL settingsField = iota
+	settingsFocusKey
+)
+
 type Mode int
 
 const (
@@ -255,6 +263,7 @@ var destructiveToolNames = map[string]bool{
 
 type config struct {
 	Host     string   `json:"host"`
+	APIKey   string   `json:"api_key,omitempty"` // bearer token for Ollama Cloud (ollama.com) or an authenticated daemon
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
 	Verbose  bool     `json:"verbose,omitempty"`
@@ -407,18 +416,20 @@ func (n *sessionNotes) appendLine(s string) {
 }
 
 type Model struct {
-	cfg       config
-	host      api.OllamaHost
-	tools     *mcp.Registry
-	notes     *sessionNotes
-	mode      Mode
-	state     state
-	urlInput  textinput.Model
-	models    []string
-	picker    int
-	modelName string
-	profile   ModelProfile
-	pending   *pendingBatch
+	cfg           config
+	host          api.OllamaHost
+	tools         *mcp.Registry
+	notes         *sessionNotes
+	mode          Mode
+	state         state
+	urlInput      textinput.Model
+	keyInput      textinput.Model
+	settingsFocus settingsField
+	models        []string
+	picker        int
+	modelName     string
+	profile       ModelProfile
+	pending       *pendingBatch
 
 	history    []api.Message
 	transcript *strings.Builder
@@ -584,11 +595,22 @@ func (m *Model) updateSlashSuggestions() {
 	}
 }
 
+// liveEmbedder satisfies mcp.Embedder by forwarding to the model's current
+// host instead of a snapshot, so the semantic tools (code_index /
+// semantic_search) honor connection changes — URL or API key — made via
+// /settings mid-session.
+type liveEmbedder struct{ m *Model }
+
+func (e liveEmbedder) Embed(model string, inputs []string) ([][]float32, error) {
+	return e.m.host.Embed(model, inputs)
+}
+
 func New() *Model {
 	cfg := loadConfig()
 	// ... (host setup ...)
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)
+	host.SetAPIKey(resolveAPIKey(cfg))
 
 	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
 	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
@@ -602,6 +624,14 @@ func New() *Model {
 	ti.SetValue(cfg.Host)
 	ti.Focus()
 	ti.SetWidth(60)
+
+	ki := textinput.New()
+	ki.Prompt = "Key  "
+	ki.Placeholder = "ollama.com api key (leave blank for local)"
+	ki.SetValue(cfg.APIKey)
+	ki.EchoMode = textinput.EchoPassword
+	ki.EchoCharacter = '•'
+	ki.SetWidth(60)
 
 	ta := textarea.New()
 	ta.Placeholder = "Improve documentation in @filename"
@@ -641,8 +671,6 @@ func New() *Model {
 	registry.Register(rememberTool(mem))
 	registry.Register(recallTool(mem))
 	registry.Register(forgetTool(mem))
-	registry.Register(mcp.CodeIndexTool(host))
-	registry.Register(mcp.SemanticSearchTool(host))
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -656,6 +684,7 @@ func New() *Model {
 		mode:         ExploreMode,
 		state:        stateChat,
 		urlInput:     ti,
+		keyInput:     ki,
 		input:        ta,
 		modelName:    cfg.Model,
 		spinner:      s,
@@ -677,6 +706,10 @@ func New() *Model {
 	m.lastActivity = time.Now()
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
+	// Registered after m exists so the semantic tools read the live host and
+	// pick up connection changes made via /settings.
+	registry.Register(mcp.CodeIndexTool(liveEmbedder{m}))
+	registry.Register(mcp.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
 	if m.modelName != "" {
 		m.resolveProfile()
@@ -1352,7 +1385,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = msg.err.Error()
 		m.statusErr = true
 		if m.state == stateSettings {
-			m.urlInput.Focus()
+			if m.settingsFocus == settingsFocusKey {
+				m.keyInput.Focus()
+			} else {
+				m.urlInput.Focus()
+			}
 		} else {
 			m.lastError = fmt.Sprintf("connect failed: %v", msg.err)
 			m.refreshTranscript()
@@ -1599,6 +1636,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.urlInput, cmd = m.urlInput.Update(msg)
 		cmds = append(cmds, cmd)
+		m.keyInput, cmd = m.keyInput.Update(msg)
+		cmds = append(cmds, cmd)
 	case stateChat:
 		prevH := m.input.Height()
 		prevSlash := len(m.slashSuggestions)
@@ -1629,21 +1668,52 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.state = stateChat
 		m.input.Focus()
 		return m, nil
+	case "tab", "shift+tab":
+		m.toggleSettingsFocus()
+		return m, nil
 	case "enter":
 		uri := strings.TrimSpace(m.urlInput.Value())
 		if uri == "" {
 			uri = DefaultHost
 		}
 		m.cfg.Host = uri
+		m.cfg.APIKey = strings.TrimSpace(m.keyInput.Value())
 		m.host.SetURI(uri)
+		m.host.SetAPIKey(resolveAPIKey(m.cfg))
 		saveConfig(m.cfg)
 		m.statusMsg = "connecting…"
 		m.statusErr = false
 		return m, m.fetchModels()
 	}
 	var cmd tea.Cmd
-	m.urlInput, cmd = m.urlInput.Update(msg)
+	if m.settingsFocus == settingsFocusKey {
+		m.keyInput, cmd = m.keyInput.Update(msg)
+	} else {
+		m.urlInput, cmd = m.urlInput.Update(msg)
+	}
 	return m, cmd
+}
+
+// toggleSettingsFocus moves focus between the URL and API-key fields in the
+// connection modal.
+func (m *Model) toggleSettingsFocus() {
+	if m.settingsFocus == settingsFocusURL {
+		m.settingsFocus = settingsFocusKey
+		m.urlInput.Blur()
+		m.keyInput.Focus()
+	} else {
+		m.settingsFocus = settingsFocusURL
+		m.keyInput.Blur()
+		m.urlInput.Focus()
+	}
+}
+
+// focusSettings (re)focuses the URL field when the connection modal opens so
+// both inputs start in a known state.
+func (m *Model) focusSettings() {
+	m.settingsFocus = settingsFocusURL
+	m.keyInput.Blur()
+	m.urlInput.Focus()
 }
 
 func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1784,7 +1854,9 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/settings":
 			m.input.Reset()
 			m.state = stateSettings
-			m.urlInput.Focus()
+			m.urlInput.SetValue(m.cfg.Host)
+			m.keyInput.SetValue(m.cfg.APIKey)
+			m.focusSettings()
 			return m, nil
 		case "/model", "/models":
 			m.input.Reset()
@@ -2172,12 +2244,23 @@ func (m *Model) settingsModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
 	m.urlInput.SetWidth(innerW - 6)
+	m.keyInput.SetWidth(innerW - 6)
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Connection", "esc", innerW))
 	b.WriteString("\n\n")
 	b.WriteString(modalMutedStyle.Render("URL"))
 	b.WriteString("\n")
 	b.WriteString(m.urlInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(modalMutedStyle.Render("API key"))
+	b.WriteString("\n")
+	b.WriteString(m.keyInput.View())
+	b.WriteString("\n")
+	if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
+		b.WriteString(modalMutedStyle.Render(truncatePlain("using OLLAMA_API_KEY from environment", innerW)))
+	} else {
+		b.WriteString(modalMutedStyle.Render(truncatePlain("blank for local · set for ollama.com cloud models", innerW)))
+	}
 	b.WriteString("\n\n")
 	if m.statusMsg != "" {
 		if m.statusErr {
@@ -2187,7 +2270,8 @@ func (m *Model) settingsModal() string {
 		}
 		b.WriteString("\n\n")
 	}
-	hint := modalMutedStyle.Render("enter ") + modalBodyStyle.Render("connect") +
+	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("switch") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("connect") +
 		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
@@ -2531,6 +2615,7 @@ func (m *Model) layout() {
 		return
 	}
 	m.urlInput.SetWidth(min(m.width-6, 80))
+	m.keyInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
 	footerH := lipgloss.Height(m.footerView())
 	inputH := lipgloss.Height(m.inputView())
@@ -4523,6 +4608,17 @@ func configPath() string {
 		return ""
 	}
 	return filepath.Join(dir, "ollama_code", "config.json")
+}
+
+// resolveAPIKey returns the Ollama API key to authenticate requests with. The
+// OLLAMA_API_KEY environment variable (matching the ollama CLI convention)
+// takes precedence over the saved config so it can be supplied without writing
+// the secret to disk. An empty result means unauthenticated local access.
+func resolveAPIKey(c config) string {
+	if k := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); k != "" {
+		return k
+	}
+	return strings.TrimSpace(c.APIKey)
 }
 
 func loadConfig() config {

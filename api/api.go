@@ -156,7 +156,8 @@ var ollamaCalls map[string]Endpoint = map[string]Endpoint{
 }
 
 type OllamaHost struct {
-	uri string
+	uri    string
+	apiKey string
 }
 
 func generatePath(call string, host OllamaHost) string {
@@ -169,9 +170,45 @@ func (o *OllamaHost) SetURI(uri string) {
 	o.uri = uri
 }
 
+// SetAPIKey sets the bearer token used to authenticate requests. It is required
+// to reach Ollama Cloud (https://ollama.com) directly and is harmless for a
+// local daemon, which ignores it — so the same client serves local and cloud
+// models without a separate code path.
+func (o *OllamaHost) SetAPIKey(key string) {
+	o.apiKey = strings.TrimSpace(key)
+}
+
+// applyAuth attaches the Authorization header when an API key is configured.
+func (o OllamaHost) applyAuth(req *http.Request) {
+	if o.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+	}
+}
+
+// get performs an authenticated GET so local and cloud hosts share one path.
+func (o OllamaHost) get(urlPath string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", urlPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	o.applyAuth(req)
+	return http.DefaultClient.Do(req)
+}
+
+// post performs an authenticated POST so local and cloud hosts share one path.
+func (o OllamaHost) post(urlPath, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", urlPath, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	o.applyAuth(req)
+	return http.DefaultClient.Do(req)
+}
+
 func (o OllamaHost) GetOllamaVersion() (string, error) {
 	urlPath := generatePath("getVersion", o)
-	resp, err := http.Get(urlPath)
+	resp, err := o.get(urlPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to do call due to error: %v", err)
 	}
@@ -191,7 +228,7 @@ func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal show request: %v", err)
 	}
-	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := o.post(urlPath, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}
@@ -208,7 +245,7 @@ func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
 
 func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
 	urlPath := generatePath("getModels", o)
-	resp, err := http.Get(urlPath)
+	resp, err := o.get(urlPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch models: %v", err)
 	}
@@ -231,7 +268,7 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := o.post(urlPath, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}
@@ -269,6 +306,7 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("User-Agent", "OllamaCode/1.0 (Chat)")
+		o.applyAuth(httpReq)
 
 		client := &http.Client{}
 		resp, err := client.Do(httpReq)
@@ -332,6 +370,7 @@ func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse
 		return ChatResponse{}, fmt.Errorf("failed to create http request: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	o.applyAuth(httpReq)
 	resp, err := (&http.Client{}).Do(httpReq)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("http request failed: %v", err)
@@ -354,7 +393,7 @@ func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal embed request: %v", err)
 	}
-	resp, err := http.Post(urlPath, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := o.post(urlPath, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}

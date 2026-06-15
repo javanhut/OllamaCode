@@ -68,6 +68,7 @@ Run the binary and connect to your Ollama instance:
 |---|---|
 | `OLLAMA_HOST` | Default Ollama URL (override the default `localhost:11434`) |
 | `OLLAMA_MODEL` | Default model to pre-select |
+| `OLLAMA_API_KEY` | Bearer token for Ollama Cloud (`https://ollama.com`). Takes precedence over the saved `api_key` so the secret never has to touch disk |
 | `OLLAMA_COMPANION_BIN` | Absolute path to the `ollama-companion` binary (overrides auto-discovery) |
 | `OLLAMA_COMPANION_WHISPER_BIN` | Path to `whisper-cli` (default: `~/.cache/whisper/whisper-cli` or `$PATH`) |
 | `OLLAMA_COMPANION_WHISPER_MODEL` | Path to a `ggml-*.bin` model (default: first match in `~/.cache/whisper/`) |
@@ -81,6 +82,7 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | Field | Description |
 |---|---|
 | `host` | Ollama URL (defaults to `http://localhost:11434` when empty) |
+| `api_key` | Bearer token sent with every request; required to reach Ollama Cloud directly, ignored by a local daemon (overridden by `OLLAMA_API_KEY`) |
 | `model` | Last-selected chat model |
 | `max_steps` | Tool-call budget per user turn before the agent stops and summarizes (default `25`) |
 | `embed_model` | Embedding model used for auto-RAG (default `nomic-embed-text`) |
@@ -91,6 +93,13 @@ Settings persist to `~/.config/ollama_code/config.json`. Most are written automa
 | `profiles` | Per-model `{num_ctx, supports_tools, temperature, top_p, num_predict}`, auto-discovered from `/api/show` and cached; edit to override sampling |
 
 > **Auto-RAG** needs an embedding model pulled in Ollama (e.g. `ollama pull nomic-embed-text`). If it's missing, retrieval silently disables itself — the manual `code_index` / `semantic_search` tools remain available as a fallback.
+
+### Cloud Models
+
+Local and Ollama Cloud models are used the same way — pick them from the model list and chat. There are two ways to reach the cloud:
+
+- **Through your local daemon (no key needed in OllamaCode).** Run `ollama signin`, then pull or run a cloud model (e.g. `ollama run gpt-oss:120b-cloud`). The local daemon at `localhost:11434` proxies cloud requests using the key it stored at sign-in, so the model just shows up in the picker.
+- **Directly against `https://ollama.com` (key required).** Open `/settings`, set the URL to `https://ollama.com`, press `Tab`, and paste your API key — or export `OLLAMA_API_KEY` before launching. The key is sent as a bearer token on every request; a local daemon ignores it, so a configured key is safe to leave in place when switching back to local.
 
 ### Keyboard Shortcuts
 
