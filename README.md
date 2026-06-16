@@ -104,7 +104,9 @@ Local and Ollama Cloud models are used the same way — pick them from the model
 
 ### Pulling Models
 
-You don't have to drop to a shell to install a model. Open the picker with `/model`, press `p`, type a name (e.g. `qwen3-coder:30b`, `nomic-embed-text`, or a cloud model like `gpt-oss:120b-cloud`), and press Enter. A live progress bar shows the download; `esc` cancels it. When it finishes, the list refreshes and the cursor lands on the new model — press Enter to start using it. The pull is sent to whatever host `/settings` points at and carries your API key, so it works for both local and cloud targets.
+You don't have to drop to a shell to install a model. Open the picker with `/model`, press `p`, type a name (e.g. `qwen3-coder:30b`, `nomic-embed-text`, or a cloud model like `gpt-oss:120b-cloud`), and press Enter. A live progress bar shows the download; `esc` cancels it. When it finishes, the list refreshes and the cursor lands on the new model — press Enter to start using it.
+
+**Pulling cloud models:** a "cloud" model is registered through your **local daemon** (`http://localhost:11434`) — the pull fetches a tiny manifest pointer, not full weights — so keep the URL on your local daemon and run `ollama signin` first. You **cannot** pull against `https://ollama.com` directly (that endpoint only serves chat). Use the **exact tag** shown on the model's page, including the size and the `-cloud` suffix (e.g. `deepseek-v3.1:671b-cloud`, not `deepseek-v3.1:671-cloud`) — a wrong tag is what produces `pull model manifest: file does not exist`. If a pull fails, the picker now shows a hint pointing at the likely cause.
 
 ### Keyboard Shortcuts
 

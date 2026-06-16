@@ -2469,7 +2469,12 @@ func (m *Model) pickerModal() string {
 
 	if m.pullErr != "" {
 		b.WriteString(modalErrorStyle.Render(truncatePlain("pull failed: "+m.pullErr, innerW)))
-		b.WriteString("\n\n")
+		b.WriteString("\n")
+		if hint := pullErrorHint(m.cfg.Host, m.pullErr); hint != "" {
+			b.WriteString(modalMutedStyle.Render(ansi.Wordwrap(hint, innerW, " -")))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 
 	if len(m.models) == 0 {
@@ -2507,6 +2512,12 @@ func (m *Model) pickerModal() string {
 		b.WriteString(modalAccentStyle.Render("Pull a model"))
 		b.WriteString("\n")
 		b.WriteString(m.pullInput.View())
+		b.WriteString("\n")
+		guide := "Use the exact tag from ollama.com — cloud models need the -cloud suffix (e.g. gpt-oss:120b-cloud)."
+		if strings.Contains(strings.ToLower(m.cfg.Host), "ollama.com") {
+			guide = "Heads up: pulling needs your local daemon (http://localhost:11434), not ollama.com. Cloud models register through the daemon after `ollama signin`."
+		}
+		b.WriteString(modalMutedStyle.Render(ansi.Wordwrap(guide, innerW, " -")))
 		b.WriteString("\n\n")
 		hint := modalMutedStyle.Render("enter ") + modalBodyStyle.Render("pull") +
 			modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
@@ -2521,6 +2532,25 @@ func (m *Model) pickerModal() string {
 		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
+}
+
+// pullErrorHint maps the common /api/pull failure modes to actionable guidance,
+// since the daemon's raw error ("file does not exist", "unauthorized") rarely
+// tells the user what to actually do. Returns "" when nothing useful applies.
+func pullErrorHint(host, errMsg string) string {
+	e := strings.ToLower(errMsg)
+	onCloudHost := strings.Contains(strings.ToLower(host), "ollama.com")
+	switch {
+	case strings.Contains(e, "unauthorized") || strings.Contains(e, "401"):
+		return "Cloud models are pulled through your LOCAL daemon (URL http://localhost:11434) after `ollama signin` — not directly against ollama.com, which only serves chat."
+	case strings.Contains(e, "manifest"), strings.Contains(e, "does not exist"), strings.Contains(e, "not found"):
+		if onCloudHost {
+			return "You can't pull from ollama.com — point the URL at your local daemon (http://localhost:11434) to register a cloud model, then chat."
+		}
+		return "Check the exact tag — cloud models need the full size and the -cloud suffix (e.g. gpt-oss:120b-cloud). Copy the name from the model's page on ollama.com."
+	default:
+		return ""
+	}
 }
 
 // humanBytes formats a byte count as a compact human-readable string.

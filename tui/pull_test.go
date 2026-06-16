@@ -24,6 +24,33 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+func TestPullErrorHint(t *testing.T) {
+	cases := []struct {
+		name      string
+		host      string
+		err       string
+		wantHas   string // substring the hint must contain
+		wantEmpty bool
+	}{
+		{"bad tag local", "http://localhost:11434", "pull model manifest: file does not exist", "-cloud suffix", false},
+		{"bad tag on cloud host", "https://ollama.com", "pull model manifest: file does not exist", "local daemon", false},
+		{"unauthorized", "https://ollama.com", "unauthorized", "ollama signin", false},
+		{"unknown error", "http://localhost:11434", "connection refused", "", true},
+	}
+	for _, c := range cases {
+		got := pullErrorHint(c.host, c.err)
+		if c.wantEmpty {
+			if got != "" {
+				t.Errorf("%s: expected no hint, got %q", c.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, c.wantHas) {
+			t.Errorf("%s: hint %q does not contain %q", c.name, got, c.wantHas)
+		}
+	}
+}
+
 func TestRenderProgressBar(t *testing.T) {
 	// Half-complete bar should read 50% and contain both fill and empty runes.
 	out := renderProgressBar(500, 1000, 22)
