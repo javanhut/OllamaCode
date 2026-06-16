@@ -56,7 +56,7 @@ go build -o ollama_code .
 Run the binary and connect to your Ollama instance:
 
 1. Enter the Ollama URL (defaults to `http://localhost:11434`) and press Enter
-2. Select a model from the list of locally available models
+2. Select a model from the list of locally available models (or press `p` to pull a new one — see below)
 3. Start chatting — the model can use tools based on your current mode
 
 ```bash
@@ -102,6 +102,10 @@ Local and Ollama Cloud models are used the same way — pick them from the model
 - **Through your local daemon (no key needed in OllamaCode).** Run `ollama signin`, then pull or run a cloud model (e.g. `ollama run gpt-oss:120b-cloud`). The local daemon at `localhost:11434` proxies cloud requests using the key it stored at sign-in, so the model just shows up in the picker.
 - **Directly against `https://ollama.com` (key required).** Open `/settings`, set the URL to `https://ollama.com`, press `Tab`, and paste your API key — or export `OLLAMA_API_KEY` before launching. The key is sent as a bearer token on every request; a local daemon ignores it, so a configured key is safe to leave in place when switching back to local.
 
+### Pulling Models
+
+You don't have to drop to a shell to install a model. Open the picker with `/model`, press `p`, type a name (e.g. `qwen3-coder:30b`, `nomic-embed-text`, or a cloud model like `gpt-oss:120b-cloud`), and press Enter. A live progress bar shows the download; `esc` cancels it. When it finishes, the list refreshes and the cursor lands on the new model — press Enter to start using it. The pull is sent to whatever host `/settings` points at and carries your API key, so it works for both local and cloud targets.
+
 ### Keyboard Shortcuts
 
 | Key | Action |
@@ -120,7 +124,7 @@ Local and Ollama Cloud models are used the same way — pick them from the model
 |---|---|
 | `/help` | Show help screen |
 | `/settings` | Change Ollama URL |
-| `/model` | Pick a model |
+| `/model` | Pick a model (press `p` to pull a new one with live download progress) |
 | `/notes` | View session notes |
 | `/clear` | Reset the conversation |
 | `/copy` | Copy last assistant response to clipboard |

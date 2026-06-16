@@ -87,3 +87,76 @@ done:
 		t.Errorf("expected 'Hello world', got %q", content)
 	}
 }
+
+func TestPullModel(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/pull" {
+			t.Errorf("expected path /api/pull, got %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		flusher := w.(http.Flusher)
+		for _, p := range []PullProgress{
+			{Status: "pulling manifest"},
+			{Status: "downloading", Digest: "sha256:abc", Total: 1000, Completed: 500},
+			{Status: "downloading", Digest: "sha256:abc", Total: 1000, Completed: 1000},
+			{Status: "success"},
+		} {
+			json.NewEncoder(w).Encode(p)
+			w.Write([]byte("\n"))
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	host := OllamaHost{uri: server.URL}
+	host.SetAPIKey("secret-token")
+	progCh, errCh := host.PullModel(context.Background(), "qwen3-coder")
+
+	var statuses []string
+	var maxCompleted, maxTotal int64 // track byte counts like the TUI does (Total > 0)
+loop:
+	for {
+		select {
+		case p, ok := <-progCh:
+			if !ok {
+				break loop
+			}
+			statuses = append(statuses, p.Status)
+			if p.Total > 0 {
+				maxCompleted, maxTotal = p.Completed, p.Total
+			}
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("PullModel failed: %v", err)
+			}
+		}
+	}
+
+	if len(statuses) != 4 || statuses[0] != "pulling manifest" || statuses[3] != "success" {
+		t.Fatalf("unexpected status stream: %v", statuses)
+	}
+	if maxCompleted != 1000 || maxTotal != 1000 {
+		t.Errorf("expected to observe 1000/1000 during download, got %d/%d", maxCompleted, maxTotal)
+	}
+	if gotAuth != "Bearer secret-token" {
+		t.Errorf("expected bearer auth header forwarded, got %q", gotAuth)
+	}
+}
+
+func TestPullModelServerError(t *testing.T) {
+	// Ollama reports a bad model name as an {"error":...} object in the stream.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(PullProgress{Error: "model \"nope\" not found"})
+	}))
+	defer server.Close()
+
+	host := OllamaHost{uri: server.URL}
+	progCh, errCh := host.PullModel(context.Background(), "nope")
+	for range progCh {
+		// drain
+	}
+	if err := <-errCh; err == nil {
+		t.Fatal("expected an error for a not-found model")
+	}
+}

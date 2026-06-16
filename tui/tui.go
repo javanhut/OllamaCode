@@ -347,6 +347,20 @@ type streamState struct {
 	cancel context.CancelFunc
 }
 
+// pullStreamState tracks an in-flight model download driven from the picker.
+type pullStreamState struct {
+	prog   <-chan api.PullProgress
+	errs   <-chan error
+	cancel context.CancelFunc
+	model  string
+}
+
+type pullProgressMsg struct{ p api.PullProgress }
+type pullDoneMsg struct {
+	model string
+	err   error
+}
+
 type selection struct {
 	active bool
 	anchor int // content line index
@@ -371,6 +385,7 @@ var (
 	longRunningToolTimeout   = 10 * time.Minute
 	shellToolTimeoutGrace    = 5 * time.Second
 	modelStreamIdleTimeout   = 3 * time.Minute
+	pullIdleTimeout          = 5 * time.Minute
 )
 
 const notesFile = ".ollama_notes.md"
@@ -429,6 +444,18 @@ type Model struct {
 	models        []string
 	picker        int
 	modelName     string
+
+	// Model pulling (from the model picker). pullInput captures the name to
+	// pull; pullStream/progress fields drive the live download UI.
+	pullInput     textinput.Model
+	pulling       bool
+	pullName      string
+	pullStatus    string
+	pullErr       string
+	pullCompleted int64
+	pullTotal     int64
+	pullStream    *pullStreamState
+	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
 
@@ -634,6 +661,11 @@ func New() *Model {
 	ki.EchoCharacter = '•'
 	ki.SetWidth(60)
 
+	pi := textinput.New()
+	pi.Prompt = "Pull  "
+	pi.Placeholder = "model to pull, e.g. qwen3-coder:30b or gpt-oss:120b-cloud"
+	pi.SetWidth(60)
+
 	ta := textarea.New()
 	ta.Placeholder = "Improve documentation in @filename"
 	ta.Prompt = "› "
@@ -686,6 +718,7 @@ func New() *Model {
 		state:        stateChat,
 		urlInput:     ti,
 		keyInput:     ki,
+		pullInput:    pi,
 		input:        ta,
 		modelName:    cfg.Model,
 		spinner:      s,
@@ -1359,9 +1392,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		m.statusErr = false
 		m.picker = 0
-		if m.cfg.Model != "" {
+		// Land the cursor on the just-pulled model if we have one, otherwise on
+		// the currently selected model.
+		cursorTo := m.cfg.Model
+		if m.pullSelect != "" {
+			cursorTo = m.pullSelect
+			m.pullSelect = ""
+		}
+		if cursorTo != "" {
 			for i, n := range m.models {
-				if n == m.cfg.Model {
+				if n == cursorTo {
 					m.picker = i
 					break
 				}
@@ -1382,6 +1422,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 		}
 		return m, nil
+
+	case pullProgressMsg:
+		if s := strings.TrimSpace(msg.p.Status); s != "" {
+			m.pullStatus = s
+		}
+		if msg.p.Total > 0 {
+			m.pullTotal = msg.p.Total
+			m.pullCompleted = msg.p.Completed
+		}
+		if m.pullStream != nil {
+			cmds = append(cmds, m.waitForPull())
+		}
+
+	case pullDoneMsg:
+		m.pulling = false
+		if m.pullStream != nil && m.pullStream.cancel != nil {
+			m.pullStream.cancel()
+		}
+		m.pullStream = nil
+		m.pullStatus = ""
+		m.pullCompleted, m.pullTotal = 0, 0
+		if msg.err != nil {
+			m.pullErr = msg.err.Error()
+			return m, nil
+		}
+		// Success: refresh the list and drop the cursor on the new model.
+		m.pullErr = ""
+		m.pullName = ""
+		m.toast = "pulled " + msg.model
+		m.pullSelect = msg.model
+		return m, m.fetchModels()
 
 	case connectErrMsg:
 		m.statusMsg = msg.err.Error()
@@ -1640,6 +1711,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 		m.keyInput, cmd = m.keyInput.Update(msg)
 		cmds = append(cmds, cmd)
+	case stateModelPicker:
+		var cmd tea.Cmd
+		m.pullInput, cmd = m.pullInput.Update(msg)
+		cmds = append(cmds, cmd)
 	case stateChat:
 		prevH := m.input.Height()
 		prevSlash := len(m.slashSuggestions)
@@ -1719,6 +1794,38 @@ func (m *Model) focusSettings() {
 }
 
 func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// A pull is streaming: only allow cancel.
+	if m.pulling {
+		if msg.String() == "esc" {
+			m.cancelPull()
+			m.pullErr = "pull canceled"
+		}
+		return m, nil
+	}
+
+	// Name-entry mode: typing the model to pull.
+	if m.pullInput.Focused() {
+		switch msg.String() {
+		case "esc":
+			m.pullInput.Blur()
+			m.pullInput.Reset()
+			m.pullErr = ""
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.pullInput.Value())
+			if name == "" {
+				return m, nil
+			}
+			m.pullInput.Blur()
+			m.pullInput.Reset()
+			return m, m.startPull(name)
+		}
+		var cmd tea.Cmd
+		m.pullInput, cmd = m.pullInput.Update(msg)
+		return m, cmd
+	}
+
+	// Browse mode.
 	switch msg.String() {
 	case "up", "k":
 		if m.picker > 0 {
@@ -1738,6 +1845,9 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "refreshing…"
 		m.statusErr = false
 		return m, m.fetchModels()
+	case "p":
+		m.pullErr = ""
+		return m, m.pullInput.Focus()
 	case "enter":
 		if len(m.models) == 0 {
 			return m, nil
@@ -1754,6 +1864,56 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// cancelPull aborts an in-flight model download and clears the streaming state.
+func (m *Model) cancelPull() {
+	if m.pullStream != nil && m.pullStream.cancel != nil {
+		m.pullStream.cancel()
+	}
+	m.pullStream = nil
+	m.pulling = false
+	m.pullStatus = ""
+}
+
+// startPull kicks off a streaming /api/pull and returns the first pump command.
+func (m *Model) startPull(name string) tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	progCh, errCh := m.host.PullModel(ctx, name)
+	m.pullStream = &pullStreamState{prog: progCh, errs: errCh, cancel: cancel, model: name}
+	m.pulling = true
+	m.pullName = name
+	m.pullStatus = "starting…"
+	m.pullErr = ""
+	m.pullCompleted, m.pullTotal = 0, 0
+	return m.waitForPull()
+}
+
+// waitForPull reads one progress update (or completion) from the pull stream.
+func (m *Model) waitForPull() tea.Cmd {
+	s := m.pullStream
+	if s == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case p, ok := <-s.prog:
+			if !ok {
+				return pullDoneMsg{model: s.model}
+			}
+			return pullProgressMsg{p: p}
+		case err, ok := <-s.errs:
+			if !ok || err == nil {
+				return pullDoneMsg{model: s.model}
+			}
+			return pullDoneMsg{model: s.model, err: err}
+		case <-time.After(pullIdleTimeout):
+			if s.cancel != nil {
+				s.cancel()
+			}
+			return pullDoneMsg{model: s.model, err: fmt.Errorf("pull idle timeout after %s", pullIdleTimeout)}
+		}
+	}
 }
 
 func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -2290,8 +2450,30 @@ func (m *Model) pickerModal() string {
 	b.WriteString(modalMutedStyle.Render(truncatePlain(fmt.Sprintf("on %s", host), innerW)))
 	b.WriteString("\n\n")
 
+	// Pull-in-progress view takes over the modal body.
+	if m.pulling {
+		b.WriteString(modalAccentStyle.Render(truncatePlain("Pulling "+m.pullName, innerW)))
+		b.WriteString("\n\n")
+		b.WriteString(modalMutedStyle.Render(truncatePlain(m.pullStatus, innerW)))
+		b.WriteString("\n")
+		if m.pullTotal > 0 {
+			b.WriteString(renderProgressBar(m.pullCompleted, m.pullTotal, innerW-2))
+			b.WriteString("\n")
+			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("%s / %s", humanBytes(m.pullCompleted), humanBytes(m.pullTotal))))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("cancel"))
+		return modalStyle.Width(w).Render(b.String())
+	}
+
+	if m.pullErr != "" {
+		b.WriteString(modalErrorStyle.Render(truncatePlain("pull failed: "+m.pullErr, innerW)))
+		b.WriteString("\n\n")
+	}
+
 	if len(m.models) == 0 {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("no models installed — `ollama pull <name>`", innerW)))
+		b.WriteString(modalMutedStyle.Render(truncatePlain("no models installed — press p to pull one", innerW)))
 		b.WriteString("\n")
 	} else {
 		b.WriteString(modalAccentStyle.Render("Available"))
@@ -2318,12 +2500,61 @@ func (m *Model) pickerModal() string {
 		}
 	}
 
+	// Name-entry view for pulling a new model.
+	if m.pullInput.Focused() {
+		m.pullInput.SetWidth(innerW - 8)
+		b.WriteString("\n")
+		b.WriteString(modalAccentStyle.Render("Pull a model"))
+		b.WriteString("\n")
+		b.WriteString(m.pullInput.View())
+		b.WriteString("\n\n")
+		hint := modalMutedStyle.Render("enter ") + modalBodyStyle.Render("pull") +
+			modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
+		b.WriteString(hint)
+		return modalStyle.Width(w).Render(b.String())
+	}
+
 	b.WriteString("\n")
 	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
 		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("chat") +
+		modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull") +
 		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
+}
+
+// humanBytes formats a byte count as a compact human-readable string.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// renderProgressBar draws a [#####-----] bar of the given total width.
+func renderProgressBar(completed, total int64, width int) string {
+	if width < 4 {
+		width = 4
+	}
+	inner := width - 2
+	frac := 0.0
+	if total > 0 {
+		frac = float64(completed) / float64(total)
+	}
+	if frac < 0 {
+		frac = 0
+	} else if frac > 1 {
+		frac = 1
+	}
+	filled := int(frac * float64(inner))
+	bar := "[" + strings.Repeat("#", filled) + strings.Repeat("-", inner-filled) + "]"
+	return modalAccentStyle.Render(bar) + modalMutedStyle.Render(fmt.Sprintf(" %3.0f%%", frac*100))
 }
 
 func (m *Model) helpModal() string {
@@ -2618,6 +2849,7 @@ func (m *Model) layout() {
 	}
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	m.keyInput.SetWidth(min(m.width-6, 80))
+	m.pullInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
 	footerH := lipgloss.Height(m.footerView())
 	inputH := lipgloss.Height(m.inputView())

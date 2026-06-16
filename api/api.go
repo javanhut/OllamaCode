@@ -386,6 +386,91 @@ func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse
 	return out, nil
 }
 
+// PullProgress is one streamed status update from /api/pull. During a layer
+// download Total/Completed carry byte counts; other phases send only Status
+// (e.g. "pulling manifest", "verifying sha256 digest", "success").
+type PullProgress struct {
+	Status    string `json:"status"`
+	Digest    string `json:"digest,omitempty"`
+	Total     int64  `json:"total,omitempty"`
+	Completed int64  `json:"completed,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type pullRequest struct {
+	Model  string `json:"model"`
+	Stream bool   `json:"stream"`
+}
+
+// PullModel streams download progress for a model from /api/pull. Closing both
+// channels (or an error) signals completion. It carries the API key, so cloud
+// models can be pulled through an authenticated host just like local ones.
+func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullProgress, <-chan error) {
+	progCh := make(chan PullProgress)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(progCh)
+		defer close(errCh)
+
+		urlPath := generatePath("pullModel", o)
+		jsonData, err := json.Marshal(pullRequest{Model: model, Stream: true})
+		if err != nil {
+			errCh <- fmt.Errorf("failed to marshal pull request: %v", err)
+			return
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
+		if err != nil {
+			errCh <- fmt.Errorf("failed to create http request: %v", err)
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		o.applyAuth(httpReq)
+
+		resp, err := (&http.Client{}).Do(httpReq)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				errCh <- fmt.Errorf("http request failed: %v", err)
+				return
+			}
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			errCh <- fmt.Errorf("unexpected status code: %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return
+		}
+
+		decoder := json.NewDecoder(resp.Body)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				var p PullProgress
+				if err := decoder.Decode(&p); err != nil {
+					if err == io.EOF {
+						return
+					}
+					errCh <- fmt.Errorf("error decoding pull stream: %v", err)
+					return
+				}
+				if p.Error != "" {
+					errCh <- fmt.Errorf("%s", p.Error)
+					return
+				}
+				progCh <- p
+			}
+		}
+	}()
+
+	return progCh, errCh
+}
+
 func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
 	urlPath := generatePath("getInputEmbedings", o)
 	req := EmbedRequest{Model: model, Input: inputs}
