@@ -48,9 +48,12 @@ type Schema struct {
 }
 
 type Property struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
+	Type        string              `json:"type"`
+	Description string              `json:"description,omitempty"`
+	Enum        []string            `json:"enum,omitempty"`
+	Items       *Property           `json:"items,omitempty"`      // element schema for type "array"
+	Properties  map[string]Property `json:"properties,omitempty"` // field schemas for type "object"
+	Required    []string            `json:"required,omitempty"`   // required fields for type "object"
 }
 
 // Handler executes a tool call. args is the raw JSON object the model sent;

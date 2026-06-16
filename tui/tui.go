@@ -259,6 +259,7 @@ var destructiveToolNames = map[string]bool{
 	"git_remote":     true,
 	"git_branch":     true,
 	"process_kill":   true,
+	"parallel_edit":  true,
 }
 
 type config struct {
@@ -706,6 +707,7 @@ func New() *Model {
 	m.lastActivity = time.Now()
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
+	registry.Register(m.parallelEditTool())
 	// Registered after m exists so the semantic tools read the live host and
 	// pick up connection changes made via /settings.
 	registry.Register(mcp.CodeIndexTool(liveEmbedder{m}))
@@ -3822,7 +3824,7 @@ func toolCallTimeout(call mcp.ToolCall) time.Duration {
 		return localMutatingToolTimeout
 	case "web_search", "web_fetch", "code_index", "semantic_search":
 		return networkToolTimeout
-	case "spawn_subagent":
+	case "spawn_subagent", "parallel_edit":
 		return longRunningToolTimeout
 	default:
 		return defaultToolCallTimeout

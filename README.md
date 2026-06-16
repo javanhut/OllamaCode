@@ -19,6 +19,7 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
 - **Auto-RAG** — relevant code is embedded and retrieved automatically each turn (no tool call needed); the index refreshes incrementally as files change
 - **Per-model profiles** — context length (`num_ctx`) and tool support are discovered from Ollama's `/api/show` instead of hardcoded; sampling options are configurable per model
 - **Sub-agents** — delegate read-only investigations (`spawn_subagent`) that run a bounded child loop and report back, without cluttering the main context
+- **Parallel edits** — `parallel_edit` splits a large change into independent subtasks, plans each with its own read-only worker in parallel, then applies the proposals serially and safely (per-edit `/undo` checkpoints, conflict detection — overlapping or stale edits are reported, never silently merged)
 - **Checkpoints & undo** — file changes are snapshotted per turn; `/undo` reverts the last turn's edits
 - **Dream mode** — after 3 minutes idle it drifts into background reflection: it dreams up candidate fixes and ideas, consolidates its notes, and promotes memory. Any prompt wakes it, and it tells you what it thought about while you were away (`/dreams` for the log, `/dream` to toggle, `/notes restore` to undo a consolidation)
 - **Three safety modes:**
@@ -250,6 +251,7 @@ go test ./api
 │   ├── format_repair.go     # Constrained-decoding (format) escalation
 │   ├── rag.go               # Auto-RAG: lazy build, per-turn retrieval, incremental reindex
 │   ├── subagent.go          # spawn_subagent tool (read-only)
+│   ├── parallel_edit.go     # parallel_edit: parallel plan, serial safe apply
 │   └── checkpoint.go        # Per-turn file snapshots for /undo
 ├── internal/
 │   ├── agent/               # Headless agent loop (shared by sub-agents and eval)
@@ -284,6 +286,7 @@ go test ./api
 | `find_symbol` / `code_definition` / `code_references` / `code_hover` | Code intelligence (comment-filtered, capped) |
 | `code_index` / `semantic_search` | Build and query the embedding index (also used automatically by auto-RAG) |
 | `spawn_subagent` | Delegate a read-only investigation to a bounded child agent |
+| `parallel_edit` | Split a large change into independent subtasks, plan each in parallel, then apply the edits serially with conflict detection |
 | `web_fetch` / `web_search` / `web_crawl` | Fetch and search the web |
 | `git_*` | `status`, `diff`, `log`, `add`, `commit`, `branch`, `checkout`, `pull`, `push`, `stash`, `merge`, `reset`, `remote` |
 
