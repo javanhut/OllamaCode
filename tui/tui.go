@@ -1510,7 +1510,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolResultMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		if m.pending != nil {
+		// Tool goroutines run on context.Background() and are never cancelled when
+		// the pending batch is swapped (cancel via esc/ctrl+s, or a new turn). A
+		// straggler from an old, larger batch can therefore deliver an index past
+		// the bounds of the current (smaller) batch — dropping it here avoids an
+		// index-out-of-range panic that would otherwise crash the whole TUI.
+		if m.pending != nil && msg.index < len(m.pending.results) {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
 			if msg.index < len(m.pending.calls) {
@@ -2112,6 +2117,9 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.toast = "companion started — speak to type"
 			send := m.companionSender
 			go func() {
+				// p.Send can panic if the program has already shut down; never let
+				// that crash the process.
+				defer func() { _ = recover() }()
 				if send == nil {
 					return
 				}
@@ -4050,6 +4058,17 @@ func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
 
 		done := make(chan api.Message, 1)
 		go func() {
+			// A panic in a tool handler must not tear down the whole program;
+			// convert it into an error result so the turn can recover.
+			defer func() {
+				if r := recover(); r != nil {
+					done <- api.Message{
+						Role:     "tool",
+						ToolName: call.Function.Name,
+						Content:  fmt.Sprintf("error: tool %q panicked: %v", call.Function.Name, r),
+					}
+				}
+			}()
 			done <- m.invokeTool(ctx, call)
 		}()
 
@@ -4914,11 +4933,18 @@ func saveConfig(c config) {
 	_ = os.WriteFile(path, data, 0o644)
 }
 
-func Run() error {
+func Run() (err error) {
 	m := New()
 	p := tea.NewProgram(m)
 	m.companionSender = func(msg tea.Msg) { p.Send(msg) }
-	_, err := p.Run()
+	// Last-resort backstop: if Update/View panics, recover so the terminal is
+	// restored and the user gets an error instead of a raw stack trace.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered from panic: %v", r)
+		}
+	}()
+	_, err = p.Run()
 	if m.companion != nil {
 		_ = m.companion.Close()
 		m.companion = nil
