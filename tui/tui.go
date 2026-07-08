@@ -96,8 +96,12 @@ var diffPreviewTools = map[string]bool{
 const (
 	minInputLines = 1
 	maxInputLines = 20
-	appVersion    = "dev"
 )
+
+// appVersion is stamped at build time via
+// -ldflags "-X github.com/javanhut/ollama_code/tui.appVersion=$(VERSION)".
+// It's a var (not const) so the linker can override the default.
+var appVersion = "dev"
 
 type state int
 
@@ -279,6 +283,7 @@ type config struct {
 	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
 	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
 	Face       *bool                   `json:"face,omitempty"`        // nil/true = mascot overlay shown
+	Welcome    *bool                   `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
 	Verify     *bool                   `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
 	VerifyCmd  string                  `json:"verify_cmd,omitempty"`  // override the auto-detected check
 	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
@@ -556,6 +561,7 @@ var slashCommands = []struct {
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},
 	{"/face", "toggle the mascot overlay on/off"},
+	{"/welcome", "toggle the startup welcome panel on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 	{"/auto", "switch to autonomous mode"},
@@ -735,9 +741,10 @@ func getGitBranch() string {
 
 func (m *Model) refreshTranscript() {
 	var b strings.Builder
-	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
+	if len(m.history) == 0 && !m.streaming && m.lastError == "" && m.welcomeOn() {
 		b.WriteString(m.welcomePanel())
 	} else {
+		// Non-empty history (or welcome suppressed → the loop below is a no-op).
 		// Group consecutive assistant + tool messages into a single Layla
 		// turn so the user sees one block per response, not one per tool call.
 		i := 0
@@ -1883,6 +1890,18 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.toast = "face off"
 			}
+			return m, nil
+		case "/welcome":
+			m.input.Reset()
+			on := !m.welcomeOn()
+			m.cfg.Welcome = &on
+			saveConfig(m.cfg)
+			if on {
+				m.toast = "welcome panel on"
+			} else {
+				m.toast = "welcome panel off"
+			}
+			m.refreshTranscript()
 			return m, nil
 		case "/dreams":
 			m.input.Reset()

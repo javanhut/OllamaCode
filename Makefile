@@ -5,6 +5,9 @@ PROJECT_NAME := ollama-code
 COMPANION_NAME := ollama-companion
 VERSION := 1.0.0
 MAIN_ENTRY_POINT := main.go # Assuming your main package entry file is main.go
+# Stamp the version into the binary (shown in the welcome panel). Without this,
+# a plain `go build` reports "dev".
+LDFLAGS := -X github.com/javanhut/ollama_code/tui.appVersion=$(VERSION)
 UNAME_S := $(shell uname -s)
 
 # Installation locations (override as needed, e.g. `make install PREFIX=$$HOME/.local`)
@@ -33,7 +36,7 @@ setup:
 build: setup
 	@echo "--- Building $(PROJECT_NAME) Binary ---"
 	# Build for current OS/Architecture
-	go build -v -o $(PROJECT_NAME) .
+	go build -v -ldflags "$(LDFLAGS)" -o $(PROJECT_NAME) .
 	# To cross-compile for Linux on macOS, for example:
 	# GOOS=linux GOARCH=amd64 go build -v -o $(PROJECT_NAME)_linux .
 	@echo "Build complete. Binary named $(PROJECT_NAME) created."

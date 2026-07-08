@@ -18,6 +18,11 @@ func (m *Model) faceOn() bool {
 	return m.cfg.Face == nil || *m.cfg.Face
 }
 
+// welcomeOn reports whether the empty-chat welcome panel is shown (default true).
+func (m *Model) welcomeOn() bool {
+	return m.cfg.Welcome == nil || *m.cfg.Welcome
+}
+
 func (m *Model) overlayFace(base string) string {
 	if !m.faceOn() || m.width <= 0 || m.height <= 0 {
 		return base
