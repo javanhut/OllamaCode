@@ -224,68 +224,78 @@ func stripLatexMath(s string) string {
 	return s
 }
 
-func (m *Model) renderMarkdown(s string, useCache bool) string {
-	if strings.TrimSpace(s) == "" {
-		return s
-	}
+// markdownRenderer wraps a glamour renderer with its own wrap width and render
+// cache. Each panel (chat, notes) owns one so their differing widths don't
+// thrash a shared renderer and blow away each other's cache.
+type markdownRenderer struct {
+	renderer *glamour.TermRenderer
+	width    int
+	cache    map[string]string
+}
 
+func newMarkdownRenderer() *markdownRenderer {
+	return &markdownRenderer{cache: make(map[string]string)}
+}
+
+// render renders s (with LaTeX math stripped) at the given wrap width, rebuilding
+// the underlying renderer and dropping the cache only when the width changes.
+// Returns "" + false on renderer error so the caller can fall back to raw text.
+func (r *markdownRenderer) render(s string, wrap int, useCache bool) (string, bool) {
 	if useCache {
-		if cached, ok := m.mdCache[s]; ok {
-			return cached
+		if cached, ok := r.cache[s]; ok {
+			return cached, true
 		}
 	}
-
-	pre := stripLatexMath(s)
-
-	width := m.viewport.Width()
-	if width <= 4 {
-		width = 80
-	}
-	wrap := width - 2
-	if m.mdRenderer == nil || m.mdWidth != wrap {
-		r, err := glamour.NewTermRenderer(
+	if r.renderer == nil || r.width != wrap {
+		tr, err := glamour.NewTermRenderer(
 			glamour.WithStyles(laylaMarkdownStyle()),
 			glamour.WithWordWrap(wrap),
 		)
 		if err != nil {
-			return s
+			return "", false
 		}
-		m.mdRenderer = r
-		m.mdWidth = wrap
-		// Invalidate cache if width changes
-		m.mdCache = make(map[string]string)
+		r.renderer = tr
+		r.width = wrap
+		r.cache = make(map[string]string)
 	}
-	out, err := m.mdRenderer.Render(pre)
+	out, err := r.renderer.Render(stripLatexMath(s))
 	if err != nil {
-		return s
+		return "", false
 	}
 	res := strings.TrimRight(out, "\n")
 	if useCache {
-		m.mdCache[s] = res
+		r.cache[s] = res
 	}
-	return res
+	return res, true
+}
+
+// reset drops the renderer and cache, forcing a rebuild on next render (e.g. on
+// a window resize, when the style/width baseline changes).
+func (r *markdownRenderer) reset() {
+	r.renderer = nil
+	r.cache = make(map[string]string)
+}
+
+func (m *Model) renderMarkdown(s string, useCache bool) string {
+	if strings.TrimSpace(s) == "" {
+		return s
+	}
+	width := m.viewport.Width()
+	if width <= 4 {
+		width = 80
+	}
+	if out, ok := m.md.render(s, width-2, useCache); ok {
+		return out
+	}
+	return s
 }
 
 func (m *Model) renderNotesMarkdown(s string, width int) string {
 	if strings.TrimSpace(s) == "" {
 		return s
 	}
-	wrap := width - 2
-	if m.mdRenderer == nil || m.mdWidth != wrap {
-		r, err := glamour.NewTermRenderer(
-			glamour.WithStyles(laylaMarkdownStyle()),
-			glamour.WithWordWrap(wrap),
-		)
-		if err != nil {
-			return s
-		}
-		m.mdRenderer = r
-		m.mdWidth = wrap
-		m.mdCache = make(map[string]string)
+	if out, ok := m.notesMd.render(s, width-2, true); ok {
+		return out
 	}
-	out, err := m.mdRenderer.Render(stripLatexMath(s))
-	if err != nil {
-		return s
-	}
-	return strings.TrimRight(out, "\n")
+	return s
 }

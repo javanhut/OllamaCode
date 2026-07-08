@@ -109,16 +109,26 @@ func ReadFileTool() Tool {
 				return "", err
 			}
 			if a.StartLine == 0 && a.EndLine == 0 {
-				content := string(data)
 				maxBytes := a.MaxBytes
 				if maxBytes <= 0 {
 					maxBytes = 32768
 				}
-				if len(content) > maxBytes {
-					truncated := content[:maxBytes]
-					return fmt.Sprintf("%s\n\n... [truncated at %d bytes; %d total bytes. Use start_line/end_line or set max_bytes higher to read more.]", truncated, maxBytes, len(content)), nil
+				// Line-number the whole-file read too (like range reads), so the
+				// model always has stable coordinates to hand to edit_file. Budget is
+				// applied over the emitted, numbered output.
+				lines := strings.Split(string(data), "\n")
+				var b strings.Builder
+				used := 0
+				for i, ln := range lines {
+					row := fmt.Sprintf("%d\t%s\n", i+1, ln)
+					if i > 0 && used+len(row) > maxBytes {
+						fmt.Fprintf(&b, "... [truncated at line %d of %d; %d total bytes. Use start_line/end_line or raise max_bytes to read more.]", i, len(lines), len(data))
+						return strings.TrimRight(b.String(), "\n"), nil
+					}
+					b.WriteString(row)
+					used += len(row)
 				}
-				return content, nil
+				return strings.TrimRight(b.String(), "\n"), nil
 			}
 			lines := strings.Split(string(data), "\n")
 			start := a.StartLine

@@ -57,7 +57,8 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 		notes:      &sessionNotes{},
 		transcript: &strings.Builder{},
 		streamBuf:  &strings.Builder{},
-		mdCache:    map[string]string{},
+		md:         newMarkdownRenderer(),
+		notesMd:    newMarkdownRenderer(),
 		history: []api.Message{{
 			Role: "assistant",
 			ToolCalls: []mcp.ToolCall{

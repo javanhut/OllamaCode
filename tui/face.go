@@ -33,8 +33,14 @@ func (m *Model) overlayFace(base string) string {
 	return overlay(base, face, col, row)
 }
 
+// currentFaceMood returns the mascot's mood, recomputing the keyword scan only
+// when the conversation actually grows — not on every 400ms animation frame.
 func (m *Model) currentFaceMood() faceMood {
-	return inferFaceMood(m.history)
+	if len(m.history) != m.faceMoodLen {
+		m.faceMoodCache = inferFaceMood(m.history)
+		m.faceMoodLen = len(m.history)
+	}
+	return m.faceMoodCache
 }
 
 func inferFaceMood(history []api.Message) faceMood {

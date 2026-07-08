@@ -344,6 +344,35 @@ func (m *Model) notesModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// diffModal renders the full-screen, scrollable diff viewer (/diff). It uses a
+// bordered box with no filled background so the diff colors from colorizeDiff
+// read the same as they do in the transcript.
+func (m *Model) diffModal() string {
+	c := m.mode.color()
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c).
+		Padding(0, 1).
+		Width(m.modalWidth())
+	title := headingStyle.Copy().Foreground(c).Render("Diff — last turn")
+	hint := mutedStyle.Render("  ↑/↓ scroll · esc close")
+	return style.Render(title + hint + "\n\n" + m.diffViewport.View())
+}
+
+// styleDiffLine colorizes one diff preview line on the modal background:
+// additions green, deletions red, everything else muted.
+func styleDiffLine(line string, w int) string {
+	line = truncatePlain(line, w)
+	switch {
+	case strings.HasPrefix(line, "+"):
+		return modalDiffAdd.Render(line)
+	case strings.HasPrefix(line, "-"):
+		return modalDiffDel.Render(line)
+	default:
+		return modalMutedStyle.Render(line)
+	}
+}
+
 func (m *Model) permissionModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
@@ -398,12 +427,17 @@ func (m *Model) permissionModal() string {
 		remainingForPreview -= 2
 
 		previewLines := strings.Split(m.pending.preview, "\n")
+		isDiff := diffPreviewTools[call.Function.Name]
 		for i, line := range previewLines {
 			if len(middleSection) >= availableLines-1 && i < len(previewLines)-1 {
 				middleSection = append(middleSection, modalMutedStyle.Render(fmt.Sprintf("... (%d more lines of preview)", len(previewLines)-i)))
 				break
 			}
-			middleSection = append(middleSection, modalMutedStyle.Render(truncatePlain(line, innerW)))
+			if isDiff {
+				middleSection = append(middleSection, styleDiffLine(line, innerW))
+			} else {
+				middleSection = append(middleSection, modalMutedStyle.Render(truncatePlain(line, innerW)))
+			}
 		}
 	}
 

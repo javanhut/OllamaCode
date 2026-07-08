@@ -134,8 +134,44 @@ func TestWriteAndReadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_file failed: %v", err)
 	}
-	if resp != content {
-		t.Errorf("expected content %q, got %q", content, resp)
+	// Whole-file reads are line-numbered (1-indexed, tab-separated) so the model
+	// has stable coordinates for edit_file.
+	if want := "1\t" + content; resp != want {
+		t.Errorf("expected %q, got %q", want, resp)
+	}
+}
+
+func TestReadFileNumbersAndTruncates(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mcp-read-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	path := filepath.Join(tmpDir, "f.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := ReadFileTool()
+
+	// Whole-file read: every line numbered, 1-indexed. (trailing "\n" -> empty 4th line)
+	args, _ := json.Marshal(map[string]any{"path": path})
+	out, err := tool.Handler(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "1\talpha\n2\tbeta\n3\tgamma\n4\t"; out != want {
+		t.Fatalf("read_file =\n%q\nwant\n%q", out, want)
+	}
+
+	// Tiny byte budget truncates and still emits at least the first line + a note.
+	args, _ = json.Marshal(map[string]any{"path": path, "max_bytes": 1})
+	out, err = tool.Handler(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "1\talpha\n") || !strings.Contains(out, "truncated at line") {
+		t.Fatalf("expected first line + truncation note, got %q", out)
 	}
 }
 
@@ -175,12 +211,11 @@ func TestEditFile(t *testing.T) {
 		t.Fatalf("edit_file failed: %v", err)
 	}
 
-	// Verify
-	readArgs, _ := json.Marshal(map[string]string{"path": path})
-	resp, _ := r.Invoke(ctx, ToolCall{Function: ToolCallFunction{Name: "read_file", Arguments: readArgs}})
+	// Verify the file content directly (read_file's output is line-numbered).
+	got, _ := os.ReadFile(path)
 	expected := "line 1\nline two\nline 3"
-	if resp != expected {
-		t.Errorf("expected %q, got %q", expected, resp)
+	if string(got) != expected {
+		t.Errorf("expected %q, got %q", expected, string(got))
 	}
 }
 
@@ -221,12 +256,11 @@ func TestEditFile_LineRange(t *testing.T) {
 		t.Fatalf("edit_file line range failed: %v", err)
 	}
 
-	// Verify
-	readArgs, _ := json.Marshal(map[string]string{"path": path})
-	resp, _ := r.Invoke(ctx, ToolCall{Function: ToolCallFunction{Name: "read_file", Arguments: readArgs}})
+	// Verify the file content directly (read_file's output is line-numbered).
+	got, _ := os.ReadFile(path)
 	expected := "one\ntwo\nTHREE\nFOUR\nfive"
-	if resp != expected {
-		t.Errorf("expected %q, got %q", expected, resp)
+	if string(got) != expected {
+		t.Errorf("expected %q, got %q", expected, string(got))
 	}
 }
 

@@ -22,7 +22,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
@@ -84,7 +83,15 @@ var (
 	modalAccentStyle = lipgloss.NewStyle().Foreground(accentColor).Background(modalBg).Bold(true)
 	modalErrorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Background(modalBg).Bold(true)
 	modalSelectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("232")).Background(secondaryColor).Bold(true)
+	modalDiffAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(modalBg)  // + lines
+	modalDiffDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(modalBg) // - lines
 )
+
+// diffPreviewTools are the mutating tools whose permission-modal preview is a
+// diff (+/- lines), so it gets colorized instead of shown as flat muted text.
+var diffPreviewTools = map[string]bool{
+	"write_file": true, "edit_file": true, "apply_diff": true, "append_file": true,
+}
 
 const (
 	minInputLines = 1
@@ -101,6 +108,7 @@ const (
 	stateHelp
 	statePermission
 	stateNotes
+	stateDiff
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -433,10 +441,14 @@ type Model struct {
 	toast      string
 	sel        selection
 
-	mdRenderer *glamour.TermRenderer
-	mdWidth    int
+	md      *markdownRenderer // chat transcript renderer (own width + cache)
+	notesMd *markdownRenderer // notes-panel renderer (own width + cache)
+
+	faceMoodCache faceMood // cached mood; recomputed only when history grows
+	faceMoodLen   int      // len(history) the cached mood was computed at
 
 	notesViewport viewport.Model
+	diffViewport  viewport.Model // full-screen scrollable diff viewer (/diff)
 	spinner       spinner.Model
 	gitBranch     string
 	queue         []string
@@ -489,7 +501,6 @@ type Model struct {
 	notesBackup      string // pre-consolidation notes, restorable via /notes restore
 	kvStore          *storage.KVStore
 	memory           *memory.Store
-	mdCache          map[string]string
 	expandTools      bool
 	slashVisible     bool
 	slashSuggestions []string
@@ -532,6 +543,7 @@ var slashCommands = []struct {
 	{"/help", "show help screen"},
 	{"/?", "show help screen"},
 	{"/notes", "toggle session notes panel"},
+	{"/diff", "view last turn's file diffs"},
 	{"/companion", "toggle speech-to-text input"},
 	{"/copy", "copy last response to clipboard"},
 	{"/save", "save session with optional name"},
@@ -686,7 +698,9 @@ func New() *Model {
 		failedCalls:  make(map[string]int),
 		kvStore:      kv,
 		memory:       mem,
-		mdCache:      make(map[string]string),
+		md:           newMarkdownRenderer(),
+		notesMd:      newMarkdownRenderer(),
+		faceMoodLen:  -1, // force first mood computation
 		expandTools:  true,
 		lastActivity: time.Now(),
 		faceLastKey:  time.Now(),
@@ -993,8 +1007,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.ready = true
 		}
-		m.mdRenderer = nil
-		m.mdCache = make(map[string]string)
+		m.md.reset()
+		m.notesMd.reset()
 		m.refreshTranscript()
 
 	case tea.MouseClickMsg:
@@ -1143,6 +1157,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case statePermission:
 			return m.updatePermission(msg)
+		case stateDiff:
+			switch msg.String() {
+			case "esc", "q", "enter":
+				m.state = stateChat
+				m.input.Focus()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.diffViewport, cmd = m.diffViewport.Update(msg)
+			return m, cmd
 		case stateChat:
 			// Enter accepts the highlighted slash command into the input (so args
 			// can be added); a second Enter then runs it.
@@ -1888,6 +1912,17 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.showNotes = !m.showNotes
 			m.layout()
 			return m, nil
+		case "/diff":
+			m.input.Reset()
+			d := m.lastTurnDiffs()
+			if d == "" {
+				m.toast = "no file diffs in the last turn"
+				return m, nil
+			}
+			m.diffViewport.SetContent(colorizeDiff(d, m.diffViewport.Width()))
+			m.diffViewport.GotoTop()
+			m.state = stateDiff
+			return m, nil
 		case "/companion":
 			m.input.Reset()
 			if m.companion != nil {
@@ -2100,6 +2135,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.notesModal()))
 	case statePermission:
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
+	case stateDiff:
+		v.SetContent(m.overlayModal(base, m.diffModal()))
 	default:
 		v.SetContent(base)
 	}
@@ -2171,6 +2208,10 @@ func (m *Model) layout() {
 		// subtract title and padding
 		vpH-4, 1)
 
+	// Diff viewer fills most of the screen (modal-width box, minus border/header).
+	diffVW := max(m.modalWidth()-2, 20)
+	diffVH := max(m.height-6, 4)
+
 	if !m.ready {
 		m.viewport = viewport.New(
 			viewport.WithWidth(vpW),
@@ -2194,11 +2235,17 @@ func (m *Model) layout() {
 			viewport.WithWidth(notesW-4), // account for border and padding
 			viewport.WithHeight(notesVH),
 		)
+		m.diffViewport = viewport.New(
+			viewport.WithWidth(diffVW),
+			viewport.WithHeight(diffVH),
+		)
 	} else {
 		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
 		m.notesViewport.SetWidth(notesW - 4)
 		m.notesViewport.SetHeight(notesVH)
+		m.diffViewport.SetWidth(diffVW)
+		m.diffViewport.SetHeight(diffVH)
 	}
 	m.viewport.SoftWrap = true
 	m.notesViewport.SoftWrap = true
@@ -2253,6 +2300,28 @@ func (m *Model) autoLoadModels() tea.Cmd {
 
 // lastUserMessage returns the text of the most recent user message, truncated
 // for use as a checkpoint label.
+// lastTurnDiffs collects the unified diffs from the most recent assistant turn's
+// tool results (walking back to the previous user message), in chronological
+// order. Returns "" when the last turn changed no files.
+func (m *Model) lastTurnDiffs() string {
+	var diffs []string
+	for i := len(m.history) - 1; i >= 0; i-- {
+		msg := m.history[i]
+		if msg.Role == "user" {
+			break
+		}
+		if msg.Role == "tool" {
+			if _, d := splitDiff(msg.Content); d != "" {
+				diffs = append(diffs, d)
+			}
+		}
+	}
+	for l, r := 0, len(diffs)-1; l < r; l, r = l+1, r-1 {
+		diffs[l], diffs[r] = diffs[r], diffs[l]
+	}
+	return strings.Join(diffs, "\n\n")
+}
+
 func (m *Model) lastUserMessage() string {
 	for i := len(m.history) - 1; i >= 0; i-- {
 		if m.history[i].Role == "user" {
@@ -3529,37 +3598,27 @@ func computePreview(call mcp.ToolCall) string {
 		content, _ := args["content"].(string)
 		old, err := os.ReadFile(path)
 		if err != nil {
-			return "(new file)\n" + truncatePreview(content, 20)
+			return "(new file " + path + ")\n" + addedLines(truncatePreview(content, 20))
 		}
 		return simpleDiff(string(old), content, 10)
 	case "edit_file":
 		path, _ := args["path"].(string)
 		oldStr, _ := args["old_string"].(string)
 		newStr, _ := args["new_string"].(string)
-		return fmt.Sprintf("%s\n--- old ---\n%s\n+++ new +++\n%s", path, truncatePreview(oldStr, 10), truncatePreview(newStr, 10))
+		return path + "\n" + simpleDiff(oldStr, newStr, 3)
 	case "apply_diff":
 		path, _ := args["path"].(string)
 		search, _ := args["search"].(string)
 		replace, _ := args["replace"].(string)
-		return fmt.Sprintf("%s\n--- search ---\n%s\n+++ replace +++\n%s", path, truncatePreview(search, 10), truncatePreview(replace, 10))
+		return path + "\n" + simpleDiff(search, replace, 3)
 	case "append_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)
-		old, err := os.ReadFile(path)
-		if err != nil {
-			return "(new file) → append:\n" + truncatePreview(content, 15)
+		label := path + " — appended:"
+		if _, err := os.Stat(path); err != nil {
+			label = "(new file " + path + ") — appended:"
 		}
-		lines := strings.Split(string(old), "\n")
-		start := max(len(lines)-5, 0)
-		var b strings.Builder
-		fmt.Fprintf(&b, "%s (current end):\n", path)
-		for _, l := range lines[start:] {
-			b.WriteString(l)
-			b.WriteString("\n")
-		}
-		b.WriteString("----- appended -----\n")
-		b.WriteString(truncatePreview(content, 15))
-		return b.String()
+		return label + "\n" + addedLines(truncatePreview(content, 15))
 	case "delete_file":
 		path, _ := args["path"].(string)
 		info, err := os.Stat(path)
@@ -3599,6 +3658,16 @@ func computePreview(call mcp.ToolCall) string {
 	default:
 		return ""
 	}
+}
+
+// addedLines prefixes each line with '+' so a preview of new/appended content
+// colorizes as additions in the permission modal.
+func addedLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = "+" + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 func truncatePreview(s string, maxLines int) string {
