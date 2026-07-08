@@ -33,7 +33,7 @@ func TestFilterCodeMatches_KeepsPointerAndMultiply(t *testing.T) {
 
 func TestFilterCodeMatches_Caps(t *testing.T) {
 	var lines []string
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		lines = append(lines, "f.go:1:code line")
 	}
 	out := filterCodeMatches(strings.Join(lines, "\n"), 3)

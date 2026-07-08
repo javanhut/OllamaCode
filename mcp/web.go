@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -171,10 +172,8 @@ func hasClass(n *html.Node, class string) bool {
 	for _, attr := range n.Attr {
 		if attr.Key == "class" {
 			classes := strings.Fields(attr.Val)
-			for _, c := range classes {
-				if c == class {
-					return true
-				}
+			if slices.Contains(classes, class) {
+				return true
 			}
 		}
 	}

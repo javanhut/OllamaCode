@@ -72,7 +72,7 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 	if k <= len(cLines) {
 		for i := 0; i+k <= len(cLines); i++ {
 			match := true
-			for j := 0; j < k; j++ {
+			for j := range k {
 				if strings.TrimSpace(cLines[i+j]) != strings.TrimSpace(oLines[j]) {
 					match = false
 					break
@@ -168,10 +168,7 @@ func lineSimilarity(a, b string) float64 {
 	if a == b {
 		return 1
 	}
-	maxLen := len(a)
-	if len(b) > maxLen {
-		maxLen = len(b)
-	}
+	maxLen := max(len(a), len(b))
 	if maxLen == 0 {
 		return 1
 	}

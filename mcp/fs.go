@@ -188,10 +188,7 @@ func readDirRecursive(root string) (string, error) {
 		}
 
 		remaining := readDirMaxTotalBytes - bytesRead
-		limit := readDirMaxFileBytes
-		if remaining < limit {
-			limit = remaining
-		}
+		limit := min(remaining, readDirMaxFileBytes)
 		buf := make([]byte, limit+1)
 		n, readErr := io.ReadFull(f, buf)
 		f.Close()
@@ -246,11 +243,8 @@ func readDirRecursive(root string) (string, error) {
 }
 
 func isBinaryContent(b []byte) bool {
-	n := len(b)
-	if n > 512 {
-		n = 512
-	}
-	for i := 0; i < n; i++ {
+	n := min(len(b), 512)
+	for i := range n {
 		if b[i] == 0 {
 			return true
 		}
@@ -505,7 +499,7 @@ func GrepTool() Tool {
 				argv = append(argv, "-r")
 			}
 			if a.FileTypes != "" {
-				for _, ft := range strings.Split(a.FileTypes, ",") {
+				for ft := range strings.SplitSeq(a.FileTypes, ",") {
 					ft = strings.TrimSpace(ft)
 					if ft != "" {
 						argv = append(argv, "--include="+ft)
@@ -943,7 +937,7 @@ func GetProjectTreeTool() Tool {
 
 				// Build prefix with proper │ and ├── / └──
 				parts := strings.Split(e.rel, string(os.PathSeparator))
-				for d := 0; d < depth; d++ {
+				for d := range depth {
 					// Check if the ancestor at this depth was last
 					ancestorLast := true
 					ancestorPath := strings.Join(parts[:d+1], string(os.PathSeparator))
@@ -1001,14 +995,7 @@ func GetProjectTreeTool() Tool {
 }
 
 func joinLines(s []string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	out := s[0]
-	for _, line := range s[1:] {
-		out += "\n" + line
-	}
-	return out
+	return strings.Join(s, "\n")
 }
 
 // Defaults for recursive read_file on directories.
