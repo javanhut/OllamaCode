@@ -431,6 +431,53 @@ func TouchFileTool() Tool {
 
 // capMatches bounds grep-style output to protect the model's context window,
 // truncating to a line and byte budget with a footer noting how much was cut.
+// groupMatches turns flat `path:line:content` grep output into a counted,
+// file-grouped listing that's easier to scan and act on:
+//
+//	3 match(es) in 2 file(s):
+//	a.go
+//	  12: foo
+//	b.go
+//	  7: baz
+//
+// The result is passed through capMatches for the line/byte budget.
+func groupMatches(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	order := []string{}
+	byFile := map[string][]string{}
+	total := 0
+	for _, ln := range lines {
+		if ln == "" {
+			continue
+		}
+		path := ""
+		hit := "  " + ln
+		if p := strings.SplitN(ln, ":", 3); len(p) == 3 {
+			path = p[0]
+			hit = "  " + p[1] + ": " + p[2]
+		}
+		if _, ok := byFile[path]; !ok {
+			order = append(order, path)
+		}
+		byFile[path] = append(byFile[path], hit)
+		total++
+	}
+	if total == 0 {
+		return "no matches"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d match(es) in %d file(s):\n", total, len(order))
+	for _, path := range order {
+		if path != "" {
+			b.WriteString(path + "\n")
+		}
+		for _, h := range byFile[path] {
+			b.WriteString(h + "\n")
+		}
+	}
+	return capMatches(strings.TrimRight(b.String(), "\n"))
+}
+
 func capMatches(text string) string {
 	const maxLines, maxBytes = 100, 10 * 1024
 	lines := strings.Split(text, "\n")
@@ -525,14 +572,14 @@ func GrepTool() Tool {
 					return "no matches", nil
 				}
 				if text != "" {
-					return capMatches(text), nil
+					return groupMatches(text), nil
 				}
 				return "", err
 			}
 			if text == "" {
 				return "no matches", nil
 			}
-			return capMatches(text), nil
+			return groupMatches(text), nil
 		},
 	}
 }

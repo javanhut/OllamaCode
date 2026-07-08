@@ -15,14 +15,15 @@ func RunShellTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "run_shell",
-			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s.",
+			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
 					"command":     {Type: "string", Description: "The shell command to execute."},
 					"working_dir": {Type: "string", Description: "Directory to run in. Defaults to the current working directory."},
-					"timeout_sec": {Type: "number", Description: "Hard timeout in seconds. Defaults to 30, max 300."},
+					"timeout_sec": {Type: "number", Description: "Hard timeout in seconds for foreground runs. Defaults to 30, max 300. Ignored when background=true."},
 					"stdin":       {Type: "string", Description: "Text to pipe into the command's standard input."},
+					"background":  {Type: "boolean", Description: "Run detached and return immediately with a job id instead of waiting. Use for commands that run for a while or never exit."},
 				},
 				Required: []string{"command"},
 			},
@@ -33,12 +34,21 @@ func RunShellTool() Tool {
 				WorkingDir string  `json:"working_dir"`
 				TimeoutSec float64 `json:"timeout_sec"`
 				Stdin      string  `json:"stdin"`
+				Background bool    `json:"background"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
 			if strings.TrimSpace(a.Command) == "" {
 				return "", fmt.Errorf("command is required")
+			}
+			if a.Background {
+				job, err := startBackgroundShell(a.Command, a.WorkingDir, a.Stdin)
+				if err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
+					job.id, job.pid, shortCommand(a.Command), job.id, job.id), nil
 			}
 			timeout := 30 * time.Second
 			if a.TimeoutSec > 0 {

@@ -411,6 +411,7 @@ type Model struct {
 	host          api.OllamaHost
 	tools         *mcp.Registry
 	notes         *sessionNotes
+	todos         *todoList
 	mode          Mode
 	state         state
 	urlInput      textinput.Model
@@ -471,6 +472,7 @@ type Model struct {
 
 	// Loop safety (reset each user turn).
 	stepCount          int            // tool-call rounds since the last user message
+	autoContinues      int            // times we've nudged the model to keep going on open todos this turn
 	maxSteps           int            // budget per turn (cfg.MaxSteps, default 25)
 	recentCalls        []string       // ring of recent call fingerprints (oscillation)
 	failedCalls        map[string]int // fingerprint -> consecutive failure count
@@ -676,6 +678,8 @@ func New() *Model {
 	registry.Register(readNotesTool(notes))
 	registry.Register(updateNotesTool(notes))
 	registry.Register(appendNotesTool(notes))
+	todos := &todoList{}
+	registry.Register(todoWriteTool(todos))
 	registry.Register(rememberTool(mem))
 	registry.Register(recallTool(mem))
 	registry.Register(forgetTool(mem))
@@ -689,6 +693,7 @@ func New() *Model {
 		host:         host,
 		tools:        registry,
 		notes:        notes,
+		todos:        todos,
 		mode:         ExploreMode,
 		state:        stateChat,
 		urlInput:     ti,
@@ -794,6 +799,12 @@ func (m *Model) refreshTranscript() {
 	if m.lastError != "" {
 		b.WriteString("\n")
 		b.WriteString(errorStyle.Render(m.lastError))
+		b.WriteString("\n")
+	}
+
+	if todo := m.todoView(); todo != "" {
+		b.WriteString("\n")
+		b.WriteString(todo)
 		b.WriteString("\n")
 	}
 
@@ -1425,6 +1436,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if wasAtBottom {
 				m.viewport.GotoBottom()
+			}
+
+			// Persistent loop: don't let the turn end while the model still has
+			// open todos — nudge it to keep going. Bounded by maxAutoContinues (and
+			// the step budget) so a model that won't finish can't spin forever.
+			if m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
+				m.autoContinues++
+				m.history = append(m.history, api.Message{
+					Role: "system",
+					Content: fmt.Sprintf("[CONTINUE] %d todo item(s) are still open:\n%s\nKeep working — take the next item now, and mark items completed via todo_write as you finish them. Only stop when every item is completed, or state your blocker explicitly.",
+						m.todos.openCount(), m.todos.openSummary()),
+				})
+				cmds = append(cmds, m.startStream())
+				m.refreshTranscript()
+				break
 			}
 
 			// Turn complete: bank any file changes as one undoable checkpoint.
@@ -2610,6 +2636,12 @@ SELF-REVIEW & SKEPTICISM (treat your own notes, memory, and plans as fallible):
 - Question your own decisions. When you made the plan you knew less than you know now. If fresh evidence contradicts the plan or the notes, the evidence wins: trust the code over the note, say so plainly, and update the note. Do not defend a prior conclusion just because it's yours.
 - Distinguish a cheap re-check from real stalling. Re-reading the one file you're about to edit is cheap — do it. Re-litigating a settled decision for the tenth time with no new information is the stall — don't. The tell is whether a verification would cost a tool call or two and could change your next move; if so, it's worth it.
 - Argue with yourself before you argue with the user. If you catch yourself asserting something confidently this session without having actually checked it, check it. Unverified confidence is the failure mode you most need to guard against — "I don't know, let me look" beats a wrong answer delivered with swagger.
+
+PLAN AND TRACK MULTI-STEP WORK:
+- For any task with roughly 3+ steps, call todo_write FIRST to lay out the plan as a checklist, then work it top to bottom. Mark exactly one item in_progress while you do it, flip it to completed the instant it's done, and move to the next. This keeps you honest and lets the user see progress.
+- Do NOT end your turn while todo items are still open. Keep taking the next item. Stop only when every item is completed, or when you hit a genuine blocker — and if you're blocked, say so explicitly and specifically. A summary that leaves the checklist half-done is not finishing.
+- Prefer the dedicated tools over run_shell when one fits: git_* for git, grep/find_symbol/find_files for search, read_file/edit_file/write_file for files. They're safer (no shell parsing) and give cleaner results. Reach for run_shell for pipelines, awk/sed, and anything without a dedicated tool.
+- For a command that runs long or never exits (dev servers, watchers, tail -f, long builds you want to keep running), call run_shell with background=true so it doesn't block the turn, then check on it with shell_output. Don't sit blocked waiting on a server.
 
 VERIFY BEFORE YOU CLAIM DONE (non-negotiable):
 - Writing code is not finishing. You are NOT done until you have RUN the verification and SEEN it pass: for code, that means it compiles/builds (and ideally the tests pass). Build it. Run it. Read the output.

@@ -167,6 +167,7 @@ func DefaultRegistry() *Registry {
 	r.Register(GetWorkingDirectoryTool())
 	r.Register(GrepTool())
 	r.Register(RunShellTool())
+	r.Register(ShellOutputTool())
 	r.Register(WebFetchTool())
 	r.Register(WebSearchTool())
 	r.Register(GetProjectTreeTool())

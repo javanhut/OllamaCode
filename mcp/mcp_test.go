@@ -327,3 +327,20 @@ func TestWriteFileEmitsDiff(t *testing.T) {
 		t.Fatalf("diff missing changed lines:\n%s", out)
 	}
 }
+
+func TestGroupMatches(t *testing.T) {
+	in := "a.go:12:foo\na.go:40:bar:baz\nb.go:7:qux"
+	out := groupMatches(in)
+	if !strings.Contains(out, "3 match(es) in 2 file(s)") {
+		t.Fatalf("count header missing:\n%s", out)
+	}
+	if !strings.Contains(out, "a.go\n  12: foo\n  40: bar:baz") {
+		t.Fatalf("a.go group wrong:\n%s", out)
+	}
+	if !strings.Contains(out, "b.go\n  7: qux") {
+		t.Fatalf("b.go group wrong:\n%s", out)
+	}
+	if groupMatches("") != "no matches" {
+		t.Fatal("empty input should be 'no matches'")
+	}
+}

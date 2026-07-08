@@ -9,6 +9,7 @@ const (
 	defaultMaxSteps     = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
 	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
 	recentCallsKept     = 12 // fingerprint ring length for oscillation detection
+	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
 )
 
 func maxStepsFromConfig(c config) int {
@@ -30,6 +31,7 @@ func (m *Model) resetTurnGuards() {
 	m.turnTouchedFiles = false
 	m.verifyAttempts = 0
 	m.challengedThisTurn = false
+	m.autoContinues = 0
 	for k := range m.failedCalls {
 		delete(m.failedCalls, k)
 	}

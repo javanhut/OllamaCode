@@ -61,10 +61,12 @@ func runShellCommand(ctx context.Context, command, workingDir, stdin string, tim
 		err := <-done
 		text := strings.TrimRight(out.String(), "\n")
 		if cctx.Err() == context.DeadlineExceeded {
+			msg := "[timed out after " + timeout.String() + "]"
+			hint := "\n(killed — if this command is meant to keep running, re-run it with background=true)"
 			if text == "" {
-				return "[timed out after " + timeout.String() + "]", nil
+				return msg + hint, nil
 			}
-			return text + "\n[timed out after " + timeout.String() + "]", nil
+			return text + "\n" + msg + hint, nil
 		}
 		return shellCommandResult(out.String(), err)
 	}
