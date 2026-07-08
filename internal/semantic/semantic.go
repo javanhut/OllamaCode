@@ -104,10 +104,7 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 		chunkSize := 100
 		overlap := 20
 		for i := 0; i < len(lines); i += chunkSize - overlap {
-			end := i + chunkSize
-			if end > len(lines) {
-				end = len(lines)
-			}
+			end := min(i+chunkSize, len(lines))
 			text := strings.Join(lines[i:end], "\n")
 			batch = append(batch, text)
 			batchMeta = append(batchMeta, struct {
@@ -136,10 +133,7 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 	batchSize := 10
 	for i := 0; i < len(batch); i += batchSize {
 		start := i
-		end := i + batchSize
-		if end > len(batch) {
-			end = len(batch)
-		}
+		end := min(i+batchSize, len(batch))
 		g.Go(func() error {
 			embs, err := embedder(batch[start:end])
 			if err != nil {
@@ -170,10 +164,7 @@ func chunkFile(rel string, data []byte) []Chunk {
 	const chunkSize, overlap = 100, 20
 	var chunks []Chunk
 	for i := 0; i < len(lines); i += chunkSize - overlap {
-		end := i + chunkSize
-		if end > len(lines) {
-			end = len(lines)
-		}
+		end := min(i+chunkSize, len(lines))
 		chunks = append(chunks, Chunk{
 			Path:      rel,
 			StartLine: i + 1,
@@ -275,11 +266,8 @@ func (idx *Index) Search(query string, embedder func(string) ([]float32, error),
 }
 
 func isBinary(b []byte) bool {
-	n := len(b)
-	if n > 512 {
-		n = 512
-	}
-	for i := 0; i < n; i++ {
+	n := min(len(b), 512)
+	for i := range n {
 		if b[i] == 0 {
 			return true
 		}

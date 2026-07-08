@@ -122,7 +122,7 @@ func RunSTT(frames <-chan AudioFrame, out chan<- Message, suppress, listening *a
 				inSpeech = true
 				setListening(true)
 				buf = buf[:0]
-				for i := 0; i < sttPrerollFrames; i++ {
+				for i := range sttPrerollFrames {
 					idx := (prerollHead + i) % sttPrerollFrames
 					if preroll[idx] != nil {
 						buf = append(buf, preroll[idx]...)
@@ -208,7 +208,7 @@ func transcribe(samples []int16, cfg STTConfig) (string, error) {
 	// whisper-cli with -nt -np usually prints just the recognized text, but
 	// some builds still emit a "[blank_audio]" line — filter it.
 	var lines []string
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for line := range strings.SplitSeq(stdout.String(), "\n") {
 		s := strings.TrimSpace(line)
 		if s == "" || strings.HasPrefix(s, "[") {
 			continue

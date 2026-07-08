@@ -72,10 +72,7 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 	idx := m.ragIndex
 	host := m.host
 	model := m.embedModel()
-	budget := m.contextLimit / 8
-	if budget > ragMaxBlockToks {
-		budget = ragMaxBlockToks
-	}
+	budget := min(m.contextLimit/8, ragMaxBlockToks)
 	return func() tea.Msg {
 		results, err := idx.Search(query, func(q string) ([]float32, error) {
 			embs, err := host.Embed(model, []string{q})

@@ -247,7 +247,7 @@ func emitLevel(b []byte, out chan<- float32) {
 		return
 	}
 	var sum float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := int16(binary.LittleEndian.Uint16(b[i*2:]))
 		v := float64(s) / 32768.0
 		sum += v * v

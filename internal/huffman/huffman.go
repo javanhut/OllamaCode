@@ -16,11 +16,11 @@ type Node struct {
 
 type PriorityQueue []*Node
 
-func (pq PriorityQueue) Len() int            { return len(pq) }
-func (pq PriorityQueue) Less(i, j int) bool  { return pq[i].Freq < pq[j].Freq }
-func (pq PriorityQueue) Swap(i, j int)       { pq[i], pq[j] = pq[j], pq[i] }
-func (pq *PriorityQueue) Push(x interface{}) { *pq = append(*pq, x.(*Node)) }
-func (pq *PriorityQueue) Pop() interface{} {
+func (pq PriorityQueue) Len() int           { return len(pq) }
+func (pq PriorityQueue) Less(i, j int) bool { return pq[i].Freq < pq[j].Freq }
+func (pq PriorityQueue) Swap(i, j int)      { pq[i], pq[j] = pq[j], pq[i] }
+func (pq *PriorityQueue) Push(x any)        { *pq = append(*pq, x.(*Node)) }
+func (pq *PriorityQueue) Pop() any {
 	old := *pq
 	n := len(old)
 	item := old[n-1]
@@ -124,7 +124,7 @@ func pack(bitStr string) []byte {
 	buf := make([]byte, numBytes)
 	binary.BigEndian.PutUint32(buf[0:4], uint32(n))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if bitStr[i] == '1' {
 			buf[4+i/8] |= (1 << (7 - (i % 8)))
 		}

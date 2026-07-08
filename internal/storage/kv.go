@@ -10,13 +10,13 @@ import (
 type KVStore struct {
 	mu   sync.RWMutex
 	path string
-	data map[string]interface{}
+	data map[string]any
 }
 
 func NewKVStore(path string) (*KVStore, error) {
 	s := &KVStore{
 		path: path,
-		data: make(map[string]interface{}),
+		data: make(map[string]any),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -46,21 +46,21 @@ func (s *KVStore) save() error {
 	return os.WriteFile(s.path, file, 0644)
 }
 
-func (s *KVStore) Set(key string, value interface{}) error {
+func (s *KVStore) Set(key string, value any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data[key] = value
 	return s.save()
 }
 
-func (s *KVStore) Get(key string) (interface{}, bool) {
+func (s *KVStore) Get(key string) (any, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	val, ok := s.data[key]
 	return val, ok
 }
 
-func (s *KVStore) GetFullData() map[string]interface{} {
+func (s *KVStore) GetFullData() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.data

@@ -494,7 +494,7 @@ func TestFaceAnimatesAcrossTicks(t *testing.T) {
 			setup(m)
 
 			seen := map[string]bool{}
-			for i := 0; i < 12; i++ {
+			for range 12 {
 				seen[m.faceView()] = true
 				next, _ := m.Update(faceTickMsg(time.Now()))
 				m = next.(*Model)

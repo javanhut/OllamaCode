@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -598,13 +599,7 @@ func (m *Model) updateSlashSuggestions() {
 	var matches []string
 	for _, c := range slashCommands {
 		if strings.HasPrefix(c.name, val) && val != c.name {
-			dup := false
-			for _, m := range matches {
-				if m == c.name {
-					dup = true
-					break
-				}
-			}
+			dup := slices.Contains(matches, c.name)
 			if !dup {
 				matches = append(matches, c.name)
 			}
@@ -1624,10 +1619,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// compacted messages, rather than prepending a system message into
 		// history. This keeps m.history append-only so the KV-cache prefix
 		// (systemPrompt + unchanged history) never shifts.
-		idx := msg.index
-		if idx > len(m.history) {
-			idx = len(m.history)
-		}
+		idx := min(msg.index, len(m.history))
 		m.archiveSummary = msg.summary
 		m.history = append([]api.Message(nil), m.history[idx:]...)
 		m.refreshTranscript()
@@ -2390,16 +2382,7 @@ func (m *Model) modalWidth() int {
 	if m.width <= 0 {
 		return 60
 	}
-	w := m.width * 3 / 5
-	if w < 50 {
-		w = 50
-	}
-	if w > 78 {
-		w = 78
-	}
-	if w > m.width-4 {
-		w = m.width - 4
-	}
+	w := min(min(max(m.width*3/5, 50), 78), m.width-4)
 	return w
 }
 
@@ -2680,7 +2663,7 @@ func (m *Model) notesModal() string {
 		b.WriteString("\n")
 		b.WriteString(modalMutedStyle.Render("The model can read/append/replace these via tools."))
 	} else {
-		for _, line := range strings.Split(notes, "\n") {
+		for line := range strings.SplitSeq(notes, "\n") {
 			b.WriteString(modalBodyStyle.Render(truncatePlain(line, innerW)))
 			b.WriteString("\n")
 		}
@@ -2695,10 +2678,9 @@ func (m *Model) permissionModal() string {
 	innerW := w - 4
 
 	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
-	maxLines := m.height - 4
-	if maxLines < 8 {
-		maxLines = 8 // absolute minimum safety boundary
-	}
+	maxLines := max(m.height-4,
+		// absolute minimum safety boundary
+		8)
 
 	var headerSection []string
 	headerSection = append(headerSection, m.modalHeader("Tool wants to run", "n=deny", innerW))
@@ -2721,10 +2703,9 @@ func (m *Model) permissionModal() string {
 
 	// How many lines are left for arguments and preview?
 	usedLines := len(headerSection) + len(footerSection) + 2
-	availableLines := maxLines - usedLines
-	if availableLines < 2 {
-		availableLines = 2 // absolute minimum for args/preview
-	}
+	availableLines := max(maxLines-usedLines,
+		// absolute minimum for args/preview
+		2)
 
 	var middleSection []string
 	args := formatToolArgs(call.Function.Arguments, innerW)
@@ -2810,10 +2791,7 @@ func pickerWindow(total, cursor, size int) windowRange {
 	if total <= size {
 		return windowRange{0, total}
 	}
-	start := cursor - size/2
-	if start < 0 {
-		start = 0
-	}
+	start := max(cursor-size/2, 0)
 	end := start + size
 	if end > total {
 		end = total
@@ -2890,14 +2868,8 @@ func (m *Model) layout() {
 	m.pullInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
 	footerH := lipgloss.Height(m.footerView())
-	inputH := lipgloss.Height(m.inputView())
-	if inputH < 2 {
-		inputH = 2
-	}
-	vpH := m.height - headerH - footerH - inputH
-	if vpH < 1 {
-		vpH = 1
-	}
+	inputH := max(lipgloss.Height(m.inputView()), 2)
+	vpH := max(m.height-headerH-footerH-inputH, 1)
 
 	vpW := m.width
 	notesW := 30
@@ -2911,10 +2883,9 @@ func (m *Model) layout() {
 		vpW = 10
 	}
 
-	notesVH := vpH - 4 // subtract title and padding
-	if notesVH < 1 {
-		notesVH = 1
-	}
+	notesVH := max(
+		// subtract title and padding
+		vpH-4, 1)
 
 	if !m.ready {
 		m.viewport = viewport.New(
@@ -4334,10 +4305,7 @@ func computePreview(call mcp.ToolCall) string {
 			return "(new file) → append:\n" + truncatePreview(content, 15)
 		}
 		lines := strings.Split(string(old), "\n")
-		start := len(lines) - 5
-		if start < 0 {
-			start = 0
-		}
+		start := max(len(lines)-5, 0)
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s (current end):\n", path)
 		for _, l := range lines[start:] {
@@ -4353,18 +4321,19 @@ func computePreview(call mcp.ToolCall) string {
 		if err != nil {
 			return fmt.Sprintf("%s (not found)", path)
 		}
-		preview := fmt.Sprintf("%s (%d bytes)\n", path, info.Size())
+		var preview strings.Builder
+		preview.WriteString(fmt.Sprintf("%s (%d bytes)\n", path, info.Size()))
 		if !info.IsDir() {
 			data, _ := os.ReadFile(path)
 			lines := strings.Split(string(data), "\n")
 			for i := 0; i < 3 && i < len(lines); i++ {
-				preview += lines[i] + "\n"
+				preview.WriteString(lines[i] + "\n")
 			}
 			if len(lines) > 3 {
-				preview += "..."
+				preview.WriteString("...")
 			}
 		}
-		return preview
+		return preview.String()
 	case "move_file":
 		src, _ := args["source"].(string)
 		dst, _ := args["destination"].(string)
@@ -4409,10 +4378,7 @@ func simpleDiff(old, new string, context int) string {
 		endOld--
 		endNew--
 	}
-	ctxStart := start - context
-	if ctxStart < 0 {
-		ctxStart = 0
-	}
+	ctxStart := max(start-context, 0)
 	ctxEndOld := endOld + context
 	if ctxEndOld >= len(oldLines) {
 		ctxEndOld = len(oldLines) - 1

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/javanhut/ollama_code/mcp"
@@ -97,12 +98,7 @@ func (r *ShowModelResponse) ContextLength() int {
 
 // SupportsTools reports whether the model advertises native tool-calling.
 func (r *ShowModelResponse) SupportsTools() bool {
-	for _, c := range r.Capabilities {
-		if c == "tools" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(r.Capabilities, "tools")
 }
 
 type EmbedRequest struct {
