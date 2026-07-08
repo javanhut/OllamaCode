@@ -871,7 +871,16 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 			b.WriteString("\n")
 			for _, entry := range t.toolCalls {
 				if entry.hasResult {
-					b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, entry.result, m.cfg.Verbose), true))
+					// When a mutating tool reports a diff, show it colorized (green
+					// additions / red deletions) below the header instead of a plain
+					// blockquote — so edits read like any other coding CLI.
+					if summary, diff := splitDiff(entry.result); diff != "" {
+						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, summary, m.cfg.Verbose), true))
+						b.WriteString("\n")
+						b.WriteString(colorizeDiff(diff, m.viewport.Width()-2))
+					} else {
+						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, entry.result, m.cfg.Verbose), true))
+					}
 				} else {
 					b.WriteString(m.renderMarkdown(renderToolCall(entry.call, m.cfg.Verbose), true))
 				}
@@ -886,6 +895,16 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 				len(t.toolCalls), plural(len(t.toolCalls)), strings.Join(uniqueNames(names), ", "))
 			b.WriteString(mutedStyle.Render(summary))
 			b.WriteString("\n")
+			// Even when tool calls are collapsed, always surface file diffs so the
+			// user sees the changes the agent made — like any other coding CLI.
+			for _, entry := range t.toolCalls {
+				if _, diff := splitDiff(entry.result); diff != "" {
+					b.WriteString(mutedStyle.Render("  ✎ " + entry.call.Function.Name))
+					b.WriteString("\n")
+					b.WriteString(colorizeDiff(diff, m.viewport.Width()-2))
+					b.WriteString("\n")
+				}
+			}
 		}
 	}
 

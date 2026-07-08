@@ -262,3 +262,34 @@ func TestGrep(t *testing.T) {
 		t.Errorf("expected response to contain 'bar', got %q", resp)
 	}
 }
+
+func TestWriteFileEmitsDiff(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mcp-diff-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	ctx := context.Background()
+	tool := WriteFileTool()
+	path := filepath.Join(tmpDir, "f.txt")
+
+	write := func(content string) string {
+		args, _ := json.Marshal(map[string]string{"path": path, "content": content})
+		out, err := tool.Handler(ctx, args)
+		if err != nil {
+			t.Fatalf("write_file failed: %v", err)
+		}
+		return out
+	}
+
+	write("line one\nline two\n")
+	out := write("line one\nline CHANGED\n")
+
+	if !strings.Contains(out, "--- "+path) || !strings.Contains(out, "+++ "+path) {
+		t.Fatalf("overwrite result missing diff header:\n%s", out)
+	}
+	if !strings.Contains(out, "+line CHANGED") || !strings.Contains(out, "-line two") {
+		t.Fatalf("diff missing changed lines:\n%s", out)
+	}
+}

@@ -287,6 +287,7 @@ func WriteFileTool() Tool {
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
+			old, _ := os.ReadFile(a.Path) // nil for a new file
 			mode := os.FileMode(0o644)
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()
@@ -295,7 +296,11 @@ func WriteFileTool() Tool {
 				return "", err
 			}
 			hash, _ := calculateHash(a.Path)
-			return fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash), nil
+			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash)
+			if diff := unifiedDiff(string(old), a.Content, a.Path); diff != "" {
+				result += "\n" + diff
+			}
+			return result, nil
 		},
 	}
 }
