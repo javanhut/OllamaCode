@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,13 +23,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/glamour"
-	glamourAnsi "github.com/charmbracelet/glamour/ansi"
-	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/companion"
-	"github.com/javanhut/ollama_code/internal/huffman"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/semantic"
 	"github.com/javanhut/ollama_code/internal/session"
@@ -394,42 +390,6 @@ const notesFile = ".ollama_notes.md"
 type sessionNotes struct {
 	mu   sync.Mutex
 	text string
-}
-
-func (n *sessionNotes) load() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	data, err := os.ReadFile(notesFile)
-	if err == nil {
-		n.text = string(data)
-	}
-}
-
-func (n *sessionNotes) save() {
-	_ = os.WriteFile(notesFile, []byte(n.text), 0o644)
-}
-
-func (n *sessionNotes) get() string {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.text
-}
-
-func (n *sessionNotes) set(s string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.text = s
-	n.save()
-}
-
-func (n *sessionNotes) appendLine(s string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.text != "" && !strings.HasSuffix(n.text, "\n") {
-		n.text += "\n"
-	}
-	n.text += s
-	n.save()
 }
 
 type Model struct {
@@ -942,130 +902,6 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	b.WriteString("\n")
 }
 
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
-
-func uniqueNames(in []string) []string {
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
-}
-
-func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string {
-	status := "completed"
-	if strings.HasPrefix(content, "error:") {
-		status = "failed"
-	}
-
-	header := fmt.Sprintf("**›** `%s` (%s)", call.Function.Name, status)
-	if !verbose {
-		return header
-	}
-
-	const maxLines = 12
-	const maxWidth = 200
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
-	}
-
-	var b strings.Builder
-	b.WriteString(header)
-	b.WriteString("\n")
-	for _, line := range lines {
-		b.WriteString("> " + truncatePlain(line, maxWidth))
-		b.WriteString("\n")
-	}
-	if truncated {
-		b.WriteString("> …")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func renderToolCall(call mcp.ToolCall, verbose bool) string {
-	name := fmt.Sprintf("**›** `%s`", call.Function.Name)
-	if !verbose {
-		return name
-	}
-	args := strings.TrimSpace(string(call.Function.Arguments))
-	if args == "" {
-		args = "{}"
-	}
-	args = truncatePlain(strings.ReplaceAll(args, "\n", " "), 200)
-	return name + " " + args
-}
-
-func renderToolResult(name, content string, verbose bool) string {
-	status := "completed"
-	if strings.HasPrefix(content, "error:") {
-		status = "failed"
-	}
-
-	header := fmt.Sprintf("**←** `%s` (%s)", name, status)
-	if !verbose {
-		return header
-	}
-
-	const maxLines = 12
-	const maxWidth = 200
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
-	}
-
-	var b strings.Builder
-	b.WriteString(header)
-	b.WriteString("\n")
-	for _, line := range lines {
-		b.WriteString("> " + truncatePlain(line, maxWidth))
-		b.WriteString("\n")
-	}
-	if truncated {
-		b.WriteString("> …")
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// laylaMarkdownStyle returns a glamour style based on the dark theme but with
-// heading prefixes ("##", "###", …) stripped and replaced with bold colored
-// titles, so headings actually look like headings instead of literal hashes.
-func laylaMarkdownStyle() glamourAnsi.StyleConfig {
-	s := glamourStyles.DarkStyleConfig
-	bold := true
-	makeHeading := func(color string, prefix string) glamourAnsi.StyleBlock {
-		return glamourAnsi.StyleBlock{
-			StylePrimitive: glamourAnsi.StylePrimitive{
-				BlockPrefix: "\n",
-				BlockSuffix: "\n",
-				Prefix:      prefix,
-				Color:       &color,
-				Bold:        &bold,
-			},
-		}
-	}
-	s.H2 = makeHeading("39", "")
-	s.H3 = makeHeading("45", "")
-	s.H4 = makeHeading("51", "")
-	s.H5 = makeHeading("80", "")
-	s.H6 = makeHeading("110", "")
-	return s
-}
-
 // LaTeX math notation patterns. We rewrite $…$ / $$…$$ as inline code so
 // the user sees a styled span instead of literal dollar signs (glamour has no
 // math renderer). Currency like "$5" doesn't match because it has no closer.
@@ -1073,65 +909,6 @@ var (
 	mathDisplayRe = regexp.MustCompile(`\$\$([^\n$]+?)\$\$`)
 	mathInlineRe  = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)
 )
-
-// stripLatexMath converts $…$ and $$…$$ into Markdown inline code, skipping
-// content inside fenced code blocks where the dollars might be intentional.
-func stripLatexMath(s string) string {
-	if !strings.Contains(s, "$") && !strings.Contains(s, "\\(") && !strings.Contains(s, "\\[") {
-		return s
-	}
-
-	// Handle multi-line $$ ... $$ and \[ ... \] blocks by converting to code blocks
-	// Handle inline $ ... $ and \( ... \) by converting to inline code
-	s = regexp.MustCompile(`(?s)\$\$(.*?)\$\$`).ReplaceAllString(s, "```latex\n$1\n```")
-	s = regexp.MustCompile(`(?s)\\\[(.*?)\\\]`).ReplaceAllString(s, "```latex\n$1\n```")
-	s = regexp.MustCompile(`\\\((.*?)\\\)`).ReplaceAllString(s, "`$1`")
-	s = mathInlineRe.ReplaceAllString(s, "`$1`")
-
-	return s
-}
-
-func (m *Model) renderMarkdown(s string, useCache bool) string {
-	if strings.TrimSpace(s) == "" {
-		return s
-	}
-
-	if useCache {
-		if cached, ok := m.mdCache[s]; ok {
-			return cached
-		}
-	}
-
-	pre := stripLatexMath(s)
-
-	width := m.viewport.Width()
-	if width <= 4 {
-		width = 80
-	}
-	wrap := width - 2
-	if m.mdRenderer == nil || m.mdWidth != wrap {
-		r, err := glamour.NewTermRenderer(
-			glamour.WithStyles(laylaMarkdownStyle()),
-			glamour.WithWordWrap(wrap),
-		)
-		if err != nil {
-			return s
-		}
-		m.mdRenderer = r
-		m.mdWidth = wrap
-		// Invalidate cache if width changes
-		m.mdCache = make(map[string]string)
-	}
-	out, err := m.mdRenderer.Render(pre)
-	if err != nil {
-		return s
-	}
-	res := strings.TrimRight(out, "\n")
-	if useCache {
-		m.mdCache[s] = res
-	}
-	return res
-}
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.nextFaceTick()}
@@ -2176,20 +1953,14 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			val, _ := m.kvStore.Get(lastKey)
-
-			// Map to struct
-			dataBytes, _ := json.Marshal(val)
-			var comp huffman.CompressedData
-			json.Unmarshal(dataBytes, &comp)
-
-			decompressed := huffman.Decompress(&comp)
+			archived, _ := val.(string)
 			m.history = append(m.history, api.Message{
 				Role:    "system",
-				Content: "DECOMPRESSED ARCHIVE (" + lastKey + "):\n\n" + decompressed,
+				Content: "ARCHIVE (" + lastKey + "):\n\n" + archived,
 			})
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
-			m.toast = "retrieved & decompressed"
+			m.toast = "retrieved archive"
 			return m, nil
 		case "/save":
 			m.input.Reset()
@@ -2316,489 +2087,7 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// overlayFace paints the animated mascot box on top of the base view, pinned to
-// the bottom-right corner just above the input band and footer so it never
-// covers the prompt or the mode line. It sits ON TOP of the chat (an overlay),
-// not behind it.
-func (m *Model) overlayFace(base string) string {
-	if m.width <= 0 || m.height <= 0 {
-		return base
-	}
-	face := m.faceView()
-	fw := lipgloss.Width(face)
-	fh := lipgloss.Height(face)
-	footerH := lipgloss.Height(m.footerView())
-	inputH := lipgloss.Height(m.inputView())
-	col := m.width - fw - 1
-	row := m.height - footerH - inputH - fh
-	if col < 0 {
-		col = 0
-	}
-	if row < 0 {
-		row = 0
-	}
-	return overlay(base, face, col, row)
-}
-
-func (m *Model) overlayModal(base, modal string) string {
-	if m.width <= 0 || m.height <= 0 {
-		return modal
-	}
-	mw := lipgloss.Width(modal)
-	mh := lipgloss.Height(modal)
-	col := max(0, (m.width-mw)/2)
-	row := max(0, (m.height-mh)/2)
-	return overlay(base, modal, col, row)
-}
-
-func overlay(bg, fg string, col, row int) string {
-	bgLines := strings.Split(bg, "\n")
-	fgLines := strings.Split(fg, "\n")
-	fgWidth := 0
-	for _, l := range fgLines {
-		if w := lipgloss.Width(l); w > fgWidth {
-			fgWidth = w
-		}
-	}
-	for i, fgLine := range fgLines {
-		target := row + i
-		if target < 0 || target >= len(bgLines) {
-			continue
-		}
-		bgLine := bgLines[target]
-		bgW := lipgloss.Width(bgLine)
-		need := col + fgWidth
-		if bgW < need {
-			bgLine += strings.Repeat(" ", need-bgW)
-		}
-		left := ansi.Truncate(bgLine, col, "")
-		right := ansi.TruncateLeft(bgLine, col+lipgloss.Width(fgLine), "")
-		bgLines[target] = left + fgLine + right
-	}
-	return strings.Join(bgLines, "\n")
-}
-
-func (m *Model) modalWidth() int {
-	if m.width <= 0 {
-		return 60
-	}
-	w := min(min(max(m.width*3/5, 50), 78), m.width-4)
-	return w
-}
-
-func (m *Model) modalHeader(title, hint string, innerW int) string {
-	t := modalTitleStyle.Render(title)
-	h := modalHintStyle.Render(hint)
-	pad := max(1, innerW-lipgloss.Width(t)-lipgloss.Width(h))
-	return t + modalBodyStyle.Render(strings.Repeat(" ", pad)) + h
-}
-
-func (m *Model) settingsModal() string {
-	w := m.modalWidth()
-	innerW := w - 4
-	m.urlInput.SetWidth(innerW - 6)
-	m.keyInput.SetWidth(innerW - 6)
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Connection", "esc", innerW))
-	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("URL"))
-	b.WriteString("\n")
-	b.WriteString(m.urlInput.View())
-	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("API key"))
-	b.WriteString("\n")
-	b.WriteString(m.keyInput.View())
-	b.WriteString("\n")
-	if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("using OLLAMA_API_KEY from environment", innerW)))
-	} else {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("blank for local · set for ollama.com cloud models", innerW)))
-	}
-	b.WriteString("\n\n")
-	if m.statusMsg != "" {
-		if m.statusErr {
-			b.WriteString(modalErrorStyle.Render(truncatePlain(m.statusMsg, innerW)))
-		} else {
-			b.WriteString(modalMutedStyle.Render(truncatePlain(m.statusMsg, innerW)))
-		}
-		b.WriteString("\n\n")
-	}
-	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("switch") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("connect") +
-		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
-	b.WriteString(hint)
-	return modalStyle.Width(w).Render(b.String())
-}
-
-func (m *Model) pickerModal() string {
-	w := m.modalWidth()
-	innerW := w - 4
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Select model", "esc", innerW))
-	b.WriteString("\n\n")
-
-	host := strings.TrimPrefix(strings.TrimPrefix(m.cfg.Host, "http://"), "https://")
-	b.WriteString(modalMutedStyle.Render(truncatePlain(fmt.Sprintf("on %s", host), innerW)))
-	b.WriteString("\n\n")
-
-	// Pull-in-progress view takes over the modal body.
-	if m.pulling {
-		b.WriteString(modalAccentStyle.Render(truncatePlain("Pulling "+m.pullName, innerW)))
-		b.WriteString("\n\n")
-		b.WriteString(modalMutedStyle.Render(truncatePlain(m.pullStatus, innerW)))
-		b.WriteString("\n")
-		if m.pullTotal > 0 {
-			b.WriteString(renderProgressBar(m.pullCompleted, m.pullTotal, innerW-2))
-			b.WriteString("\n")
-			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("%s / %s", humanBytes(m.pullCompleted), humanBytes(m.pullTotal))))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
-		b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("cancel"))
-		return modalStyle.Width(w).Render(b.String())
-	}
-
-	if m.pullErr != "" {
-		b.WriteString(modalErrorStyle.Render(truncatePlain("pull failed: "+m.pullErr, innerW)))
-		b.WriteString("\n")
-		if hint := pullErrorHint(m.cfg.Host, m.pullErr); hint != "" {
-			b.WriteString(modalMutedStyle.Render(ansi.Wordwrap(hint, innerW, " -")))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
-	}
-
-	if len(m.models) == 0 {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("no models installed — press p to pull one", innerW)))
-		b.WriteString("\n")
-	} else {
-		b.WriteString(modalAccentStyle.Render("Available"))
-		b.WriteString("\n")
-		view := pickerWindow(len(m.models), m.picker, 8)
-		for i := view.start; i < view.end; i++ {
-			name := m.models[i]
-			marker := "  "
-			if name == m.cfg.Model {
-				marker = modalAccentStyle.Render(" •")
-			}
-			row := truncatePlain(name, innerW-4)
-			if i == m.picker {
-				line := modalSelectStyle.Render(padCell(" "+row+" ", innerW-2))
-				b.WriteString(marker + line)
-			} else {
-				b.WriteString(marker + " " + modalBodyStyle.Render(padCell(row, innerW-3)))
-			}
-			b.WriteString("\n")
-		}
-		if view.start > 0 || view.end < len(m.models) {
-			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("   %d / %d", m.picker+1, len(m.models))))
-			b.WriteString("\n")
-		}
-	}
-
-	// Name-entry view for pulling a new model.
-	if m.pullInput.Focused() {
-		m.pullInput.SetWidth(innerW - 8)
-		b.WriteString("\n")
-		b.WriteString(modalAccentStyle.Render("Pull a model"))
-		b.WriteString("\n")
-		b.WriteString(m.pullInput.View())
-		b.WriteString("\n")
-		guide := "Use the exact tag from ollama.com — cloud models need the -cloud suffix (e.g. gpt-oss:120b-cloud)."
-		if strings.Contains(strings.ToLower(m.cfg.Host), "ollama.com") {
-			guide = "Heads up: pulling needs your local daemon (http://localhost:11434), not ollama.com. Cloud models register through the daemon after `ollama signin`."
-		}
-		b.WriteString(modalMutedStyle.Render(ansi.Wordwrap(guide, innerW, " -")))
-		b.WriteString("\n\n")
-		hint := modalMutedStyle.Render("enter ") + modalBodyStyle.Render("pull") +
-			modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
-		b.WriteString(hint)
-		return modalStyle.Width(w).Render(b.String())
-	}
-
-	b.WriteString("\n")
-	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("chat") +
-		modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull") +
-		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
-	b.WriteString(hint)
-	return modalStyle.Width(w).Render(b.String())
-}
-
-// pullErrorHint maps the common /api/pull failure modes to actionable guidance,
-// since the daemon's raw error ("file does not exist", "unauthorized") rarely
-// tells the user what to actually do. Returns "" when nothing useful applies.
-func pullErrorHint(host, errMsg string) string {
-	e := strings.ToLower(errMsg)
-	onCloudHost := strings.Contains(strings.ToLower(host), "ollama.com")
-	switch {
-	case strings.Contains(e, "unauthorized") || strings.Contains(e, "401"):
-		return "Cloud models are pulled through your LOCAL daemon (URL http://localhost:11434) after `ollama signin` — not directly against ollama.com, which only serves chat."
-	case strings.Contains(e, "manifest"), strings.Contains(e, "does not exist"), strings.Contains(e, "not found"):
-		if onCloudHost {
-			return "You can't pull from ollama.com — point the URL at your local daemon (http://localhost:11434) to register a cloud model, then chat."
-		}
-		return "Check the exact tag — cloud models need the full size and the -cloud suffix (e.g. gpt-oss:120b-cloud). Copy the name from the model's page on ollama.com."
-	default:
-		return ""
-	}
-}
-
-// humanBytes formats a byte count as a compact human-readable string.
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-// renderProgressBar draws a [#####-----] bar of the given total width.
-func renderProgressBar(completed, total int64, width int) string {
-	if width < 4 {
-		width = 4
-	}
-	inner := width - 2
-	frac := 0.0
-	if total > 0 {
-		frac = float64(completed) / float64(total)
-	}
-	if frac < 0 {
-		frac = 0
-	} else if frac > 1 {
-		frac = 1
-	}
-	filled := int(frac * float64(inner))
-	bar := "[" + strings.Repeat("#", filled) + strings.Repeat("-", inner-filled) + "]"
-	return modalAccentStyle.Render(bar) + modalMutedStyle.Render(fmt.Sprintf(" %3.0f%%", frac*100))
-}
-
-func (m *Model) helpModal() string {
-	w := m.modalWidth()
-	innerW := w - 4
-	rows := []struct{ key, desc string }{
-		{"", "Modes"},
-		{"explore", "read-only — model can only inspect"},
-		{"plan", "read + update session notes"},
-		{"write", "all tools; writes need your approval"},
-		{"auto", "autonomous — unlimited changes in workspace"},
-		{"tab", "cycle modes"},
-		{"", ""},
-		{"", "Slash commands"},
-		{"/help", "show this screen"},
-		{"/settings", "change Ollama URL"},
-		{"/model", "pick a model"},
-		{"/notes", "view session notes"},
-		{"/clear", "reset the conversation"},
-		{"/copy", "copy last response to system clipboard"},
-		{"/companion", "toggle GUI popup (speech in <-> input, replies -> TTS)"},
-		{"/save", "save current conversation to named session"},
-		{"/load", "load a saved session"},
-		{"/sessions", "list saved sessions"},
-		{"/auto", "switch to autonomous mode"},
-		{"/mode", "switch mode (explore, plan, write, auto)"},
-		{"/quit", "exit"},
-		{"", ""},
-		{"", "Keys"},
-		{"enter", "send message"},
-		{"shift+enter", "newline in input"},
-		{"shift+↑/↓", "scroll one line"},
-		{"ctrl+↑/↓", "scroll one line (alt)"},
-		{"pgup/pgdn", "page up/down"},
-		{"ctrl+u/d", "half page up/down"},
-		{"ctrl+c", "quit"},
-		{"ctrl+t", "expand/collapse tool calls in transcript"},
-		{"ctrl+s/esc", "stop a streaming response"},
-		{"", ""},
-		{"", "Permission prompts (write mode)"},
-		{"y/enter", "allow this call"},
-		{"a", "allow all calls in this turn"},
-		{"n/esc", "deny this call"},
-		{"", ""},
-		{"", "Mouse"},
-		{"click+drag", "select lines (auto-scrolls at edges)"},
-		{"release", "copy selection to clipboard"},
-		{"wheel", "scroll viewport"},
-	}
-
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Help", "esc", innerW))
-	b.WriteString("\n\n")
-	keyW := 14
-	for _, r := range rows {
-		if r.key == "" && r.desc == "" {
-			b.WriteString("\n")
-			continue
-		}
-		if r.key == "" {
-			b.WriteString(modalAccentStyle.Render(r.desc))
-			b.WriteString("\n")
-			continue
-		}
-		k := padCell(r.key, keyW)
-		b.WriteString(modalMutedStyle.Render(k))
-		b.WriteString(modalBodyStyle.Render(truncatePlain(r.desc, innerW-keyW)))
-		b.WriteString("\n")
-	}
-	hint := modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close")
-	b.WriteString("\n")
-	b.WriteString(hint)
-	return modalStyle.Width(w).Render(b.String())
-}
-
-func (m *Model) notesModal() string {
-	w := m.modalWidth()
-	innerW := w - 4
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Session notes", "esc", innerW))
-	b.WriteString("\n\n")
-	notes := m.notes.get()
-	if notes == "" {
-		b.WriteString(modalMutedStyle.Render("(empty)"))
-		b.WriteString("\n")
-		b.WriteString(modalMutedStyle.Render("The model can read/append/replace these via tools."))
-	} else {
-		for line := range strings.SplitSeq(notes, "\n") {
-			b.WriteString(modalBodyStyle.Render(truncatePlain(line, innerW)))
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString("\n")
-	b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
-	return modalStyle.Width(w).Render(b.String())
-}
-
-func (m *Model) permissionModal() string {
-	w := m.modalWidth()
-	innerW := w - 4
-
-	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
-	maxLines := max(m.height-4,
-		// absolute minimum safety boundary
-		8)
-
-	var headerSection []string
-	headerSection = append(headerSection, m.modalHeader("Tool wants to run", "n=deny", innerW))
-	headerSection = append(headerSection, "")
-
-	if m.pending == nil || m.pending.index >= len(m.pending.calls) {
-		headerSection = append(headerSection, modalMutedStyle.Render("(no pending call)"))
-		return modalStyle.Width(w).Render(strings.Join(headerSection, "\n"))
-	}
-
-	call := m.pending.calls[m.pending.index]
-	headerSection = append(headerSection, modalAccentStyle.Render(call.Function.Name))
-	headerSection = append(headerSection, "")
-
-	var footerSection []string
-	footerSection = append(footerSection, "")
-	footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("allow once   ")+
-		modalMutedStyle.Render("a ")+modalBodyStyle.Render("allow all in this turn   ")+
-		modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
-
-	// How many lines are left for arguments and preview?
-	usedLines := len(headerSection) + len(footerSection) + 2
-	availableLines := max(maxLines-usedLines,
-		// absolute minimum for args/preview
-		2)
-
-	var middleSection []string
-	args := formatToolArgs(call.Function.Arguments, innerW)
-
-	// Append arguments line-by-line, truncating if they exceed availableLines
-	for i, line := range args {
-		if len(middleSection) >= availableLines-1 && i < len(args)-1 {
-			middleSection = append(middleSection, modalMutedStyle.Render(fmt.Sprintf("... (%d more lines of arguments)", len(args)-i)))
-			break
-		}
-		middleSection = append(middleSection, modalBodyStyle.Render(line))
-	}
-
-	// If there's still room, add the preview
-	remainingForPreview := availableLines - len(middleSection)
-	if m.pending.preview != "" && remainingForPreview > 2 {
-		middleSection = append(middleSection, "")
-		middleSection = append(middleSection, modalMutedStyle.Render("Preview:"))
-		remainingForPreview -= 2
-
-		previewLines := strings.Split(m.pending.preview, "\n")
-		for i, line := range previewLines {
-			if len(middleSection) >= availableLines-1 && i < len(previewLines)-1 {
-				middleSection = append(middleSection, modalMutedStyle.Render(fmt.Sprintf("... (%d more lines of preview)", len(previewLines)-i)))
-				break
-			}
-			middleSection = append(middleSection, modalMutedStyle.Render(truncatePlain(line, innerW)))
-		}
-	}
-
-	// Build the final modal string
-	var b strings.Builder
-	for _, line := range headerSection {
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	for _, line := range middleSection {
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	for i, line := range footerSection {
-		b.WriteString(line)
-		if i < len(footerSection)-1 {
-			b.WriteString("\n")
-		}
-	}
-
-	return modalStyle.Width(w).Render(b.String())
-}
-
-func formatToolArgs(raw json.RawMessage, width int) []string {
-	if len(raw) == 0 {
-		return []string{"(no args)"}
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return []string{truncatePlain(string(raw), width)}
-	}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var out []string
-	for _, k := range keys {
-		val := fmt.Sprint(obj[k])
-		if s, ok := obj[k].(string); ok {
-			val = s
-		}
-		val = strings.ReplaceAll(val, "\n", "⏎ ")
-		line := fmt.Sprintf("%s: %s", k, val)
-		if lipgloss.Width(line) > width {
-			line = truncatePlain(line, width)
-		}
-		out = append(out, line)
-	}
-	return out
-}
-
 type windowRange struct{ start, end int }
-
-func pickerWindow(total, cursor, size int) windowRange {
-	if total <= size {
-		return windowRange{0, total}
-	}
-	start := max(cursor-size/2, 0)
-	end := start + size
-	if end > total {
-		end = total
-		start = end - size
-	}
-	return windowRange{start, end}
-}
 
 func (m *Model) viewChat() string {
 	main := m.viewport.View()
@@ -2812,30 +2101,6 @@ func (m *Model) viewChat() string {
 		m.inputView(),
 		m.footerView(),
 	)
-}
-
-func (m *Model) renderNotesMarkdown(s string, width int) string {
-	if strings.TrimSpace(s) == "" {
-		return s
-	}
-	wrap := width - 2
-	if m.mdRenderer == nil || m.mdWidth != wrap {
-		r, err := glamour.NewTermRenderer(
-			glamour.WithStyles(laylaMarkdownStyle()),
-			glamour.WithWordWrap(wrap),
-		)
-		if err != nil {
-			return s
-		}
-		m.mdRenderer = r
-		m.mdWidth = wrap
-		m.mdCache = make(map[string]string)
-	}
-	out, err := m.mdRenderer.Render(stripLatexMath(s))
-	if err != nil {
-		return s
-	}
-	return strings.TrimRight(out, "\n")
 }
 
 func (m *Model) notesView() string {
@@ -3045,15 +2310,14 @@ func (m *Model) compactContext() tea.Cmd {
 		conversation.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, msg.Content))
 	}
 
-	// Huffman compress the actual conversation before archiving
-	compressed, _ := huffman.Compress(conversation.String())
+	// Archive the raw conversation so it can be retrieved later.
 	key := fmt.Sprintf("archive_%d", time.Now().Unix())
 	if m.kvStore != nil {
-		m.kvStore.Set(key, compressed)
+		m.kvStore.Set(key, conversation.String())
 	}
 
 	var b strings.Builder
-	b.WriteString("Summarize the following conversation history concisely for context management. Focus on key decisions, file changes, and project state. (Note: The full history has been Huffman-compressed and stored in KV storage with key: " + key + ")\n\n")
+	b.WriteString("Summarize the following conversation history concisely for context management. Focus on key decisions, file changes, and project state. (Note: The full history has been archived in KV storage with key: " + key + ")\n\n")
 	b.WriteString(conversation.String())
 
 	req := api.GenerateRequest{
@@ -3594,51 +2858,6 @@ func (m *Model) switchModeTool() mcp.Tool {
 			}
 
 			return fmt.Sprintf("mode switch requested to %s", req.mode), nil
-		},
-	}
-}
-
-func readNotesTool(notes *sessionNotes) mcp.Tool {
-	return mcp.Tool{
-		Type: "function",
-		Function: mcp.Function{
-			Name:        "read_session_notes",
-			Description: "Read your persistent session notes — a scratchpad you can use to record observations, decisions, and reminders that persist across the whole conversation. Useful for keeping context when your own context window is small.",
-			Parameters:  mcp.Schema{Type: "object", Properties: map[string]mcp.Property{}},
-		},
-		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			text := notes.get()
-			if text == "" {
-				return "(empty — use update_session_notes or append_session_notes to record info)", nil
-			}
-			return text, nil
-		},
-	}
-}
-
-func updateNotesTool(notes *sessionNotes) mcp.Tool {
-	return mcp.Tool{
-		Type: "function",
-		Function: mcp.Function{
-			Name:        "update_session_notes",
-			Description: "Replace your session notes scratchpad with a new value. Use append_session_notes to add to it instead.",
-			Parameters: mcp.Schema{
-				Type: "object",
-				Properties: map[string]mcp.Property{
-					"content": {Type: "string", Description: "Full new content of the notes."},
-				},
-				Required: []string{"content"},
-			},
-		},
-		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			var a struct {
-				Content string `json:"content"`
-			}
-			if err := json.Unmarshal(args, &a); err != nil {
-				return "", fmt.Errorf("invalid arguments: %w", err)
-			}
-			notes.set(a.Content)
-			return fmt.Sprintf("notes updated (%d chars)", len(a.Content)), nil
 		},
 	}
 }
@@ -4420,61 +3639,6 @@ func lastAssistantMessage(history []api.Message) string {
 	return ""
 }
 
-func (m *Model) currentFaceMood() faceMood {
-	return inferFaceMood(m.history)
-}
-
-func inferFaceMood(history []api.Message) faceMood {
-	type moodScore struct {
-		mood  faceMood
-		score int
-	}
-	scores := map[faceMood]int{}
-	seen := 0
-	for i := len(history) - 1; i >= 0 && seen < 6; i-- {
-		msg := history[i]
-		if msg.Role != "user" && msg.Role != "assistant" {
-			continue
-		}
-		text := strings.ToLower(msg.Content)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		seen++
-		weight := 7 - seen
-		if msg.Role == "user" {
-			weight += 2
-		}
-		for mood, words := range faceMoodKeywords {
-			hits := keywordHits(text, words)
-			if hits > 0 {
-				scores[mood] += hits * weight
-			}
-		}
-	}
-	if len(scores) == 0 {
-		return faceMoodNeutral
-	}
-	ranked := []moodScore{
-		{faceMoodFrustrated, scores[faceMoodFrustrated]},
-		{faceMoodConfused, scores[faceMoodConfused]},
-		{faceMoodConcerned, scores[faceMoodConcerned]},
-		{faceMoodSurprised, scores[faceMoodSurprised]},
-		{faceMoodHappy, scores[faceMoodHappy]},
-		{faceMoodFocused, scores[faceMoodFocused]},
-	}
-	best := ranked[0]
-	for _, s := range ranked[1:] {
-		if s.score > best.score {
-			best = s
-		}
-	}
-	if best.score < 5 {
-		return faceMoodNeutral
-	}
-	return best.mood
-}
-
 var faceMoodKeywords = map[faceMood][]string{
 	faceMoodHappy: {
 		"thanks", "thank you", "great", "nice", "awesome", "excellent", "perfect",
@@ -4500,16 +3664,6 @@ var faceMoodKeywords = map[faceMood][]string{
 		"fix", "implement", "debug", "investigate", "ship", "build", "test",
 		"verify", "review", "patch", "change", "update",
 	},
-}
-
-func keywordHits(text string, keywords []string) int {
-	hits := 0
-	for _, kw := range keywords {
-		if strings.Contains(text, kw) {
-			hits++
-		}
-	}
-	return hits
 }
 
 func slashDesc(name string) string {
@@ -4851,54 +4005,6 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-func configPath() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, "ollama_code", "config.json")
-}
-
-// resolveAPIKey returns the Ollama API key to authenticate requests with. The
-// OLLAMA_API_KEY environment variable (matching the ollama CLI convention)
-// takes precedence over the saved config so it can be supplied without writing
-// the secret to disk. An empty result means unauthenticated local access.
-func resolveAPIKey(c config) string {
-	if k := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); k != "" {
-		return k
-	}
-	return strings.TrimSpace(c.APIKey)
-}
-
-func loadConfig() config {
-	var c config
-	path := configPath()
-	if path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			_ = json.Unmarshal(data, &c)
-		}
-	}
-	if strings.TrimSpace(c.Host) == "" {
-		c.Host = DefaultHost
-	}
-	return c
-}
-
-func saveConfig(c config) {
-	path := configPath()
-	if path == "" {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0o644)
-}
-
 func Run() (err error) {
 	m := New()
 	p := tea.NewProgram(m)
@@ -4918,12 +4024,6 @@ func Run() (err error) {
 	return err
 }
 
-func (m *Model) nextFaceTick() tea.Cmd {
-	return tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg {
-		return faceTickMsg(t)
-	})
-}
-
 type eyeDir int
 
 const (
@@ -4939,141 +4039,6 @@ const (
 	lidHalf
 	lidClosed
 )
-
-// pupilCell returns the 3-cell interior of one eye with the pupil placed
-// left, center, or right (see face.txt: |0  |, | 0 |, |  0|).
-func pupilCell(dir eyeDir) string {
-	switch dir {
-	case eyeLeft:
-		return "0  "
-	case eyeRight:
-		return "  0"
-	default:
-		return " 0 "
-	}
-}
-
-// renderEyes returns 4 lines (each 12 cells wide) of ASCII eyes, following the
-// design in face.txt: a pair of boxed eyes whose pupils look left/center/right,
-// with open, half-lidded (sleepy/indifferent), or closed (blink/sleep) lids.
-func renderEyes(dir eyeDir, lid eyeLid) []string {
-	blank := strings.Repeat(" ", 12)
-	pair := func(eye string) string { return eye + "  " + eye }
-	switch lid {
-	case lidClosed:
-		return []string{blank, pair(" --- "), pair(" --- "), blank}
-	case lidHalf:
-		return []string{pair(" ___ "), pair("|" + pupilCell(dir) + "|"), pair(" --- "), blank}
-	default: // open
-		return []string{pair(" --- "), pair("|   |"), pair("|" + pupilCell(dir) + "|"), pair(" --- ")}
-	}
-}
-
-// centerCells pads s to exactly w cells, centered.
-func centerCells(s string, w int) string {
-	return lipgloss.NewStyle().Width(w).Align(lipgloss.Center).Render(s)
-}
-
-// inputGazeDir maps the cursor's horizontal position in the input bar to an eye
-// direction, so the mascot's eyes follow along as you type: left of the bar ->
-// look left, middle -> center, right -> look right.
-func (m *Model) inputGazeDir() eyeDir {
-	w := m.input.Width()
-	if w <= 0 {
-		return eyeCenter
-	}
-	rel := float64(m.input.LineInfo().CharOffset) / float64(w)
-	switch {
-	case rel < 0.34:
-		return eyeLeft
-	case rel > 0.66:
-		return eyeRight
-	default:
-		return eyeCenter
-	}
-}
-
-func (m *Model) faceView() string {
-	var dir eyeDir
-	var lid eyeLid
-	var mouth string
-	var label string
-
-	f := m.faceFrame
-	switch {
-	case strings.TrimSpace(m.modelName) == "": // no model loaded — asleep
-		label = "sleeping..."
-		dir, lid = eyeCenter, lidClosed
-		z := []string{"z    ", " zZ  ", "  zZ ", "   zZ"}
-		mouth = z[(f/2)%len(z)] // slow drift
-	case m.streaming: // responding — mouth opens and closes while talking
-		label = "speaking"
-		dir, lid = eyeCenter, lidOpen
-		talk := []string{"-----", "[ - ]", "[   ]", "[ - ]"}
-		mouth = talk[f%len(talk)]
-	case m.pending != nil: // working — focused on the task
-		label = "focused"
-		lid = lidOpen
-		glance := []eyeDir{eyeLeft, eyeCenter, eyeRight, eyeCenter}
-		dir = glance[(f/3)%len(glance)] // slow, deliberate look
-		mouth = " --- "
-	default: // model loaded & idle — active, expression reflects recent activity
-		label, mouth = faceMoodFrame(m.currentFaceMood(), f)
-		lid = lidOpen
-		if strings.TrimSpace(m.input.Value()) != "" {
-			// Follow the cursor: eyes track where you are in the input bar.
-			dir = m.inputGazeDir()
-		} else {
-			// Idle: mostly still, a brief glance per ~7s cycle.
-			switch f % 16 {
-			case 4, 5:
-				dir = eyeLeft
-			case 11, 12:
-				dir = eyeRight
-			default:
-				dir = eyeCenter
-			}
-		}
-		if f%16 == 8 {
-			lid = lidClosed // single slow blink
-		}
-	}
-
-	lines := renderEyes(dir, lid)
-	lines = append(lines, "", centerCells(mouth, 12))
-	art := strings.Join(lines, "\n")
-
-	labelLine := lipgloss.NewStyle().Faint(true).Width(12).Align(lipgloss.Center).Render(label)
-
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.mode.color()).
-		Padding(0, 1).
-		Align(lipgloss.Center)
-	return boxStyle.Render(art + "\n" + labelLine)
-}
-
-// faceMoodFrame maps a conversation mood to the mascot's (label, mouth). The
-// eyes are rendered separately by renderEyes; the mood is expressed through the
-// mouth shape. frame is accepted for call-site symmetry but moods are static.
-func faceMoodFrame(mood faceMood, frame int) (string, string) {
-	switch mood {
-	case faceMoodHappy:
-		return "pleased", "\\___/"
-	case faceMoodConcerned:
-		return "concerned", " ___ "
-	case faceMoodFrustrated:
-		return "frustrated", "/^^^\\"
-	case faceMoodConfused:
-		return "puzzled", " ~?~ "
-	case faceMoodSurprised:
-		return "surprised", "  O  "
-	case faceMoodFocused:
-		return "focused", " --- "
-	default:
-		return "active", " --- "
-	}
-}
 
 func (m *Model) shouldPromptPermission(call mcp.ToolCall) bool {
 	if m.pending.allowAll {
