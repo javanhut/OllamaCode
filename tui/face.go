@@ -13,8 +13,13 @@ import (
 // the bottom-right corner just above the input band and footer so it never
 // covers the prompt or the mode line. It sits ON TOP of the chat (an overlay),
 // not behind it.
+// faceOn reports whether the mascot overlay is enabled (default true).
+func (m *Model) faceOn() bool {
+	return m.cfg.Face == nil || *m.cfg.Face
+}
+
 func (m *Model) overlayFace(base string) string {
-	if m.width <= 0 || m.height <= 0 {
+	if !m.faceOn() || m.width <= 0 || m.height <= 0 {
 		return base
 	}
 	face := m.faceView()

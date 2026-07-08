@@ -278,6 +278,7 @@ type config struct {
 	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
 	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
 	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
+	Face       *bool                   `json:"face,omitempty"`        // nil/true = mascot overlay shown
 	Verify     *bool                   `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
 	VerifyCmd  string                  `json:"verify_cmd,omitempty"`  // override the auto-detected check
 	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
@@ -554,6 +555,7 @@ var slashCommands = []struct {
 	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},
+	{"/face", "toggle the mascot overlay on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 	{"/auto", "switch to autonomous mode"},
@@ -1869,6 +1871,17 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.toast = "dream mode off"
 			} else {
 				m.toast = "dream mode on — I'll reflect after 3 min idle"
+			}
+			return m, nil
+		case "/face":
+			m.input.Reset()
+			on := !m.faceOn()
+			m.cfg.Face = &on
+			saveConfig(m.cfg)
+			if on {
+				m.toast = "face on"
+			} else {
+				m.toast = "face off"
 			}
 			return m, nil
 		case "/dreams":
