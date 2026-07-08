@@ -121,6 +121,37 @@ func TestRun_EscalatesBadArgsViaFormat(t *testing.T) {
 	}
 }
 
+func TestRun_StuckGuardBreaksAndFinalizes(t *testing.T) {
+	var seen string
+	reg := echoRegistry(&seen)
+	// The model spams the identical call. Budget is 8, but the stuck-guard should
+	// dispatch it only maxIdenticalCalls (2) times, refuse the 3rd, see no
+	// progress, and break to a tool-less finalize — returning useful output well
+	// before the step cap instead of the old "hit the limit" sentinel.
+	host := &fakeChat{responses: []api.ChatResponse{
+		toolResp("echo", `{"text":"same"}`), // dispatched (count 1)
+		toolResp("echo", `{"text":"same"}`), // dispatched (count 2)
+		toolResp("echo", `{"text":"same"}`), // refused -> no progress -> break
+		textResp("final report"),            // finalize (no tools available)
+	}}
+	res, err := Run(context.Background(), host, reg, "task", Options{Model: "m", MaxSteps: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Output != "final report" {
+		t.Fatalf("expected finalized report, got %q", res.Output)
+	}
+	if !res.HitLimit {
+		t.Fatal("expected HitLimit=true (broke via guard, didn't answer naturally)")
+	}
+	if res.Steps != 3 {
+		t.Fatalf("guard should break at step 3, not run to the cap; got %d", res.Steps)
+	}
+	if host.calls != 4 {
+		t.Fatalf("expected 4 chat calls (3 rounds + finalize), got %d", host.calls)
+	}
+}
+
 func TestRun_StepLimit(t *testing.T) {
 	var seen string
 	reg := echoRegistry(&seen)

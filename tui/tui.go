@@ -1312,7 +1312,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.index < len(m.pending.calls) {
 				call := m.pending.calls[msg.index]
 				if strings.HasPrefix(msg.result.Content, "error:") {
-					m.failedCalls[callFingerprint(call)]++
+					m.failedCalls[mcp.CallFingerprint(call)]++
 				} else if len(mcp.MutatedPaths(call.Function.Name, call.Function.Arguments)) > 0 {
 					m.turnTouchedFiles = true // a file edit succeeded → verify before finishing
 				}
@@ -3040,7 +3040,14 @@ func (m *Model) toolsForMode() []mcp.Tool {
 }
 
 func (m *Model) toolAllowedInMode(name string) bool {
-	switch m.mode {
+	return toolAllowedInMode(m.mode, name)
+}
+
+// toolAllowedInMode is the mode-gating rule as a free function so callers (e.g. a
+// sub-agent goroutine) can snapshot the mode once and evaluate it off the UI
+// goroutine without racing on m.mode.
+func toolAllowedInMode(mode Mode, name string) bool {
+	switch mode {
 	case ExploreMode:
 		return readOnlyToolNames[name] || exploreExtraToolNames[name]
 	case PlanMode:
@@ -3348,7 +3355,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 		// No-progress nudge: the model is alternating between the same two
 		// actions. Tell it once, rather than letting it spin.
-		if !m.oscillationWarned && isOscillating(m.recentCalls) {
+		if !m.oscillationWarned && mcp.IsOscillating(m.recentCalls) {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions without making progress. Stop, state your blocker explicitly, and try a different approach.",
@@ -3473,7 +3480,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 		// Short-circuit a call that has already failed identically: re-running
 		// it won't help and just burns a round-trip.
-		fp := callFingerprint(call)
+		fp := mcp.CallFingerprint(call)
 		if m.failedCalls[fp] >= maxSameCallFailures {
 			m.pending.results[i] = api.Message{
 				Role:     "tool",

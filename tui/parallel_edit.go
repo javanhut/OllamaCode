@@ -65,14 +65,26 @@ var plannerToolNames = map[string]bool{
 	"stage_delete": true,
 }
 
-// plannerAllowed is the tool gate for a planning worker: the read-only
-// sub-agent set (minus code_index, which writes an index file and would race
-// across parallel workers) plus the staging tools.
+// plannerAllowed is the tool gate for a planning worker: strictly read-only
+// tools plus the staging tools. Planners investigate and stage proposals; they
+// never apply changes (unlike a full-capability sub-agent). Excludes recursion,
+// mode/prompt/session/memory tools, and code_index (writes an index file that
+// would race across parallel workers).
 func plannerAllowed(name string) bool {
 	if plannerToolNames[name] {
 		return true
 	}
-	return subagentAllowed(name) && name != "code_index"
+	if !readOnlyToolNames[name] {
+		return false
+	}
+	switch name {
+	case "spawn_subagent", "switch_mode", "ask_user",
+		"remember", "recall", "forget",
+		"update_session_notes", "append_session_notes",
+		"code_index":
+		return false
+	}
+	return true
 }
 
 // plannerRegistry builds an isolated tool registry for one worker: the allowed

@@ -13,15 +13,15 @@ func tc(name, args string) mcp.ToolCall {
 }
 
 func TestCallFingerprint_KeyOrderStable(t *testing.T) {
-	a := callFingerprint(tc("edit_file", `{"path":"a","old_string":"x"}`))
-	b := callFingerprint(tc("edit_file", `{"old_string":"x","path":"a"}`))
+	a := mcp.CallFingerprint(tc("edit_file", `{"path":"a","old_string":"x"}`))
+	b := mcp.CallFingerprint(tc("edit_file", `{"old_string":"x","path":"a"}`))
 	if a != b {
 		t.Fatalf("fingerprints should be key-order independent:\n%s\n%s", a, b)
 	}
 }
 
 func TestCallFingerprint_DiffersByArgs(t *testing.T) {
-	if callFingerprint(tc("read_file", `{"path":"a"}`)) == callFingerprint(tc("read_file", `{"path":"b"}`)) {
+	if mcp.CallFingerprint(tc("read_file", `{"path":"a"}`)) == mcp.CallFingerprint(tc("read_file", `{"path":"b"}`)) {
 		t.Fatal("different args must produce different fingerprints")
 	}
 }
@@ -39,16 +39,16 @@ func TestBatchSingleTool(t *testing.T) {
 }
 
 func TestIsOscillating(t *testing.T) {
-	if !isOscillating([]string{"A", "B", "A", "B"}) {
+	if !mcp.IsOscillating([]string{"A", "B", "A", "B"}) {
 		t.Fatal("ABAB should be detected as oscillating")
 	}
-	if isOscillating([]string{"A", "A", "A", "A"}) {
+	if mcp.IsOscillating([]string{"A", "A", "A", "A"}) {
 		t.Fatal("AAAA is repetition, not oscillation")
 	}
-	if isOscillating([]string{"A", "B", "C", "D"}) {
+	if mcp.IsOscillating([]string{"A", "B", "C", "D"}) {
 		t.Fatal("ABCD is progress, not oscillation")
 	}
-	if isOscillating([]string{"A", "B"}) {
+	if mcp.IsOscillating([]string{"A", "B"}) {
 		t.Fatal("too short to oscillate")
 	}
 }
