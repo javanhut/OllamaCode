@@ -2,9 +2,6 @@ package tui
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/javanhut/ollama_code/mcp"
@@ -90,50 +87,6 @@ func isOscillating(recent []string) bool {
 	return a == c && b == d && a != b
 }
 
-var (
-	codeFenceRe   = regexp.MustCompile("(?s)```[a-zA-Z]*\\s*(.*?)\\s*```")
-	trailingComma = regexp.MustCompile(`,(\s*[}\]])`)
-)
-
-// salvageJSON makes a conservative, best-effort attempt to repair almost-valid
-// tool arguments emitted by weak models: it strips ```json fences, trims to the
-// outermost {...}, and removes trailing commas. The repaired value is returned
-// ONLY if it newly parses as valid JSON; otherwise the original is returned
-// untouched. It never rewrites string contents, so it can't corrupt values.
-func salvageJSON(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 || json.Valid(raw) {
-		return raw
-	}
-	s := string(raw)
-	if m := codeFenceRe.FindStringSubmatch(s); m != nil {
-		s = m[1]
-	}
-	if i := strings.IndexByte(s, '{'); i >= 0 {
-		if j := strings.LastIndexByte(s, '}'); j > i {
-			s = s[i : j+1]
-		}
-	}
-	s = trailingComma.ReplaceAllString(s, "$1")
-	if json.Valid([]byte(s)) {
-		return json.RawMessage(s)
-	}
-	return raw
-}
-
-// repairHint turns a tool error into model-actionable feedback. Validation
-// errors already render a named, schema-aware message; broken-JSON arguments get
-// explicit guidance to resend a single object; everything else passes through.
-func repairHint(call mcp.ToolCall, err error) string {
-	var ve *mcp.ValidationError
-	if errors.As(err, &ve) {
-		return "error: " + ve.Error()
-	}
-	if len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments) {
-		raw := string(call.Function.Arguments)
-		if len(raw) > 300 {
-			raw = raw[:300] + "…"
-		}
-		return fmt.Sprintf("error: arguments for %q were not valid JSON: %s\nResend ONLY a single JSON object with the tool's exact fields.", call.Function.Name, raw)
-	}
-	return fmt.Sprintf("error: %v. Check the arguments and try again.", err)
-}
+// salvageJSON, repairHint, and shouldFormatRepair moved to package mcp
+// (SalvageJSON/RepairHint/ShouldFormatRepair) so the headless sub-agent loop can
+// reuse the same tool-call robustness. See mcp/repair.go.

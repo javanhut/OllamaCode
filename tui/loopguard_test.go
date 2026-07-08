@@ -63,20 +63,20 @@ func TestSalvageJSON(t *testing.T) {
 		{"here you go: {\"path\":\"x\"} thanks", `{"path":"x"}`}, // surrounding prose
 	}
 	for _, c := range cases {
-		got := string(salvageJSON(json.RawMessage(c.in)))
+		got := string(mcp.SalvageJSON(json.RawMessage(c.in)))
 		if !json.Valid([]byte(got)) {
-			t.Errorf("salvageJSON(%q) produced invalid JSON %q", c.in, got)
+			t.Errorf("mcp.SalvageJSON(%q) produced invalid JSON %q", c.in, got)
 			continue
 		}
 		if got != c.want {
-			t.Errorf("salvageJSON(%q)=%q want %q", c.in, got, c.want)
+			t.Errorf("mcp.SalvageJSON(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }
 
 func TestSalvageJSON_UnrepairableUnchanged(t *testing.T) {
 	in := json.RawMessage(`not json at all`)
-	if string(salvageJSON(in)) != string(in) {
+	if string(mcp.SalvageJSON(in)) != string(in) {
 		t.Fatal("unrepairable input must be returned unchanged")
 	}
 }
@@ -87,7 +87,7 @@ func TestRepairHint_ValidationError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	hint := repairHint(call, err)
+	hint := mcp.RepairHint(call, err)
 	if !errorsContains(hint, "new_string") {
 		t.Fatalf("repair hint should name the missing field: %s", hint)
 	}
@@ -95,7 +95,7 @@ func TestRepairHint_ValidationError(t *testing.T) {
 
 func TestRepairHint_BrokenJSON(t *testing.T) {
 	call := tc("read_file", `{"path": broken`)
-	hint := repairHint(call, errors.New("invalid arguments"))
+	hint := mcp.RepairHint(call, errors.New("invalid arguments"))
 	if !errorsContains(hint, "valid JSON") {
 		t.Fatalf("expected broken-JSON guidance, got: %s", hint)
 	}

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/mcp"
 )
 
 // Dream-mode tuning.
@@ -107,7 +108,7 @@ func (m *Model) dreamCmd() tea.Cmd {
 			ConsolidatedNotes string      `json:"consolidated_notes"`
 			LongTermFacts     []string    `json:"long_term_facts"`
 		}
-		raw := salvageJSON(json.RawMessage(strings.TrimSpace(resp.Message.Content)))
+		raw := mcp.SalvageJSON(json.RawMessage(strings.TrimSpace(resp.Message.Content)))
 		if json.Unmarshal(raw, &out) != nil || strings.TrimSpace(out.Summary) == "" {
 			// Fall back: treat the whole reply as a freeform dream summary.
 			text := strings.TrimSpace(resp.Message.Content)

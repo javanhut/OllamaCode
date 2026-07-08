@@ -3230,7 +3230,7 @@ func extractShellCommand(raw json.RawMessage) string {
 func (m *Model) invokeTool(ctx context.Context, call mcp.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
 	// Best-effort repair of almost-valid JSON arguments before dispatch.
-	call.Function.Arguments = salvageJSON(call.Function.Arguments)
+	call.Function.Arguments = mcp.SalvageJSON(call.Function.Arguments)
 	// Checkpoint affected files before a mutating tool runs, so /undo can revert.
 	if paths := mcp.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
 		m.snapshotBeforeMutate(paths)
@@ -3238,14 +3238,14 @@ func (m *Model) invokeTool(ctx context.Context, call mcp.ToolCall) api.Message {
 	result, err := m.tools.Invoke(ctx, call)
 	// Last-resort escalation: if the failure is an argument problem, ask the
 	// model for schema-valid arguments via constrained decoding and retry once.
-	if err != nil && m.shouldFormatRepair(call, err) {
+	if err != nil && mcp.ShouldFormatRepair(call, err) {
 		if fixed, ok := m.repairArgsViaFormat(call); ok {
 			call.Function.Arguments = fixed
 			result, err = m.tools.Invoke(ctx, call)
 		}
 	}
 	if err != nil {
-		result = repairHint(call, err)
+		result = mcp.RepairHint(call, err)
 	}
 	return api.Message{
 		Role:     "tool",

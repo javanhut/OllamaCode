@@ -95,6 +95,32 @@ func TestRun_ToolFilterBlocks(t *testing.T) {
 	}
 }
 
+func TestRun_EscalatesBadArgsViaFormat(t *testing.T) {
+	var seen string
+	reg := echoRegistry(&seen)
+	// Round 1: model emits invalid-JSON args -> Invoke fails validation ->
+	// escalation asks for a fix (2nd response, schema-constrained) -> retry
+	// succeeds. Round 2: model answers.
+	host := &fakeChat{responses: []api.ChatResponse{
+		toolResp("echo", `{"text": bad}`), // malformed
+		textResp(`{"text":"fixed"}`),      // format-repair reply
+		textResp("done"),                  // final answer
+	}}
+	res, err := Run(context.Background(), host, reg, "do it", Options{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != "fixed" {
+		t.Fatalf("escalation should have repaired args and dispatched; seen=%q", seen)
+	}
+	if res.Output != "done" {
+		t.Fatalf("output=%q", res.Output)
+	}
+	if host.calls != 3 {
+		t.Fatalf("expected 3 chat calls (call, repair, answer), got %d", host.calls)
+	}
+}
+
 func TestRun_StepLimit(t *testing.T) {
 	var seen string
 	reg := echoRegistry(&seen)

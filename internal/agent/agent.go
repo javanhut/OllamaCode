@@ -82,9 +82,19 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 					Content: "error: tool not permitted for this agent"})
 				continue
 			}
+			// Mirror the TUI loop's tool-call robustness so weak models behave here
+			// too: salvage almost-valid JSON, escalate argument errors to
+			// constrained decoding, and feed back actionable hints on failure.
+			c.Function.Arguments = mcp.SalvageJSON(c.Function.Arguments)
 			out, err := reg.Invoke(ctx, c)
+			if err != nil && mcp.ShouldFormatRepair(c, err) {
+				if fixed, ok := RepairArgsViaFormat(ctx, host, reg, opts.Model, opts.NumCtx, c); ok {
+					c.Function.Arguments = fixed
+					out, err = reg.Invoke(ctx, c)
+				}
+			}
 			if err != nil {
-				out = "error: " + err.Error()
+				out = mcp.RepairHint(c, err)
 			}
 			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: out})
 		}
