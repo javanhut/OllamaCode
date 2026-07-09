@@ -353,9 +353,10 @@ type companionErrorMsg struct{ err error }
 type companionStoppedMsg struct{}
 
 type streamState struct {
-	resp   <-chan api.ChatResponse
-	errs   <-chan error
-	cancel context.CancelFunc
+	resp        <-chan api.ChatResponse
+	errs        <-chan error
+	cancel      context.CancelFunc
+	modelSource string // "local" or "cloud" — set at stream start for error diagnosis
 }
 
 // pullStreamState tracks an in-flight model download driven from the picker.
@@ -1429,6 +1430,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Role:    "assistant",
 					Content: finalAssistant,
 				})
+			} else {
+				m.lastError = "model returned empty response — stream may have been interrupted"
+				m.logActivity("WARNING: empty model response (stream ended with no content)")
 			}
 			m.refreshTranscript()
 			if m.companion != nil && finalAssistant != "" {
@@ -1495,7 +1499,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case chatErrMsg:
-		m.lastError = fmt.Sprintf("error: %v", msg.err)
+		source := "local"
+		if strings.Contains(m.host.URL(), "ollama.com") {
+			source = "cloud"
+		}
+		m.lastError = fmt.Sprintf("[%s] error: %v", source, msg.err)
 		m.streaming = false
 		m.stream = nil
 		m.compacting = false
@@ -2519,7 +2527,11 @@ func (m *Model) waitForStream() tea.Cmd {
 			if s.cancel != nil {
 				s.cancel()
 			}
-			return chatErrMsg{err: fmt.Errorf("model stream idle timeout after %s with no response", modelStreamIdleTimeout)}
+			err := fmt.Errorf("stream idle timeout after %s — no response from model", modelStreamIdleTimeout)
+			if s.modelSource != "" {
+				err = fmt.Errorf("stream idle timeout after %s — no response from %s model", modelStreamIdleTimeout, s.modelSource)
+			}
+			return chatErrMsg{err: err}
 		}
 	}
 }
@@ -2586,7 +2598,11 @@ func (m *Model) startStream() tea.Cmd {
 		Tools:    tools,
 		Options:  m.chatOptions(),
 	})
-	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel}
+	source := "local"
+	if strings.Contains(m.host.URL(), "ollama.com") {
+		source = "cloud"
+	}
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source}
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.lastRenderTime = time.Time{}

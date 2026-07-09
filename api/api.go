@@ -166,6 +166,10 @@ func (o *OllamaHost) SetURI(uri string) {
 	o.uri = uri
 }
 
+func (o *OllamaHost) URL() string {
+	return o.uri
+}
+
 // SetAPIKey sets the bearer token used to authenticate requests. It is required
 // to reach Ollama Cloud (https://ollama.com) directly and is harmless for a
 // local daemon, which ignores it — so the same client serves local and cloud
@@ -322,6 +326,7 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 			return
 		}
 
+		sawDone := false
 		decoder := json.NewDecoder(resp.Body)
 
 		for {
@@ -333,6 +338,9 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 				err := decoder.Decode(&chunk)
 				if err != nil {
 					if err == io.EOF {
+						if !sawDone {
+							errChan <- fmt.Errorf("stream ended unexpectedly (connection closed before final chunk)")
+						}
 						return
 					}
 					errChan <- fmt.Errorf("error decoding stream chunk: %v", err)
@@ -340,6 +348,7 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 				}
 
 				respChan <- chunk
+				sawDone = chunk.Done
 
 				if chunk.Done {
 					return

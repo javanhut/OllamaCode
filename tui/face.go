@@ -13,14 +13,14 @@ import (
 // the bottom-right corner just above the input band and footer so it never
 // covers the prompt or the mode line. It sits ON TOP of the chat (an overlay),
 // not behind it.
-// faceOn reports whether the mascot overlay is enabled (default true).
+// faceOn reports whether the mascot overlay is enabled (default off).
 func (m *Model) faceOn() bool {
-	return m.cfg.Face == nil || *m.cfg.Face
+	return m.cfg.Face != nil && *m.cfg.Face
 }
 
-// welcomeOn reports whether the empty-chat welcome panel is shown (default true).
+// welcomeOn reports whether the empty-chat welcome panel is shown (default off).
 func (m *Model) welcomeOn() bool {
-	return m.cfg.Welcome == nil || *m.cfg.Welcome
+	return m.cfg.Welcome != nil && *m.cfg.Welcome
 }
 
 func (m *Model) overlayFace(base string) string {
