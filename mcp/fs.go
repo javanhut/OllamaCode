@@ -173,6 +173,15 @@ func readDirRecursive(root string) (string, error) {
 			filesSkipped++
 			return nil
 		}
+		// Skip dot entries (hidden files/dirs) to avoid bogging the model down
+		// in config files, version control, etc.
+		if name := d.Name(); strings.HasPrefix(name, ".") && path != root {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			filesSkipped++
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}
@@ -314,17 +323,19 @@ func ListDirectoryTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "list_directory",
-			Description: "List the immediate entries of a directory (non-recursive). One entry per line; directories are suffixed with '/'. Use ONLY when the user explicitly asks to list/inspect directory structure. If you actually want file contents, call read_file on the directory — it recurses automatically.",
+			Description: "List the immediate entries of a directory (non-recursive). One entry per line; directories are suffixed with '/'. Dot entries (names starting with '.') are hidden by default. Use ONLY when the user explicitly asks to list/inspect directory structure. If you actually want file contents, call read_file on the directory — it recurses automatically.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
-					"path": {Type: "string", Description: "Absolute or relative path to the directory. Defaults to the current working directory."},
+					"path":           {Type: "string", Description: "Absolute or relative path to the directory. Defaults to the current working directory."},
+					"include_hidden": {Type: "boolean", Description: "Show dot entries (names starting with '.'). Default false."},
 				},
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var a struct {
-				Path string `json:"path"`
+				Path          string `json:"path"`
+				IncludeHidden bool   `json:"include_hidden"`
 			}
 			if len(args) > 0 {
 				if err := json.Unmarshal(args, &a); err != nil {
@@ -342,6 +353,9 @@ func ListDirectoryTool() Tool {
 			out := make([]string, 0, len(entries))
 			for _, e := range entries {
 				name := e.Name()
+				if !a.IncludeHidden && strings.HasPrefix(name, ".") {
+					continue
+				}
 				if e.IsDir() {
 					name += "/"
 				}
@@ -555,6 +569,9 @@ func GrepTool() Tool {
 			if recursive {
 				argv = append(argv, "-r")
 			}
+			// Skip dot files and dot directories so the model doesn't waste
+			// context on hidden/config files unless explicitly needed.
+			argv = append(argv, "--exclude-dir=.*", "--exclude=.*")
 			if a.FileTypes != "" {
 				for ft := range strings.SplitSeq(a.FileTypes, ",") {
 					ft = strings.TrimSpace(ft)
@@ -942,6 +959,14 @@ func GetProjectTreeTool() Tool {
 					return nil
 				}
 				if path != root && gi.IsIgnored(path) {
+					if d.IsDir() {
+						skippedDirs++
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				// Skip dot entries so the tree stays focused on project code.
+				if name := d.Name(); strings.HasPrefix(name, ".") && path != root {
 					if d.IsDir() {
 						skippedDirs++
 						return filepath.SkipDir

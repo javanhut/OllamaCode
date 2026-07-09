@@ -715,7 +715,7 @@ func New() *Model {
 		md:           newMarkdownRenderer(),
 		notesMd:      newMarkdownRenderer(),
 		faceMoodLen:  -1, // force first mood computation
-		expandTools:  true,
+		expandTools:  false,
 		lastActivity: time.Now(),
 		faceLastKey:  time.Now(),
 	}
