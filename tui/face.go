@@ -10,9 +10,9 @@ import (
 )
 
 // overlayFace paints the animated mascot box on top of the base view, pinned to
-// the bottom-right corner just above the input band and footer so it never
-// covers the prompt or the mode line. It sits ON TOP of the chat (an overlay),
-// not behind it.
+// the bottom-right corner of the transcript — just above the input band and left
+// of the sidebar, so it covers neither the prompt nor the panel. It sits ON TOP
+// of the chat (an overlay), not behind it.
 // faceOn reports whether the mascot overlay is enabled (default off).
 func (m *Model) faceOn() bool {
 	return m.cfg.Face != nil && *m.cfg.Face
@@ -30,10 +30,9 @@ func (m *Model) overlayFace(base string) string {
 	face := m.faceView()
 	fw := lipgloss.Width(face)
 	fh := lipgloss.Height(face)
-	footerH := lipgloss.Height(m.footerView())
 	inputH := lipgloss.Height(m.inputView())
-	col := m.width - fw - 1
-	row := m.height - footerH - inputH - fh
+	col := m.width - m.sidebarSpace() - fw - 1
+	row := m.height - inputH - fh
 	if col < 0 {
 		col = 0
 	}

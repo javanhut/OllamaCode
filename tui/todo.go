@@ -129,9 +129,9 @@ func todoWriteTool(list *todoList) mcp.Tool {
 	}
 }
 
-// todoView renders the checklist for the transcript footer. Empty when there are
-// no todos.
-func (m *Model) todoView() string {
+// todoSidebar renders the checklist as a sidebar block, one line per step.
+// Empty when there are no todos.
+func (m *Model) todoSidebar(inner int) string {
 	items := m.todos.get()
 	if len(items) == 0 {
 		return ""
@@ -143,20 +143,18 @@ func (m *Model) todoView() string {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(mutedStyle.Render(strings.Repeat("─", 28)))
-	b.WriteString("\n")
-	b.WriteString(headingStyle.Render(fmt.Sprintf("Tasks (%d/%d)", done, len(items))))
-	b.WriteString("\n")
+	b.WriteString(m.sidebarHeading(fmt.Sprintf("Tasks (%d/%d)", done, len(items))))
 	for _, it := range items {
+		text := truncatePlain(it.Content, inner-2)
+		b.WriteString("\n")
 		switch it.Status {
 		case todoCompleted:
-			b.WriteString(mutedStyle.Render("  ✔ " + it.Content))
+			b.WriteString(mutedStyle.Render("✔ " + text))
 		case todoInProgress:
-			b.WriteString(bodyStyle.Copy().Bold(true).Render("  ▶ " + it.Content))
+			b.WriteString(bodyStyle.Copy().Bold(true).Render("▶ " + text))
 		default:
-			b.WriteString(bodyStyle.Render("  ☐ " + it.Content))
+			b.WriteString(bodyStyle.Render("☐ " + text))
 		}
-		b.WriteString("\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }

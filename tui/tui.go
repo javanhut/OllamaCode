@@ -551,7 +551,7 @@ var slashCommands = []struct {
 	{"/clear", "reset the conversation"},
 	{"/help", "show help screen"},
 	{"/?", "show help screen"},
-	{"/notes", "toggle session notes panel"},
+	{"/notes", "toggle session notes in the sidebar"},
 	{"/diff", "view last turn's file diffs"},
 	{"/companion", "toggle speech-to-text input"},
 	{"/copy", "copy last response to clipboard"},
@@ -800,12 +800,6 @@ func (m *Model) refreshTranscript() {
 	if m.lastError != "" {
 		b.WriteString("\n")
 		b.WriteString(errorStyle.Render(m.lastError))
-		b.WriteString("\n")
-	}
-
-	if todo := m.todoView(); todo != "" {
-		b.WriteString("\n")
-		b.WriteString(todo)
 		b.WriteString("\n")
 	}
 
@@ -2213,37 +2207,15 @@ type windowRange struct{ start, end int }
 
 func (m *Model) viewChat() string {
 	main := m.viewport.View()
-	if m.showNotes {
-		main = lipgloss.JoinHorizontal(lipgloss.Top, main, "  ", m.notesView())
+	if bar := m.sidebarView(m.viewport.Height()); bar != "" {
+		main = lipgloss.JoinHorizontal(lipgloss.Top, main, sidebarGap, bar)
 	}
 	return fmt.Sprintf(
-		"%s\n%s\n%s\n%s",
+		"%s\n%s\n%s",
 		m.headerView(),
 		main,
 		m.inputView(),
-		m.footerView(),
 	)
-}
-
-func (m *Model) notesView() string {
-	if !m.showNotes {
-		return ""
-	}
-	c := m.mode.color()
-	w := 30
-	if m.width < 60 {
-		w = m.width / 2
-	}
-
-	style := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(c).
-		Padding(0, 1).
-		Width(w).
-		Height(m.viewport.Height())
-
-	title := headingStyle.Copy().Foreground(c).Render("Notes")
-	return style.Render(title + "\n\n" + m.notesViewport.View())
 }
 
 func (m *Model) layout() {
@@ -2254,25 +2226,12 @@ func (m *Model) layout() {
 	m.keyInput.SetWidth(min(m.width-6, 80))
 	m.pullInput.SetWidth(min(m.width-6, 80))
 	headerH := lipgloss.Height(m.headerView())
-	footerH := lipgloss.Height(m.footerView())
 	inputH := max(lipgloss.Height(m.inputView()), 2)
-	vpH := max(m.height-headerH-footerH-inputH, 1)
+	vpH := max(m.height-headerH-inputH, 1)
 
-	vpW := m.width
-	notesW := 30
-	if m.showNotes {
-		if m.width < 60 {
-			notesW = m.width / 2
-		}
-		vpW -= (notesW + 2)
-	}
-	if vpW < 10 {
-		vpW = 10
-	}
-
-	notesVH := max(
-		// subtract title and padding
-		vpH-4, 1)
+	vpW := max(m.width-m.sidebarSpace(), 10)
+	notesW := max(sidebarInner(m.sidebarWidth()), 1)
+	notesVH := m.sidebarNotesHeight(vpH)
 
 	// Diff viewer fills most of the screen (modal-width box, minus border/header).
 	diffVW := max(m.modalWidth()-2, 20)
@@ -2298,7 +2257,7 @@ func (m *Model) layout() {
 		m.viewport.SelectedHighlightStyle = m.viewport.HighlightStyle
 
 		m.notesViewport = viewport.New(
-			viewport.WithWidth(notesW-4), // account for border and padding
+			viewport.WithWidth(notesW),
 			viewport.WithHeight(notesVH),
 		)
 		m.diffViewport = viewport.New(
@@ -2308,7 +2267,7 @@ func (m *Model) layout() {
 	} else {
 		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
-		m.notesViewport.SetWidth(notesW - 4)
+		m.notesViewport.SetWidth(notesW)
 		m.notesViewport.SetHeight(notesVH)
 		m.diffViewport.SetWidth(diffVW)
 		m.diffViewport.SetHeight(diffVH)
@@ -2743,15 +2702,9 @@ func (m *Model) headerView() string {
 		modelText = ""
 	}
 	model := bodyStyle.Copy().Background(surfaceColor).Bold(true).Render(modelText)
-	mode := lipgloss.NewStyle().
-		Background(panelColor).
-		Foreground(c).
-		Bold(true).
-		Padding(0, 1).
-		Render(m.mode.String())
 
-	right := mode
-	metaSpace := width - lipgloss.Width(brand) - lipgloss.Width(model) - lipgloss.Width(right) - 3
+	right := ""
+	metaSpace := width - lipgloss.Width(brand) - lipgloss.Width(model) - 3
 	branch := ""
 	if m.gitBranch != "" && metaSpace > 4 {
 		branch = "  " + truncatePlain(m.gitBranch, metaSpace-2)
@@ -2791,72 +2744,10 @@ func (m *Model) currentToolLabel() string {
 	return m.pending.calls[m.pending.done].Function.Name
 }
 
-func (m *Model) footerView() string {
-	c := m.mode.color()
-	status := " READY "
-	switch {
-	case m.pending != nil:
-		if label := m.currentToolLabel(); label != "" {
-			status = fmt.Sprintf(" %s TOOLS %d/%d · %s%s ", m.spinner.View(), m.pending.done, len(m.pending.calls), label, m.elapsedSuffix())
-		} else {
-			status = fmt.Sprintf(" %s TOOLS %d/%d%s ", m.spinner.View(), m.pending.done, len(m.pending.calls), m.elapsedSuffix())
-		}
-	case m.streaming && m.streamBuf.Len() == 0:
-		status = fmt.Sprintf(" %s THINKING%s ", m.spinner.View(), m.elapsedSuffix())
-	case m.streaming:
-		status = fmt.Sprintf(" %s STREAMING%s ", m.spinner.View(), m.elapsedSuffix())
-	case m.verifying:
-		status = fmt.Sprintf(" %s VERIFYING%s ", m.spinner.View(), m.elapsedSuffix())
-	case m.dreaming:
-		status = fmt.Sprintf(" %s DREAMING ", m.spinner.View())
-	case m.asleep:
-		status = fmt.Sprintf(" ASLEEP · %d dreams ", len(m.pendingDreams))
-	}
-	info := lipgloss.NewStyle().
-		Background(c).
-		Foreground(lipgloss.Color("232")).
-		Bold(true).
-		Render(status)
-
-	tokens := ""
-	if m.totalTokens > 0 {
-		tokens = fmt.Sprintf(" %dk / %dk ", m.totalTokens/1000, m.contextLimit/1000)
-		if m.totalTokens > m.contextLimit*8/10 {
-			tokens = errorStyle.Render(tokens)
-		} else {
-			tokens = mutedStyle.Render(tokens)
-		}
-	}
-
-	hintText := fmt.Sprintf(" mode: %s · tab switch · ctrl+t tools · /help · enter send ", m.mode)
-	if m.toast != "" {
-		hintText = " " + m.toast + " "
-	}
-	width := m.width
-	if width <= 0 {
-		width = lipgloss.Width(info) + lipgloss.Width(hintText) + lipgloss.Width(tokens)
-	}
-	hintText = truncatePlain(hintText, max(0, width-lipgloss.Width(info)-lipgloss.Width(tokens)))
-	hint := hintStyle.Copy().Background(surfaceColor).Render(hintText)
-	pad := max(0, width-lipgloss.Width(info)-lipgloss.Width(hint)-lipgloss.Width(tokens))
-	tokenView := chromeStyle.Render(tokens)
-	row := hint + chromeStyle.Render(strings.Repeat(" ", pad)) + tokenView + info
-	rule := borderStyle.Render(strings.Repeat("─", width))
-	return rule + "\n" + chromeStyle.Width(width).Render(row)
-}
-
 func (m *Model) contentLineAt(x, y int) int {
-	vpW := m.width
-	if m.showNotes {
-		notesW := 30
-		if m.width < 60 {
-			notesW = m.width / 2
-		}
-		vpW -= (notesW + 2)
-	}
-
+	vpW := max(m.width-m.sidebarSpace(), 10)
 	if x >= vpW {
-		return -1 // Clicked in notes or border
+		return -1 // Clicked in the sidebar or the gap
 	}
 
 	headerH := lipgloss.Height(m.headerView())
