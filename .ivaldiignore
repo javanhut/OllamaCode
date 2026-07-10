@@ -18,3 +18,4 @@ go.sum
 ehthumbs.db
 Thumbs.db
 .*antigravity*/
+.lazy/
