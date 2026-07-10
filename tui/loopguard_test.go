@@ -3,8 +3,10 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/mcp"
 )
 
@@ -112,4 +114,54 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestDedupeCalls(t *testing.T) {
+	// Exact duplicate (key order differs) dropped; distinct args kept; order preserved.
+	got := dedupeCalls([]mcp.ToolCall{
+		tc("edit_file", `{"path":"a","old_string":"x"}`),
+		tc("read_file", `{"path":"b"}`),
+		tc("edit_file", `{"old_string":"x","path":"a"}`),
+		tc("read_file", `{"path":"c"}`),
+	})
+	if len(got) != 3 {
+		t.Fatalf("expected 3 calls after dedupe, got %d", len(got))
+	}
+	if got[0].Function.Name != "edit_file" || got[1].Function.Arguments[9] != 'b' || got[2].Function.Arguments[9] != 'c' {
+		t.Fatalf("dedupe changed order or kept wrong calls: %+v", got)
+	}
+}
+
+// TestStaleMessagesDropped: async messages from a cancelled/replaced turn (gen
+// mismatch) must not touch the current turn's state — the straggler-corruption
+// guard in Update.
+func TestStaleMessagesDropped(t *testing.T) {
+	m := &Model{mode: ExploreMode, turnGen: 2, streamBuf: &strings.Builder{}}
+	m.pending = &pendingBatch{
+		gen:     2,
+		calls:   []mcp.ToolCall{tc("read_file", `{"path":"a"}`), tc("read_file", `{"path":"b"}`)},
+		results: make([]api.Message, 2),
+		started: []bool{true, true},
+	}
+
+	// Stale tool result: valid index, old gen. Must not count or store.
+	next, _ := m.Update(toolResultMsg{gen: 1, index: 0, result: api.Message{Role: "tool", Content: "stale"}})
+	m = next.(*Model)
+	if m.pending.done != 0 || m.pending.results[0].Content != "" {
+		t.Fatalf("stale toolResultMsg was applied: done=%d results[0]=%q", m.pending.done, m.pending.results[0].Content)
+	}
+
+	// Stale stream chunk: must not land in the buffer.
+	next, _ = m.Update(chatChunkMsg{gen: 1, content: "stale text"})
+	m = next.(*Model)
+	if m.streamBuf.Len() != 0 {
+		t.Fatalf("stale chatChunkMsg wrote to streamBuf: %q", m.streamBuf.String())
+	}
+
+	// Stale error (e.g. "context canceled" after esc): no error surfaced, no retry.
+	next, _ = m.Update(chatErrMsg{gen: 1, err: errors.New("context canceled")})
+	m = next.(*Model)
+	if m.lastError != "" || m.streamRetries != 0 {
+		t.Fatalf("stale chatErrMsg was applied: lastError=%q retries=%d", m.lastError, m.streamRetries)
+	}
 }

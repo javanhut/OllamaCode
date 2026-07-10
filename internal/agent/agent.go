@@ -88,6 +88,7 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 			res.Output = resp.Message.Content
 			return res, nil
 		}
+		calls = mcp.DedupeCalls(calls)
 
 		res.Steps++
 		msgs = append(msgs, api.Message{Role: "assistant", Content: resp.Message.Content, ToolCalls: calls})

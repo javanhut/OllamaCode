@@ -10,6 +10,7 @@ const (
 	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
 	recentCallsKept     = 12 // fingerprint ring length for oscillation detection
 	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
+	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
 )
 
 func maxStepsFromConfig(c config) int {
@@ -23,6 +24,7 @@ func maxStepsFromConfig(c config) int {
 // every new user turn (fresh submit or a dequeued message).
 func (m *Model) resetTurnGuards() {
 	m.stepCount = 0
+	m.streamRetries = 0
 	m.recentCalls = m.recentCalls[:0]
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
@@ -36,6 +38,9 @@ func (m *Model) resetTurnGuards() {
 		delete(m.failedCalls, k)
 	}
 }
+
+// dedupeCalls: see mcp.DedupeCalls (shared with the headless sub-agent loop).
+func dedupeCalls(calls []mcp.ToolCall) []mcp.ToolCall { return mcp.DedupeCalls(calls) }
 
 // batchSingleTool returns the tool name if every call in a batch is the same
 // tool, else "". Used to detect a model spamming one tool (e.g. switch_mode)

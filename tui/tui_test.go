@@ -161,7 +161,7 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 	})
 
 	start := time.Now()
-	raw := m.invokeToolCmd(0, mcp.ToolCall{
+	raw := m.invokeToolCmd(0, 0, mcp.ToolCall{
 		Function: mcp.ToolCallFunction{
 			Name:      "stuck_tool",
 			Arguments: json.RawMessage(`{}`),

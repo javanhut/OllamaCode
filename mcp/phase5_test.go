@@ -72,3 +72,13 @@ func TestUnifiedDiff(t *testing.T) {
 		t.Fatal("identical content should produce empty diff")
 	}
 }
+
+func TestUnifiedDiffHunkHeader(t *testing.T) {
+	// Change line 5 of a 9-line file: hunk starts at line 2 (3 lines of context).
+	old := "1\n2\n3\n4\nx\n6\n7\n8\n9\n"
+	new := "1\n2\n3\n4\ny\n6\n7\n8\n9\n"
+	diff := unifiedDiff(old, new, "f.txt")
+	if !strings.Contains(diff, "@@ -2,7 +2,7 @@") {
+		t.Fatalf("want hunk header @@ -2,7 +2,7 @@, got:\n%s", diff)
+	}
+}

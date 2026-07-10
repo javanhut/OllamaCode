@@ -104,18 +104,19 @@ func (m *Model) dreamSidebar(inner int) string {
 	if !m.asleep && !m.dreaming && len(m.dreams) == 0 {
 		return ""
 	}
-	b := m.sidebarHeading(fmt.Sprintf("Dreams (%d)", len(m.dreams)))
+	var b strings.Builder
+	b.WriteString(m.sidebarHeading(fmt.Sprintf("Dreams (%d)", len(m.dreams))))
 	switch {
 	case m.dreaming:
-		b += "\n" + mutedStyle.Render("reflecting…")
+		b.WriteString("\n" + mutedStyle.Render("reflecting…"))
 	case m.asleep:
-		b += "\n" + mutedStyle.Render(fmt.Sprintf("asleep · %d pending", len(m.pendingDreams)))
+		b.WriteString("\n" + mutedStyle.Render(fmt.Sprintf("asleep · %d pending", len(m.pendingDreams))))
 	}
 	start := max(len(m.dreams)-3, 0)
 	for _, d := range m.dreams[start:] {
-		b += "\n" + mutedStyle.Render("· "+truncatePlain(d.summary, inner-2))
+		b.WriteString("\n" + mutedStyle.Render("· "+truncatePlain(d.summary, inner-2)))
 	}
-	return b
+	return b.String()
 }
 
 func (m *Model) sidebarKeys() string {

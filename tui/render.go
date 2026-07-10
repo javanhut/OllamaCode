@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -47,14 +48,21 @@ func diffLineKind(ln string) byte {
 	}
 }
 
+// hunkRe matches the "@@ -old,n +new,m @@" header unifiedDiff emits, capturing
+// the line each hunk starts at in the old and new file.
+var hunkRe = regexp.MustCompile(`^@@ -(\d+),\d+ \+(\d+),\d+ @@`)
+
 // colorizeDiff styles a unified-diff block: additions green, deletions red,
-// file/hunk headers dim. Lines are truncated to width and the block is capped so
-// one large edit can't flood the transcript.
+// file/hunk headers dim. Each line gets a line-number gutter — the new file's
+// number, except deletions which show the old file's. Lines are truncated to
+// width and the block is capped so one large edit can't flood the transcript.
 func colorizeDiff(diff string, width int) string {
 	const maxLines = 200
+	const gutter = 5 // "1234 "
 	if width < 20 {
 		width = 20
 	}
+	body := max(width-gutter, 10)
 	lines := strings.Split(diff, "\n")
 	truncated := false
 	if len(lines) > maxLines {
@@ -62,9 +70,30 @@ func colorizeDiff(diff string, width int) string {
 		truncated = true
 	}
 	var b strings.Builder
+	oldNo, newNo := 0, 0
 	for _, ln := range lines {
-		ln = truncatePlain(ln, width)
-		switch diffLineKind(ln) {
+		kind := diffLineKind(ln)
+		num := ""
+		switch kind {
+		case 'm':
+			if mt := hunkRe.FindStringSubmatch(ln); mt != nil {
+				oldNo, _ = strconv.Atoi(mt[1])
+				newNo, _ = strconv.Atoi(mt[2])
+			}
+		case '+':
+			num = strconv.Itoa(newNo)
+			newNo++
+		case '-':
+			num = strconv.Itoa(oldNo)
+			oldNo++
+		default:
+			num = strconv.Itoa(newNo)
+			oldNo++
+			newNo++
+		}
+		b.WriteString(diffMetaStyle.Render(fmt.Sprintf("%4s ", num)))
+		ln = truncatePlain(ln, body)
+		switch kind {
 		case 'm':
 			b.WriteString(diffMetaStyle.Render(ln))
 		case '+':

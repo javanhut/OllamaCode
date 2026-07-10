@@ -308,19 +308,32 @@ func (m *Model) logActivity(s string) {
 	saveConfig(m.cfg)
 }
 
-type chatChunkMsg struct{ content string }
+// gen on the chat/tool messages is the turn generation they were produced
+// under (see Model.turnGen). Handlers drop any message whose gen doesn't match
+// the current generation — a straggler from a cancelled or replaced turn must
+// not write into the new turn's state.
+type chatChunkMsg struct {
+	gen     int
+	content string
+}
 type chatDoneMsg struct {
+	gen        int
 	content    string
 	promptEval int
 	evalCount  int
 }
-type chatErrMsg struct{ err error }
+type chatErrMsg struct {
+	gen int
+	err error
+}
 type chatToolCallsMsg struct {
+	gen     int
 	content string
 	calls   []mcp.ToolCall
 }
 
 type toolResultMsg struct {
+	gen        int
 	index      int
 	result     api.Message
 	modeSwitch *modeSwitchRequest
@@ -357,6 +370,7 @@ type streamState struct {
 	errs        <-chan error
 	cancel      context.CancelFunc
 	modelSource string // "local" or "cloud" — set at stream start for error diagnosis
+	gen         int    // turn generation this stream belongs to
 }
 
 // pullStreamState tracks an in-flight model download driven from the picker.
@@ -387,6 +401,7 @@ type pendingBatch struct {
 	index    int
 	allowAll bool
 	preview  string
+	gen      int // turn generation this batch belongs to
 }
 
 var (
@@ -472,6 +487,8 @@ type Model struct {
 	compacting     bool   // guards against overlapping compaction passes
 
 	// Loop safety (reset each user turn).
+	turnGen            int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	streamRetries      int            // transient stream errors retried this turn
 	stepCount          int            // tool-call rounds since the last user message
 	autoContinues      int            // times we've nudged the model to keep going on open todos this turn
 	maxSteps           int            // budget per turn (cfg.MaxSteps, default 25)
@@ -1104,6 +1121,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil {
 			m.stream.cancel()
+			m.turnGen++ // orphan any in-flight stream/tool messages
 			m.streaming = false
 			m.stream = nil
 			m.pending = nil
@@ -1301,6 +1319,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatChunkMsg:
+		if msg.gen != m.turnGen {
+			break // stale chunk from a cancelled/replaced stream
+		}
 		wasAtBottom := m.viewport.AtBottom()
 		m.streamBuf.WriteString(msg.content)
 		if time.Since(m.lastRenderTime) > 60*time.Millisecond || strings.Contains(msg.content, "\n") {
@@ -1315,18 +1336,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatToolCallsMsg:
+		if msg.gen != m.turnGen {
+			break // stale tool calls from a cancelled/replaced stream
+		}
+		m.streamRetries = 0 // stream delivered — retry budget refreshes per step
 		wasAtBottom := m.viewport.AtBottom()
 		preamble := m.streamBuf.String()
 		m.streamBuf.Reset()
+		calls := dedupeCalls(msg.calls)
 		m.history = append(m.history, api.Message{
 			Role:      "assistant",
 			Content:   preamble,
-			ToolCalls: msg.calls,
+			ToolCalls: calls,
 		})
 		m.pending = &pendingBatch{
-			calls:   msg.calls,
-			results: make([]api.Message, len(msg.calls)),
-			started: make([]bool, len(msg.calls)),
+			calls:   calls,
+			results: make([]api.Message, len(calls)),
+			started: make([]bool, len(calls)),
+			gen:     m.turnGen,
 		}
 		m.busySince = time.Now()
 		cmd := m.processPendingTools()
@@ -1342,10 +1369,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasAtBottom := m.viewport.AtBottom()
 		// Tool goroutines run on context.Background() and are never cancelled when
 		// the pending batch is swapped (cancel via esc/ctrl+s, or a new turn). A
-		// straggler from an old, larger batch can therefore deliver an index past
-		// the bounds of the current (smaller) batch — dropping it here avoids an
-		// index-out-of-range panic that would otherwise crash the whole TUI.
-		if m.pending != nil && msg.index < len(m.pending.results) {
+		// straggler from an old batch must be dropped entirely: an out-of-bounds
+		// index would panic, and an in-bounds one would silently corrupt the new
+		// batch (bogus result + double-counted done). The gen check catches both.
+		if m.pending != nil && msg.gen == m.pending.gen && msg.index < len(m.pending.results) {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
 			if msg.index < len(m.pending.calls) {
@@ -1379,6 +1406,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatDoneMsg:
+		if msg.gen != m.turnGen {
+			break // stale completion from a cancelled/replaced stream
+		}
+		m.streamRetries = 0
 		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.content != "" {
@@ -1399,7 +1430,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == AutoMode {
 			limit = 100
 		}
-		if parsed := m.tools.ParseToolCallsFromContent(finalAssistant); len(parsed) > 0 && m.stepCount < limit {
+		if parsed := dedupeCalls(m.tools.ParseToolCallsFromContent(finalAssistant)); len(parsed) > 0 && m.stepCount < limit {
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
 				Content:   finalAssistant,
@@ -1409,6 +1440,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				calls:   parsed,
 				results: make([]api.Message, len(parsed)),
 				started: make([]bool, len(parsed)),
+				gen:     m.turnGen,
 			}
 			m.busySince = time.Now()
 			if cmd := m.processPendingTools(); cmd != nil {
@@ -1493,6 +1525,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case chatErrMsg:
+		if msg.gen != m.turnGen {
+			break // stale error (e.g. "context canceled" from an esc'd stream)
+		}
+		// Transient failure (connection reset, 5xx, idle timeout): retry the
+		// stream a bounded number of times before killing the turn. History is
+		// intact, so the request simply regenerates from the same state.
+		if !m.compacting && m.streamRetries < maxStreamRetries {
+			m.streamRetries++
+			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))
+			m.toast = fmt.Sprintf("stream error — retrying (%d/%d)", m.streamRetries, maxStreamRetries)
+			m.streamBuf.Reset() // discard the partial response; the retry regenerates it
+			cmds = append(cmds, m.startStream())
+			m.refreshTranscript()
+			break
+		}
 		source := "local"
 		if strings.Contains(m.host.URL(), "ollama.com") {
 			source = "cloud"
@@ -1781,7 +1828,7 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		call := m.pending.calls[i]
 		m.pending.started[i] = true
 		m.state = stateChat
-		return m, m.invokeToolCmd(i, call)
+		return m, m.invokeToolCmd(m.pending.gen, i, call)
 	case "a":
 		m.pending.allowAll = true
 		m.state = stateChat
@@ -1884,6 +1931,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.streaming && m.stream != nil {
 				m.stream.cancel()
 			}
+			m.turnGen++ // orphan any in-flight stream/tool messages
 			m.streamBuf.Reset()
 			m.streaming = false
 			m.stream = nil
@@ -2440,10 +2488,11 @@ func (m *Model) compactContext() tea.Cmd {
 	}
 
 	host := m.host
+	gen := m.turnGen
 	return func() tea.Msg {
 		resp, err := host.GenerateResponse(req)
 		if err != nil {
-			return chatErrMsg{err: err}
+			return chatErrMsg{gen: gen, err: err}
 		}
 		return compactDoneMsg{
 			summary: resp.Response,
@@ -2461,27 +2510,29 @@ func (m *Model) waitForStream() tea.Cmd {
 		select {
 		case chunk, ok := <-s.resp:
 			if !ok {
-				return chatDoneMsg{}
+				return chatDoneMsg{gen: s.gen}
 			}
 			if len(chunk.Message.ToolCalls) > 0 {
 				return chatToolCallsMsg{
+					gen:     s.gen,
 					content: chunk.Message.Content,
 					calls:   chunk.Message.ToolCalls,
 				}
 			}
 			if chunk.Done {
 				return chatDoneMsg{
+					gen:        s.gen,
 					content:    chunk.Message.Content,
 					promptEval: chunk.PromptEval,
 					evalCount:  chunk.EvalCount,
 				}
 			}
-			return chatChunkMsg{content: chunk.Message.Content}
+			return chatChunkMsg{gen: s.gen, content: chunk.Message.Content}
 		case err, ok := <-s.errs:
 			if !ok || err == nil {
-				return chatDoneMsg{}
+				return chatDoneMsg{gen: s.gen}
 			}
-			return chatErrMsg{err: err}
+			return chatErrMsg{gen: s.gen, err: err}
 		case <-time.After(modelStreamIdleTimeout):
 			if s.cancel != nil {
 				s.cancel()
@@ -2490,7 +2541,7 @@ func (m *Model) waitForStream() tea.Cmd {
 			if s.modelSource != "" {
 				err = fmt.Errorf("stream idle timeout after %s — no response from %s model", modelStreamIdleTimeout, s.modelSource)
 			}
-			return chatErrMsg{err: err}
+			return chatErrMsg{gen: s.gen, err: err}
 		}
 	}
 }
@@ -2550,6 +2601,12 @@ func (m *Model) startStream() tea.Cmd {
 		tools = m.toolsForMode()
 	}
 	m.suppressToolsOnce = false
+	// A replaced stream must not linger holding its HTTP connection (nor keep
+	// generating server-side); its in-flight messages are dropped by gen anyway.
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	m.turnGen++
 	ctx, cancel := context.WithCancel(context.Background())
 	respCh, errCh := m.host.ContinuousChat(ctx, api.ChatRequest{
 		Model:    m.modelName,
@@ -2561,7 +2618,7 @@ func (m *Model) startStream() tea.Cmd {
 	if strings.Contains(m.host.URL(), "ollama.com") {
 		source = "cloud"
 	}
-	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source}
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen}
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.lastRenderTime = time.Time{}
@@ -3301,7 +3358,7 @@ func (m *Model) invokeTool(ctx context.Context, call mcp.ToolCall) api.Message {
 	}
 }
 
-func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
+func (m *Model) invokeToolCmd(gen, index int, call mcp.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		var req *modeSwitchRequest
 		if call.Function.Name == "switch_mode" {
@@ -3330,9 +3387,10 @@ func (m *Model) invokeToolCmd(index int, call mcp.ToolCall) tea.Cmd {
 
 		select {
 		case result := <-done:
-			return toolResultMsg{index: index, result: result, modeSwitch: req}
+			return toolResultMsg{gen: gen, index: index, result: result, modeSwitch: req}
 		case <-ctx.Done():
 			return toolResultMsg{
+				gen:   gen,
 				index: index,
 				result: api.Message{
 					Role:     "tool",
@@ -3545,7 +3603,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.recentCalls = m.recentCalls[len(m.recentCalls)-recentCallsKept:]
 		}
 		m.pending.started[i] = true
-		cmds = append(cmds, m.invokeToolCmd(i, call))
+		cmds = append(cmds, m.invokeToolCmd(m.pending.gen, i, call))
 	}
 
 	if len(cmds) > 0 {

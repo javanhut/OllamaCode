@@ -81,21 +81,46 @@ func unifiedDiff(oldStr, newStr, path string) string {
 		return ""
 	}
 
+	// 1-based line number each op occupies in the old and new files.
+	oldNo := make([]int, len(ops))
+	newNo := make([]int, len(ops))
+	on, nn := 1, 1
+	for i, op := range ops {
+		oldNo[i], newNo[i] = on, nn
+		if op.kind != '+' {
+			on++
+		}
+		if op.kind != '-' {
+			nn++
+		}
+	}
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "--- %s\n+++ %s\n", path, path)
-	inHunk := false
-	for i, op := range ops {
-		if keep[i] {
-			if !inHunk {
-				sb.WriteString("@@\n")
-				inHunk = true
+	for i := 0; i < len(ops); i++ {
+		if !keep[i] {
+			continue
+		}
+		j := i
+		for j < len(ops) && keep[j] {
+			j++
+		}
+		oldCount, newCount := 0, 0
+		for _, op := range ops[i:j] {
+			if op.kind != '+' {
+				oldCount++
 			}
+			if op.kind != '-' {
+				newCount++
+			}
+		}
+		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", oldNo[i], oldCount, newNo[i], newCount)
+		for _, op := range ops[i:j] {
 			sb.WriteByte(op.kind)
 			sb.WriteString(op.line)
 			sb.WriteByte('\n')
-		} else {
-			inHunk = false
 		}
+		i = j - 1
 	}
 	out := strings.TrimRight(sb.String(), "\n")
 	if len(out) > 6000 {
