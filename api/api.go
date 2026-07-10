@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/javanhut/ollama_code/mcp"
@@ -16,6 +17,7 @@ import (
 type Message struct {
 	Role      string         `json:"role"`
 	Content   string         `json:"content"`
+	Thinking  string         `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
 	ToolName  string         `json:"tool_name,omitempty"`
 	ToolCalls []mcp.ToolCall `json:"tool_calls,omitempty"`
 }
@@ -27,6 +29,7 @@ type ChatRequest struct {
 	Tools    []mcp.Tool      `json:"tools,omitempty"`
 	Options  map[string]any  `json:"options,omitempty"`
 	Format   json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
+	Think    *bool           `json:"think,omitempty"`  // enable reasoning on thinking-capable models
 }
 
 type ChatResponse struct {
@@ -71,7 +74,8 @@ type ShowModelResponse struct {
 	Capabilities []string       `json:"capabilities"`
 	ModelInfo    map[string]any `json:"model_info"`
 	Details      struct {
-		Family string `json:"family"`
+		Family        string `json:"family"`
+		ParameterSize string `json:"parameter_size"` // e.g. "12.4B", "756b", "1t"
 	} `json:"details"`
 }
 
@@ -99,6 +103,46 @@ func (r *ShowModelResponse) ContextLength() int {
 // SupportsTools reports whether the model advertises native tool-calling.
 func (r *ShowModelResponse) SupportsTools() bool {
 	return slices.Contains(r.Capabilities, "tools")
+}
+
+// SupportsThinking reports whether the model advertises a reasoning stream.
+func (r *ShowModelResponse) SupportsThinking() bool {
+	return slices.Contains(r.Capabilities, "thinking")
+}
+
+// ParamsB returns the model's parameter count in billions, or 0 if unknown.
+// Prefers the exact model_info count, falls back to parsing the human-readable
+// details.parameter_size ("12.4B", "756b", "1t").
+func (r *ShowModelResponse) ParamsB() float64 {
+	if v, ok := r.ModelInfo["general.parameter_count"]; ok {
+		switch n := v.(type) {
+		case float64:
+			return n / 1e9
+		case json.Number:
+			f, _ := n.Float64()
+			return f / 1e9
+		}
+	}
+	s := strings.TrimSpace(strings.ToLower(r.Details.ParameterSize))
+	if s == "" {
+		return 0
+	}
+	mult := 1.0
+	switch s[len(s)-1] {
+	case 't':
+		mult = 1000
+	case 'b':
+		mult = 1
+	case 'm':
+		mult = 0.001
+	default:
+		return 0
+	}
+	f, err := strconv.ParseFloat(s[:len(s)-1], 64)
+	if err != nil {
+		return 0
+	}
+	return f * mult
 }
 
 type EmbedRequest struct {

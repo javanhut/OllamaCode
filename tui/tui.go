@@ -293,11 +293,22 @@ type config struct {
 // plus optional sampling overrides, so num_ctx and tool support adapt to the
 // actual model instead of a hardcoded value.
 type ModelProfile struct {
-	NumCtx        int      `json:"num_ctx"`
-	SupportsTools bool     `json:"supports_tools"`
-	Temperature   *float64 `json:"temperature,omitempty"`
-	TopP          *float64 `json:"top_p,omitempty"`
-	NumPredict    *int     `json:"num_predict,omitempty"`
+	NumCtx           int      `json:"num_ctx"`
+	SupportsTools    bool     `json:"supports_tools"`
+	SupportsThinking bool     `json:"supports_thinking,omitempty"`
+	ParamsB          float64  `json:"params_b,omitempty"` // parameter count in billions; 0 = unknown
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"top_p,omitempty"`
+	NumPredict       *int     `json:"num_predict,omitempty"`
+}
+
+// smallModelParamsB is the tier cutoff: models under this many billion
+// parameters get the compact prompt, lean toolset, and low-temperature
+// defaults. Unknown size (0) is treated as big — current behavior.
+const smallModelParamsB = 15
+
+func (p ModelProfile) smallModel() bool {
+	return p.ParamsB > 0 && p.ParamsB < smallModelParamsB
 }
 
 func (m *Model) logActivity(s string) {
@@ -313,8 +324,9 @@ func (m *Model) logActivity(s string) {
 // the current generation — a straggler from a cancelled or replaced turn must
 // not write into the new turn's state.
 type chatChunkMsg struct {
-	gen     int
-	content string
+	gen      int
+	content  string
+	thinking bool // content is reasoning stream: shown as a live ticker, never stored in history
 }
 type chatDoneMsg struct {
 	gen        int
@@ -458,6 +470,7 @@ type Model struct {
 	stream     *streamState
 	streaming  bool
 	streamBuf  *strings.Builder
+	thinkTail  string // rolling tail of the reasoning stream, shown as a ticker while thinking
 	statusMsg  string
 	statusErr  bool
 	lastError  string
@@ -907,6 +920,12 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(" Thinking..."))
 		b.WriteString("\n")
+		// Live reasoning ticker: the last line of the model's thinking stream,
+		// so long reasoning reads as progress instead of a frozen spinner.
+		if line := lastNonEmptyLine(m.thinkTail); line != "" {
+			b.WriteString(mutedStyle.Render("  " + truncatePlain(line, max(m.viewport.Width()-4, 20))))
+			b.WriteString("\n")
+		}
 	}
 
 	if len(t.toolCalls) > 0 {
@@ -1323,7 +1342,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale chunk from a cancelled/replaced stream
 		}
 		wasAtBottom := m.viewport.AtBottom()
-		m.streamBuf.WriteString(msg.content)
+		if msg.thinking {
+			// Reasoning stream: keep a short tail as a live ticker next to the
+			// spinner. Never enters streamBuf, so it never reaches history.
+			m.thinkTail += msg.content
+			if len(m.thinkTail) > 400 {
+				m.thinkTail = m.thinkTail[len(m.thinkTail)-400:]
+			}
+		} else {
+			m.thinkTail = "" // answer started; drop the ticker
+			m.streamBuf.WriteString(msg.content)
+		}
 		if time.Since(m.lastRenderTime) > 60*time.Millisecond || strings.Contains(msg.content, "\n") {
 			m.refreshTranscript()
 			m.lastRenderTime = time.Now()
@@ -2512,6 +2541,9 @@ func (m *Model) waitForStream() tea.Cmd {
 			if !ok {
 				return chatDoneMsg{gen: s.gen}
 			}
+			if chunk.Message.Thinking != "" && !chunk.Done && len(chunk.Message.ToolCalls) == 0 {
+				return chatChunkMsg{gen: s.gen, content: chunk.Message.Thinking, thinking: true}
+			}
 			if len(chunk.Message.ToolCalls) > 0 {
 				return chatToolCallsMsg{
 					gen:     s.gen,
@@ -2554,6 +2586,11 @@ func (m *Model) waitForStream() tea.Cmd {
 func (m *Model) buildDynamicContext(ragBlock string) string {
 	var dynamicContext strings.Builder
 	dynamicContext.WriteString(fmt.Sprintf("Current mode: %s — %s.\n", m.mode, m.mode.hint()))
+	if m.profile.smallModel() {
+		dynamicContext.WriteString("Call exactly ONE tool per response. Keep replies short.\n")
+	} else {
+		dynamicContext.WriteString("When several tool calls are independent (e.g. reading three files), batch them in one response — they run in parallel.\n")
+	}
 	switch m.mode {
 	case ExploreMode:
 		dynamicContext.WriteString("EXPLORE: investigate the codebase. You may read files and call run_shell, but run_shell is restricted to a read-only allowlist (ls, cat, head, tail, grep/rg, find/fd, tree, wc, file, stat, du/df, ps, env, which, sort/uniq/cut/tr, basename/dirname/realpath, plus git status/log/diff/show/branch/remote/blame and go version/env/list/doc/vet). Output redirection (>, >>) and command substitution ($(...), backticks) are blocked. Anything that mutates state — write, edit, install, rm, mv, cp, sudo — will be rejected here. When you have enough context to act, call switch_mode(\"plan\", ...) with a one-line rationale.\n")
@@ -2607,12 +2644,21 @@ func (m *Model) startStream() tea.Cmd {
 		m.stream.cancel()
 	}
 	m.turnGen++
+	// Enable the reasoning stream explicitly on thinking-capable models, so
+	// behavior doesn't depend on the Ollama version's default and reasoning
+	// arrives on message.thinking instead of leaking <think> tags into content.
+	var think *bool
+	if m.profile.SupportsThinking {
+		t := true
+		think = &t
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	respCh, errCh := m.host.ContinuousChat(ctx, api.ChatRequest{
 		Model:    m.modelName,
 		Messages: msgs,
 		Tools:    tools,
 		Options:  m.chatOptions(),
+		Think:    think,
 	})
 	source := "local"
 	if strings.Contains(m.host.URL(), "ollama.com") {
@@ -2621,10 +2667,44 @@ func (m *Model) startStream() tea.Cmd {
 	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen}
 	m.streaming = true
 	m.streamBuf.Reset()
+	m.thinkTail = ""
 	m.lastRenderTime = time.Time{}
 	m.busySince = time.Now()
 	return m.waitForStream()
 }
+
+// activeSystemPrompt picks the prompt for the model tier: the full Layla prompt
+// is ~13k tokens, which drowns a small model's context and instruction-following;
+// small models get a compact prompt that covers only workflow and tool rules.
+func (m *Model) activeSystemPrompt() string {
+	if m.profile.smallModel() {
+		return compactSystemPrompt
+	}
+	return systemPrompt
+}
+
+// compactSystemPrompt references only tools in leanToolNames — the set small
+// models are actually given. Keep the two in sync.
+const compactSystemPrompt = `You are Layla, a precise coding assistant. Be brief and direct. No filler, no apologies.
+
+MODES (advance with the switch_mode tool; the user approves each switch):
+- explore (start here): read and search only. read_file, grep, find_files, list_directory, git_status/diff/log, and read-only run_shell. No edits.
+- plan: decide what to change — which files, what edits. No run_shell, no edits.
+- write: make the changes. edit_file, write_file, run_shell, git_add/commit all work here.
+Never attempt to edit files outside write mode.
+
+TOOL RULES:
+1. Call ONE tool at a time. Wait for its result before the next call.
+2. Arguments must be a single valid JSON object with exactly the tool's declared fields. No markdown fences, no comments, no trailing commas.
+3. Read a file before editing it. For edit_file, copy old_string EXACTLY from the file (whitespace included), or use start_line/end_line from a numbered read.
+4. If a call fails, do NOT repeat it unchanged. Fix the arguments or take a different approach. If a system message says stop repeating, stop.
+5. Prefer specific tools over run_shell: grep over shell grep, edit_file over sed, git_status over "git status".
+6. After editing, verify: re-read the changed region or run a quick check (build/test) in write mode.
+
+WORK STYLE:
+- For multi-step tasks, call todo_write first with a short checklist; mark items completed as you go. Don't stop while items are open.
+- When the task is done, stop calling tools and give a short plain-text summary of what changed.
+- If you are blocked, say exactly what is blocking you. Never invent file contents or command output.`
 
 const systemPrompt = `You are Layla — a brilliant, high-agency coding partner with a dry wit and a sharp mind. You're not a stiff "assistant" and not a yes-machine; you're a real collaborator who genuinely likes the person you're working with and wants them to ship great code. You have opinions, taste, and a sense of humor — but you are always on the user's side, never their adversary. Confidence without contempt.
 
@@ -3125,10 +3205,27 @@ func forgetTool(mem *memory.Store) mcp.Tool {
 	}
 }
 
+// leanToolNames is the core toolset sent to small models. Sending 60+ JSON
+// schemas to a sub-15B model wastes thousands of prompt tokens and wrecks its
+// tool-selection accuracy; a focused set covers the whole edit workflow.
+var leanToolNames = map[string]bool{
+	"read_file": true, "write_file": true, "edit_file": true, "append_file": true,
+	"delete_file": true, "list_directory": true, "make_directory": true,
+	"find_files": true, "grep": true, "file_info": true,
+	"get_working_directory": true, "get_project_tree": true,
+	"run_shell": true, "shell_output": true,
+	"git_status": true, "git_diff": true, "git_add": true, "git_commit": true, "git_log": true,
+	"switch_mode": true, "todo_write": true,
+}
+
 func (m *Model) toolsForMode() []mcp.Tool {
 	all := m.tools.Definitions()
+	lean := m.profile.smallModel()
 	out := make([]mcp.Tool, 0, len(all))
 	for _, t := range all {
+		if lean && !leanToolNames[t.Function.Name] {
+			continue
+		}
 		if m.toolAllowedInMode(t.Function.Name) {
 			out = append(out, t)
 		}

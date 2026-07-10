@@ -112,6 +112,17 @@ func colorizeDiff(diff string, width int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// lastNonEmptyLine returns the last line of s with content, for one-line tickers.
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if ln := strings.TrimSpace(lines[i]); ln != "" {
+			return ln
+		}
+	}
+	return ""
+}
+
 func plural(n int) string {
 	if n == 1 {
 		return ""

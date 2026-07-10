@@ -17,7 +17,9 @@ func (m *Model) resolveProfile() {
 		return
 	}
 	if m.cfg.Profiles != nil {
-		if p, ok := m.cfg.Profiles[name]; ok && p.NumCtx > 0 {
+		// ParamsB == 0 also re-probes profiles cached before tier detection
+		// existed; one /api/show per model switch is cheap and self-heals.
+		if p, ok := m.cfg.Profiles[name]; ok && p.NumCtx > 0 && p.ParamsB > 0 {
 			m.applyProfile(p)
 			return
 		}
@@ -32,7 +34,9 @@ func (m *Model) resolveProfile() {
 		// capabilities; an empty list means "unknown", not "no tools".
 		if len(show.Capabilities) > 0 {
 			p.SupportsTools = show.SupportsTools()
+			p.SupportsThinking = show.SupportsThinking()
 		}
+		p.ParamsB = show.ParamsB()
 	}
 
 	if m.cfg.Profiles == nil {
@@ -60,6 +64,10 @@ func (m *Model) chatOptions() map[string]any {
 	opts := map[string]any{"num_ctx": m.contextLimit}
 	if m.profile.Temperature != nil {
 		opts["temperature"] = *m.profile.Temperature
+	} else if m.profile.smallModel() {
+		// Weak models at default temperature hallucinate paths and malform
+		// tool-call JSON; near-greedy decoding is the reliable regime for them.
+		opts["temperature"] = 0.2
 	}
 	if m.profile.TopP != nil {
 		opts["top_p"] = *m.profile.TopP
