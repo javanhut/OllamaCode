@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -47,12 +49,30 @@ func startBackgroundShell(command, workingDir, stdin string) (*bgJob, error) {
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-	out := &lockedBuffer{}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Start(); err != nil {
+	// Real pipe fd (an *os.File): os/exec hands it straight to the child and
+	// starts NO internal copy goroutine, so cmd.Wait() records the exit status as
+	// soon as the direct process exits — even if a grandchild (worker, daemon)
+	// keeps stdout open. Output keeps accumulating via our own reader until the
+	// whole process tree closes the pipe (true EOF) or the job is killed.
+	pr, pw, err := os.Pipe()
+	if err != nil {
 		return nil, err
 	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	out := &lockedBuffer{}
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return nil, err
+	}
+	pw.Close() // parent drops its write end; only descendants keep it now
+
+	go func() {
+		io.Copy(out, pr)
+		pr.Close()
+	}()
 
 	bgMu.Lock()
 	id := bgNext
