@@ -3390,6 +3390,97 @@ func isExploreReadOnlyShell(command string) (bool, string) {
 	return true, ""
 }
 
+// interceptVCSBypass checks a shell command for bare `git` invocations that
+// would bypass the MCP translation layer. In an ivaldi repo, raw `git` via
+// run_shell fails ("not a git repository") and wastes a round-trip; the
+// git_* MCP tools are the correct path because they translate transparently.
+//
+// Returns ok=true if the command is safe to run, ok=false with a reason
+// explaining what to do instead. The vcs backend is a parameter so the
+// function is testable without touching the filesystem.
+//
+// Like isExploreReadOnlyShell, this parses per-segment (split on |, &&, ;)
+// and only inspects the leading binary — it cannot see into nested scripts
+// or subprocesses that invoke git internally. That's an accepted limitation;
+// the common failure mode is the model directly typing `git status`.
+func interceptVCSBypass(command, vcs string) (bool, string) {
+	if vcs != "ivaldi" {
+		return true, ""
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return true, ""
+	}
+	for _, seg := range splitShellSegments(command) {
+		if seg == "" {
+			continue
+		}
+		fields := strings.Fields(seg)
+		// Skip env-assignment prefixes (e.g. GIT_DIR=/foo git status).
+		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
+			fields = fields[1:]
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		bin := fields[0]
+		if idx := strings.LastIndexAny(bin, "/"); idx >= 0 {
+			bin = bin[idx+1:]
+		}
+		if bin == "git" {
+			sub := firstNonFlagArg(fields[1:])
+			detail := ""
+			if sub != "" {
+				detail = fmt.Sprintf(" (subcommand %q)", sub)
+			}
+			return false, fmt.Sprintf(
+				"this is an ivaldi repo, so `git` via run_shell will fail%s. "+
+					"Use the git_%s MCP tool (it auto-translates to ivaldi), "+
+					"or run `ivaldi` directly.",
+				detail, gitToolNameForSub(sub),
+			)
+		}
+	}
+	return true, ""
+}
+
+// gitToolNameForSub maps a git subcommand to the corresponding MCP git_*
+// tool name, for the bypass rejection message. Returns "status" as a
+// sensible default when the subcommand is unknown or absent.
+func gitToolNameForSub(sub string) string {
+	switch sub {
+	case "status":
+		return "status"
+	case "diff":
+		return "diff"
+	case "log":
+		return "log"
+	case "show":
+		return "show"
+	case "branch":
+		return "branch"
+	case "checkout":
+		return "checkout"
+	case "add":
+		return "add"
+	case "commit":
+		return "commit"
+	case "merge":
+		return "merge"
+	case "reset":
+		return "reset"
+	case "stash":
+		return "stash"
+	case "pull":
+		return "pull"
+	case "push":
+		return "push"
+	case "remote":
+		return "remote"
+	default:
+		return "status"
+	}
+}
 func firstNonFlagArg(fields []string) string {
 	for _, f := range fields {
 		// A descriptor duplication such as 2>&1 is shell syntax, not a
@@ -3403,8 +3494,8 @@ func firstNonFlagArg(fields []string) string {
 
 func isFDDuplication(s string) bool {
 	for _, op := range []string{">&", "<&"} {
-		if i := strings.Index(s, op); i >= 0 {
-			left, right := s[:i], s[i+len(op):]
+		if before, after, ok := strings.Cut(s, op); ok {
+			left, right := before, after
 			return (left == "" || allASCIIDigits(left)) &&
 				(right == "-" || allASCIIDigits(right))
 		}
@@ -3695,15 +3786,34 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
-		exploreShellPrechecked := m.mode == ExploreMode && call.Function.Name == "run_shell"
-		if exploreShellPrechecked {
-			ok, reason := isExploreReadOnlyShell(extractShellCommand(call.Function.Arguments))
-			if !ok {
+		if call.Function.Name == "run_shell" {
+			cmd := extractShellCommand(call.Function.Arguments)
+
+			// Explore-mode read-only allowlist (per-segment bin/sub check).
+			if m.mode == ExploreMode {
+				if ok, reason := isExploreReadOnlyShell(cmd); !ok {
+					m.failedCalls[mcp.CallFingerprint(call)]++
+					m.pending.results[i] = api.Message{
+						Role:     "tool",
+						ToolName: call.Function.Name,
+						Content:  fmt.Sprintf("error: %s. Call switch_mode(\"plan\", ...) and then switch_mode(\"write\", ...) to run mutating commands.", reason),
+					}
+					m.pending.started[i] = true
+					m.pending.done++
+					continue
+				}
+			}
+
+			// VCS bypass guard (all modes): in an ivaldi repo, reject bare
+			// `git` invocations that would bypass the MCP translation layer
+			// and fail with "not a git repository". The git_* tools translate
+			// transparently; raw `git` via run_shell does not.
+			if ok, reason := interceptVCSBypass(cmd, mcp.DetectVCS()); !ok {
 				m.failedCalls[mcp.CallFingerprint(call)]++
 				m.pending.results[i] = api.Message{
 					Role:     "tool",
 					ToolName: call.Function.Name,
-					Content:  fmt.Sprintf("error: %s. Call switch_mode(\"plan\", ...) and then switch_mode(\"write\", ...) to run mutating commands.", reason),
+					Content:  "error: " + reason,
 				}
 				m.pending.started[i] = true
 				m.pending.done++
@@ -3765,7 +3875,10 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
-		if m.shouldPromptPermission(call) && !exploreShellPrechecked {
+		// Explore-mode run_shell calls are prechecked above and are read-only,
+		// so they don't need a permission prompt.
+		exploreReadOnly := m.mode == ExploreMode && call.Function.Name == "run_shell"
+		if m.shouldPromptPermission(call) && !exploreReadOnly {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
 			m.state = statePermission

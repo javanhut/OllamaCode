@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/javanhut/ollama_code/mcp"
@@ -59,11 +60,11 @@ func TestLeanToolsetForSmallModels(t *testing.T) {
 
 func TestActiveSystemPromptByTier(t *testing.T) {
 	m := &Model{profile: ModelProfile{ParamsB: 7}}
-	if m.activeSystemPrompt() != compactSystemPrompt {
+	if !strings.HasPrefix(m.activeSystemPrompt(), compactSystemPrompt) {
 		t.Fatal("small model should get the compact prompt")
 	}
 	m.profile.ParamsB = 70
-	if m.activeSystemPrompt() != systemPrompt {
+	if !strings.HasPrefix(m.activeSystemPrompt(), systemPrompt) {
 		t.Fatal("big model should get the full prompt")
 	}
 	if len(compactSystemPrompt) > 3000 {

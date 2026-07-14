@@ -71,7 +71,7 @@ func TestRepeatGuardStopsExactInspectionRepeat(t *testing.T) {
 
 func TestRepeatGuardWarnsOnlyOncePerTurn(t *testing.T) {
 	m := &Model{failedCalls: make(map[string]int)}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _, _, _ = m.observeRepeatedBatch([]mcp.ToolCall{
 			tc("switch_mode", `{"mode":"plan","reason":"first"}`),
 		})

@@ -600,3 +600,38 @@ func TestAutoModePromptBypass(t *testing.T) {
 		t.Error("expected shouldPromptPermission to be true for destination outside trusted folder")
 	}
 }
+
+func TestInterceptVCSBypass(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		vcs     string
+		ok      bool
+	}{
+		{"git repo allows git", "git status", "git", true},
+		{"ivaldi blocks git status", "git status", "ivaldi", false},
+		{"ivaldi blocks git diff", "git diff --staged", "ivaldi", false},
+		{"ivaldi blocks git log", "git log --oneline -n 5", "ivaldi", false},
+		{"ivaldi blocks git with path", "/usr/bin/git status", "ivaldi", false},
+		{"ivaldi blocks git with env prefix", "GIT_DIR=/foo git status", "ivaldi", false},
+		{"ivaldi blocks git in pipeline", "git status | grep main", "ivaldi", false},
+		{"ivaldi blocks git after semicolon", "echo hi; git status", "ivaldi", false},
+		{"ivaldi blocks git after &&", "echo hi && git status", "ivaldi", false},
+		{"ivaldi allows ivaldi directly", "ivaldi status", "ivaldi", true},
+		{"ivaldi allows non-git commands", "ls -la", "ivaldi", true},
+		{"ivaldi allows go test", "go test ./...", "ivaldi", true},
+		{"empty command allowed", "", "ivaldi", true},
+		{"git in single quotes not parsed", "echo 'git status'", "ivaldi", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ok, reason := interceptVCSBypass(c.command, c.vcs)
+			if ok != c.ok {
+				t.Errorf("interceptVCSBypass(%q, %q) = %v, want %v (reason: %s)", c.command, c.vcs, ok, c.ok, reason)
+			}
+			if !ok && reason == "" {
+				t.Errorf("expected a non-empty rejection reason for %q", c.command)
+			}
+		})
+	}
+}
