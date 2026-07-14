@@ -19,6 +19,16 @@ func GitStatusTool() Tool {
 			Parameters:  Schema{Type: "object", Properties: map[string]Property{}},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			if detectVCS() == "ivaldi" {
+				// ivaldi status gives timeline + last seal + working-dir state
+				// in one call; no need to replicate git's multi-call assembly.
+				cmd := vcsExec(ctx, "git_status", "status")
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					return string(out), err
+				}
+				return strings.TrimSpace(string(out)), nil
+			}
 			var out strings.Builder
 
 			// Branch info
@@ -107,7 +117,7 @@ func GitDiffTool() Tool {
 			if a.Path != "" {
 				argv = append(argv, "--", a.Path)
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_diff", argv...)
 			out, err := cmd.CombinedOutput()
 			text := strings.TrimRight(string(out), "\n")
 			if err != nil {
@@ -170,7 +180,7 @@ func GitLogTool() Tool {
 			if a.Path != "" {
 				argv = append(argv, "--", a.Path)
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_log", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return "", err
@@ -201,7 +211,7 @@ func GitAddTool() Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
-			cmd := exec.CommandContext(ctx, "git", "add", a.Paths)
+			cmd := vcsExec(ctx, "git_add", "add", a.Paths)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -236,6 +246,14 @@ func GitCommitTool() Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
+			// For ivaldi, --all requires staging first (ivaldi seal doesn't
+			// auto-stage). Handle that by running gather before seal.
+			if a.All && detectVCS() == "ivaldi" {
+				gatherCmd := vcsExec(ctx, "git_add", "gather", ".")
+				if out, err := gatherCmd.CombinedOutput(); err != nil {
+					return string(out), err
+				}
+			}
 			argv := []string{"commit", "-m", a.Message}
 			if a.All {
 				argv = append(argv, "--all")
@@ -243,7 +261,7 @@ func GitCommitTool() Tool {
 			if a.Amend {
 				argv = append(argv, "--amend")
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_commit", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -283,7 +301,7 @@ func GitBranchTool() Tool {
 				if a.Name == "" {
 					return "", fmt.Errorf("name is required for create")
 				}
-				cmd := exec.CommandContext(ctx, "git", "branch", a.Name)
+				cmd := vcsExec(ctx, "git_branch", "branch", a.Name)
 				out, err := cmd.CombinedOutput()
 				if err != nil {
 					return string(out), err
@@ -293,7 +311,7 @@ func GitBranchTool() Tool {
 				if a.Name == "" {
 					return "", fmt.Errorf("name is required for delete")
 				}
-				cmd := exec.CommandContext(ctx, "git", "branch", "-d", a.Name)
+				cmd := vcsExec(ctx, "git_branch", "branch", "-d", a.Name)
 				out, err := cmd.CombinedOutput()
 				if err != nil {
 					return string(out), err
@@ -304,7 +322,7 @@ func GitBranchTool() Tool {
 				if a.Remote {
 					argv = append(argv, "-r")
 				}
-				cmd := exec.CommandContext(ctx, "git", argv...)
+				cmd := vcsExec(ctx, "git_branch", argv...)
 				out, _ := cmd.CombinedOutput()
 				return string(out), nil
 			}
@@ -338,12 +356,19 @@ func GitCheckoutTool() Tool {
 			if a.Target == "" {
 				return "", fmt.Errorf("target is required")
 			}
+			// ivaldi checkout-to-file is not generally supported. If the
+			// target is an existing file and we're on ivaldi, explain.
+			if detectVCS() == "ivaldi" && !a.NewBranch {
+				if _, err := os.Stat(a.Target); err == nil {
+					return "", fmt.Errorf("ivaldi does not support restoring individual files via checkout; use 'ivaldi rewind --discard <seal>' to restore the working tree to a specific seal")
+				}
+			}
 			argv := []string{"checkout"}
 			if a.NewBranch {
 				argv = append(argv, "-b")
 			}
 			argv = append(argv, a.Target)
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_checkout", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -391,7 +416,7 @@ func GitPullTool() Tool {
 			} else {
 				argv = append(argv, a.Remote)
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_pull", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -439,7 +464,7 @@ func GitPushTool() Tool {
 			if a.Branch != "" {
 				argv = append(argv, a.Branch)
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_push", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -464,6 +489,9 @@ func GitStashTool() Tool {
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			if isVCSUnsupported("git_stash") {
+				return "ivaldi has no stash equivalent. Use timelines (branches) to switch contexts without committing: create one with git_branch (action=create), or see `ivaldi timeline --help`.", nil
+			}
 			var a struct {
 				Action  string `json:"action"`
 				Message string `json:"message"`
@@ -534,7 +562,7 @@ func GitMergeTool() Tool {
 				argv = append(argv, "--no-ff")
 			}
 			argv = append(argv, a.Branch)
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_merge", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -591,7 +619,7 @@ func GitResetTool() Tool {
 				}
 				argv = append(argv, a.Target)
 			}
-			cmd := exec.CommandContext(ctx, "git", argv...)
+			cmd := vcsExec(ctx, "git_reset", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err
@@ -630,26 +658,27 @@ func GitRemoteTool() Tool {
 			if a.Action == "" {
 				a.Action = "list"
 			}
-			var cmd *exec.Cmd
+			var argv []string
 			switch a.Action {
 			case "add":
 				if a.Name == "" || a.URL == "" {
 					return "", fmt.Errorf("name and url are required for add")
 				}
-				cmd = exec.CommandContext(ctx, "git", "remote", "add", a.Name, a.URL)
+				argv = []string{"remote", "add", a.Name, a.URL}
 			case "remove":
 				if a.Name == "" {
 					return "", fmt.Errorf("name is required for remove")
 				}
-				cmd = exec.CommandContext(ctx, "git", "remote", "remove", a.Name)
+				argv = []string{"remote", "remove", a.Name}
 			case "show":
 				if a.Name == "" {
 					return "", fmt.Errorf("name is required for show")
 				}
-				cmd = exec.CommandContext(ctx, "git", "remote", "show", a.Name)
+				argv = []string{"remote", "show", a.Name}
 			default:
-				cmd = exec.CommandContext(ctx, "git", "remote", "-v")
+				argv = []string{"remote", "-v"}
 			}
+			cmd := vcsExec(ctx, "git_remote", argv...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return string(out), err

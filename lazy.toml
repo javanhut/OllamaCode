@@ -122,6 +122,15 @@ run = [
   "echo \"Cleanup complete.\"",
 ]
 
+[commands.format]
+desc = "Runs go format on binary"
+alias = ["fmt"]
+run = ["go fmt ./..."]
+
+[commands.fix]
+desc = "Runs go fix on binary"
+alias = ["fx"]
+run = ["go fix ./..."]
 # Migration warnings:
 # - conditional 'ifeq ($(UNAME_S),Darwin)' cannot be fully converted
 # - conditional 'ifneq ("$(wildcard /opt/homebrew/bin)","")' cannot be fully converted

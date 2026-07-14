@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -2677,10 +2678,37 @@ func (m *Model) startStream() tea.Cmd {
 // is ~13k tokens, which drowns a small model's context and instruction-following;
 // small models get a compact prompt that covers only workflow and tool rules.
 func (m *Model) activeSystemPrompt() string {
+	base := systemPrompt
 	if m.profile.smallModel() {
-		return compactSystemPrompt
+		base = compactSystemPrompt
 	}
-	return systemPrompt
+	return base + environmentBlock()
+}
+
+// environmentBlock reports the concrete runtime environment — working dir,
+// version control, OS, and shell — so the model reasons about its ACTUAL world
+// instead of falling back to training priors (git + bash). Without this a
+// capable model in an ivaldi repo reaches for git and writes bash-isms the
+// real shell mishandles. Stable within a session, so it rides in the cached
+// system-prompt prefix. The VCS line uses mcp.DetectVCS so what the model is
+// told matches what the git_* tools actually run against.
+func environmentBlock() string {
+	cwd, _ := os.Getwd()
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	var b strings.Builder
+	b.WriteString("\n\n# Environment\n")
+	b.WriteString("- Working directory: " + cwd + "\n")
+	if mcp.DetectVCS() == "ivaldi" {
+		b.WriteString("- Version control: ivaldi (NOT git). Use the git_* tools — they run against the ivaldi backend. ivaldi identifies commits by memorable seal names and hash prefixes, NOT git refs: HEAD~1, HEAD~3, and name@{n} do not exist here.\n")
+	} else {
+		b.WriteString("- Version control: git\n")
+	}
+	b.WriteString("- Platform: " + runtime.GOOS + "/" + runtime.GOARCH + "\n")
+	b.WriteString("- Shell: " + shell + " (non-interactive; commands must not expect a TTY or a pager)\n")
+	return b.String()
 }
 
 // compactSystemPrompt references only tools in leanToolNames — the set small
@@ -3270,8 +3298,9 @@ var exploreShellAllowedBins = map[string]bool{
 	"sort": true, "uniq": true, "cut": true, "tr": true, "column": true,
 	"true": true, "false": true,
 	"basename": true, "dirname": true, "realpath": true, "readlink": true,
-	"go":  true,
-	"git": true,
+	"go":     true,
+	"git":    true,
+	"ivaldi": true,
 }
 
 var exploreShellAllowedGitSubs = map[string]bool{
@@ -3282,6 +3311,15 @@ var exploreShellAllowedGitSubs = map[string]bool{
 	"tag":      true,
 	"cat-file": true, "rev-list": true, "name-rev": true,
 	"grep": true,
+}
+
+// exploreShellAllowedIvaldiSubs is the read-only allowlist for ivaldi
+// subcommands in explore mode. Mirrors the intent of the git subs: status,
+// history, diff, and inspection only — no gather/seal/timeline mutations.
+var exploreShellAllowedIvaldiSubs = map[string]bool{
+	"status": true, "log": true, "diff": true, "whereami": true,
+	"whodidit": true,
+	"timeline": true, // list only — sub-actions checked separately
 }
 
 var exploreShellAllowedGoSubs = map[string]bool{
@@ -3331,6 +3369,18 @@ func isExploreReadOnlyShell(command string) (bool, string) {
 			sub := firstNonFlagArg(fields[1:])
 			if sub != "" && !exploreShellAllowedGoSubs[sub] {
 				return false, fmt.Sprintf("go subcommand %q is not in the explore-mode read-only allowlist", sub)
+			}
+		case "ivaldi":
+			sub := firstNonFlagArg(fields[1:])
+			if sub != "" && !exploreShellAllowedIvaldiSubs[sub] {
+				return false, fmt.Sprintf("ivaldi subcommand %q is not in the explore-mode read-only allowlist", sub)
+			}
+			// ivaldi timeline has sub-actions; only 'list' is read-only.
+			if sub == "timeline" {
+				subsub := firstNonFlagArg(fields[2:])
+				if subsub != "" && subsub != "list" {
+					return false, fmt.Sprintf("ivaldi timeline %q is not read-only; only 'list' is allowed in explore mode", subsub)
+				}
 			}
 		}
 	}
@@ -3608,6 +3658,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		}
 
 		if !m.toolAllowedInMode(call.Function.Name) {
+			m.failedCalls[mcp.CallFingerprint(call)]++
 			m.pending.results[i] = api.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
@@ -3622,6 +3673,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if exploreShellPrechecked {
 			ok, reason := isExploreReadOnlyShell(extractShellCommand(call.Function.Arguments))
 			if !ok {
+				m.failedCalls[mcp.CallFingerprint(call)]++
 				m.pending.results[i] = api.Message{
 					Role:     "tool",
 					ToolName: call.Function.Name,
