@@ -3319,6 +3319,7 @@ var exploreShellAllowedGitSubs = map[string]bool{
 var exploreShellAllowedIvaldiSubs = map[string]bool{
 	"status": true, "log": true, "diff": true, "whereami": true,
 	"whodidit": true,
+	"help":     true,
 	"timeline": true, // list only — sub-actions checked separately
 }
 
@@ -3389,11 +3390,36 @@ func isExploreReadOnlyShell(command string) (bool, string) {
 
 func firstNonFlagArg(fields []string) string {
 	for _, f := range fields {
-		if !strings.HasPrefix(f, "-") {
+		// A descriptor duplication such as 2>&1 is shell syntax, not a
+		// positional argument (and therefore not a git/ivaldi subcommand).
+		if !strings.HasPrefix(f, "-") && !isFDDuplication(f) {
 			return f
 		}
 	}
 	return ""
+}
+
+func isFDDuplication(s string) bool {
+	for _, op := range []string{">&", "<&"} {
+		if i := strings.Index(s, op); i >= 0 {
+			left, right := s[:i], s[i+len(op):]
+			return (left == "" || allASCIIDigits(left)) &&
+				(right == "-" || allASCIIDigits(right))
+		}
+	}
+	return false
+}
+
+func allASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func hasOutputRedirect(s string) bool {
@@ -3757,6 +3783,13 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 	if len(cmds) > 0 {
 		return tea.Batch(cmds...)
+	}
+	// Mode/preflight failures above complete synchronously and therefore do not
+	// produce a toolResultMsg to re-enter this method. Finalize the batch now;
+	// otherwise a batch made entirely of rejected calls remains stuck forever
+	// at TOOLS n/n.
+	if m.pending != nil && m.pending.done >= len(m.pending.calls) {
+		return m.processPendingTools()
 	}
 
 	return nil

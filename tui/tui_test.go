@@ -277,6 +277,8 @@ func TestIsExploreReadOnlyShell(t *testing.T) {
 		"ls | wc -l",
 		"cat file.txt | grep foo | sort | uniq",
 		"ps aux 2>&1",
+		"ivaldi --help 2>&1 || ivaldi help 2>&1 || ivaldi 2>&1",
+		"ivaldi status 2>&1",
 		"ls -la && pwd",
 		"FOO=bar env",
 		"cat 'has > in name.txt'",
@@ -312,6 +314,52 @@ func TestIsExploreReadOnlyShell(t *testing.T) {
 		if ok {
 			t.Errorf("expected %q to be blocked, but it was allowed", cmd)
 		}
+	}
+}
+
+func TestFirstNonFlagArgSkipsFDDuplication(t *testing.T) {
+	if got := firstNonFlagArg([]string{"--help", "2>&1"}); got != "" {
+		t.Fatalf("fd duplication treated as positional argument: %q", got)
+	}
+	if got := firstNonFlagArg([]string{"-q", "status", "2>&1"}); got != "status" {
+		t.Fatalf("expected status subcommand, got %q", got)
+	}
+}
+
+func TestProcessPendingToolsFinalizesSynchronousRejection(t *testing.T) {
+	call := mcp.ToolCall{Function: mcp.ToolCallFunction{
+		Name:      "run_shell",
+		Arguments: json.RawMessage(`{"command":"rm forbidden"}`),
+	}}
+	m := &Model{
+		mode:        ExploreMode,
+		state:       stateChat,
+		tools:       mcp.DefaultRegistry(),
+		notes:       &sessionNotes{},
+		transcript:  &strings.Builder{},
+		streamBuf:   &strings.Builder{},
+		md:          newMarkdownRenderer(),
+		failedCalls: make(map[string]int),
+		maxSteps:    25,
+		pending: &pendingBatch{
+			calls:   []mcp.ToolCall{call},
+			results: make([]api.Message, 1),
+			started: make([]bool, 1),
+		},
+	}
+
+	cmd := m.processPendingTools()
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	if cmd == nil {
+		t.Fatal("expected rejected batch to advance to the next model stream")
+	}
+	if m.pending != nil {
+		t.Fatal("synchronously rejected batch remained pending")
+	}
+	if len(m.history) != 1 || !strings.Contains(m.history[0].Content, "not in the explore-mode") {
+		t.Fatalf("expected rejection in history, got %#v", m.history)
 	}
 }
 
