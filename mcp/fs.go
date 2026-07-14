@@ -519,6 +519,18 @@ func capMatches(text string) string {
 	return out
 }
 
+// includeGlob turns a file_types entry into a grep --include glob. grep's
+// --include matches a filename glob, so a bare extension (".go" or "go") must
+// become "*.go" — passing ".go" verbatim matches only a file literally named
+// ".go" and silently drops every real match. Entries that already contain glob
+// metacharacters are passed through untouched.
+func includeGlob(ft string) string {
+	if strings.ContainsAny(ft, "*?[") {
+		return ft
+	}
+	return "*." + strings.TrimPrefix(ft, ".")
+}
+
 func GrepTool() Tool {
 	return Tool{
 		Type: "function",
@@ -576,7 +588,7 @@ func GrepTool() Tool {
 				for ft := range strings.SplitSeq(a.FileTypes, ",") {
 					ft = strings.TrimSpace(ft)
 					if ft != "" {
-						argv = append(argv, "--include="+ft)
+						argv = append(argv, "--include="+includeGlob(ft))
 					}
 				}
 			}
