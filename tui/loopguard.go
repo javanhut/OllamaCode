@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"sort"
+	"strings"
+
 	"github.com/javanhut/ollama_code/mcp"
 )
 
@@ -28,8 +31,10 @@ func (m *Model) resetTurnGuards() {
 	m.recentCalls = m.recentCalls[:0]
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
-	m.lastStepTool = ""
+	m.lastStepRepeatKey = ""
 	m.sameToolStreak = 0
+	m.sameToolWarned = false
+	m.sameToolStopWarned = false
 	m.turnTouchedFiles = false
 	m.verifyAttempts = 0
 	m.challengedThisTurn = false
@@ -56,6 +61,66 @@ func batchSingleTool(calls []mcp.ToolCall) string {
 		}
 	}
 	return name
+}
+
+// argumentSensitiveRepeatTools are naturally iterative inspection operations.
+// Different arguments mean the model is gathering different information, not
+// repeating an action. Exact repeats are still guarded.
+var argumentSensitiveRepeatTools = map[string]bool{
+	"read_file": true, "list_directory": true, "find_files": true,
+	"grep": true, "file_info": true, "find_symbol": true,
+	"code_definition": true, "code_references": true, "code_hover": true,
+	"semantic_search": true, "git_diff": true, "git_log": true,
+}
+
+// batchRepeatIdentity returns the display tool name and semantic repeat key for
+// a single-tool batch. Mixed batches are progress and return empty identities.
+func batchRepeatIdentity(calls []mcp.ToolCall) (string, string) {
+	tool := batchSingleTool(calls)
+	if tool == "" {
+		return "", ""
+	}
+	if !argumentSensitiveRepeatTools[tool] {
+		return tool, tool
+	}
+	fingerprints := make([]string, len(calls))
+	for i, call := range calls {
+		fingerprints[i] = mcp.CallFingerprint(call)
+	}
+	// Reordering the same parallel reads is still the same action.
+	sort.Strings(fingerprints)
+	return tool, strings.Join(fingerprints, "\x01")
+}
+
+// observeRepeatedBatch advances the per-turn repetition state. warn is emitted
+// at most once per user turn. stop remains true after the hard threshold so a
+// text-form tool call cannot bypass a single tool-less response; announceStop
+// keeps the transcript explanation to one copy.
+func (m *Model) observeRepeatedBatch(calls []mcp.ToolCall) (tool string, warn, stop, announceStop bool) {
+	tool, key := batchRepeatIdentity(calls)
+	if key == "" {
+		m.lastStepRepeatKey = ""
+		m.sameToolStreak = 0
+		return "", false, false, false
+	}
+	if key == m.lastStepRepeatKey {
+		m.sameToolStreak++
+	} else {
+		m.lastStepRepeatKey = key
+		m.sameToolStreak = 1
+	}
+	if m.sameToolStreak >= 3 && !m.sameToolWarned {
+		m.sameToolWarned = true
+		warn = true
+	}
+	if m.sameToolStreak >= 5 {
+		stop = true
+		if !m.sameToolStopWarned {
+			m.sameToolStopWarned = true
+			announceStop = true
+		}
+	}
+	return tool, warn, stop, announceStop
 }
 
 // canonicalJSON/callFingerprint/isOscillating moved to package mcp

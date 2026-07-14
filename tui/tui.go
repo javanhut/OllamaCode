@@ -510,8 +510,10 @@ type Model struct {
 	failedCalls        map[string]int // fingerprint -> consecutive failure count
 	oscillationWarned  bool           // corrective nudge emitted once per turn
 	suppressToolsOnce  bool           // next stream sends no tools (step budget hit)
-	lastStepTool       string         // tool name of the previous step's batch
-	sameToolStreak     int            // consecutive steps calling only that tool
+	lastStepRepeatKey  string         // semantic identity of the previous single-tool batch
+	sameToolStreak     int            // consecutive steps repeating that identity
+	sameToolWarned     bool           // early repeat warning emitted this user turn
+	sameToolStopWarned bool           // hard-stop explanation emitted this user turn
 	turnTouchedFiles   bool           // a file-mutating tool succeeded this turn
 	verifying          bool           // a compile check is running
 	verifyAttempts     int            // failed compile checks this turn
@@ -3620,7 +3622,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 	}
 
 	if m.pending.done >= len(m.pending.calls) {
-		batchTool := batchSingleTool(m.pending.calls)
+		batchCalls := m.pending.calls
 		m.history = append(m.history, m.pending.results...)
 		m.pending = nil
 
@@ -3634,25 +3636,23 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.oscillationWarned = true
 		}
 
-		// Same-tool spam guard: catches a model calling ONE tool over and over
-		// with varying arguments (e.g. switch_mode with a different reason each
-		// time), which slips past fingerprint-based detection.
-		if batchTool != "" && batchTool == m.lastStepTool {
-			m.sameToolStreak++
-		} else {
-			m.sameToolStreak = 1
-			m.lastStepTool = batchTool
-		}
-		if m.sameToolStreak == 3 {
+		// Inspection calls include arguments in their repeat identity, so reading
+		// different files or running different searches is progress. Mutation and
+		// control tools remain name-based to catch varied-argument spam.
+		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls)
+		if warnRepeat {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak),
 			})
-		} else if m.sameToolStreak >= 5 {
+		}
+		if announceStop {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak),
 			})
+		}
+		if stopRepeat {
 			m.suppressToolsOnce = true
 		}
 

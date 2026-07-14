@@ -40,6 +40,67 @@ func TestBatchSingleTool(t *testing.T) {
 	}
 }
 
+func TestRepeatGuardTreatsDifferentInspectionArgumentsAsProgress(t *testing.T) {
+	m := &Model{}
+	for _, path := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		_, warn, stop, _ := m.observeRepeatedBatch([]mcp.ToolCall{
+			tc("read_file", `{"path":"`+path+`"}`),
+		})
+		if warn || stop {
+			t.Fatalf("different read_file path %q triggered repeat guard", path)
+		}
+	}
+	if m.sameToolStreak != 1 {
+		t.Fatalf("different inspection arguments should reset streak, got %d", m.sameToolStreak)
+	}
+}
+
+func TestRepeatGuardStopsExactInspectionRepeat(t *testing.T) {
+	m := &Model{}
+	calls := []mcp.ToolCall{tc("read_file", `{"path":"same.go"}`)}
+	for round := 1; round <= 6; round++ {
+		_, warn, stop, announceStop := m.observeRepeatedBatch(calls)
+		if warn != (round == 3) {
+			t.Fatalf("round %d: warn=%v", round, warn)
+		}
+		if stop != (round >= 5) || announceStop != (round == 5) {
+			t.Fatalf("round %d: stop=%v announceStop=%v", round, stop, announceStop)
+		}
+	}
+}
+
+func TestRepeatGuardWarnsOnlyOncePerTurn(t *testing.T) {
+	m := &Model{failedCalls: make(map[string]int)}
+	for i := 0; i < 3; i++ {
+		_, _, _, _ = m.observeRepeatedBatch([]mcp.ToolCall{
+			tc("switch_mode", `{"mode":"plan","reason":"first"}`),
+		})
+	}
+
+	// A mixed batch demonstrates progress and resets the current streak.
+	_, warn, _, _ := m.observeRepeatedBatch([]mcp.ToolCall{
+		tc("read_file", `{"path":"progress.go"}`),
+		tc("grep", `{"pattern":"progress"}`),
+	})
+	if warn {
+		t.Fatal("mixed progress batch should not warn")
+	}
+
+	for _, reason := range []string{"second-a", "second-b", "second-c"} {
+		_, warn, _, _ = m.observeRepeatedBatch([]mcp.ToolCall{
+			tc("switch_mode", `{"mode":"plan","reason":"`+reason+`"}`),
+		})
+		if warn {
+			t.Fatal("repeat warning emitted more than once in one user turn")
+		}
+	}
+
+	m.resetTurnGuards()
+	if m.sameToolWarned || m.sameToolStopWarned || m.lastStepRepeatKey != "" {
+		t.Fatal("resetTurnGuards did not clear repetition state")
+	}
+}
+
 func TestIsOscillating(t *testing.T) {
 	if !mcp.IsOscillating([]string{"A", "B", "A", "B"}) {
 		t.Fatal("ABAB should be detected as oscillating")
