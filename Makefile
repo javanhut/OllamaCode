@@ -1,7 +1,7 @@
 # Makefile for OllamaCode Cross-Platform Setup (Go Edition)
 
 # --- Configuration ---
-PROJECT_NAME := ollama-code
+PROJECT_NAME := ocode
 COMPANION_NAME := ollama-companion
 VERSION := 1.0.0
 MAIN_ENTRY_POINT := main.go # Assuming your main package entry file is main.go

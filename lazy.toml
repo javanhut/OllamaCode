@@ -4,7 +4,7 @@
 default = "all"
 
 [variables]
-project_name = "ollama-code"
+project_name = "ocode"
 companion_name = "ollama-companion"
 version = "1.0.0"
 main_entry_point = "main.go # Assuming your main package entry file is main.go"
