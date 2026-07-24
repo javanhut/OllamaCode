@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/javanhut/ollama_code/internal/agent"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // maxParallelSubagents bounds how many sub-agents run concurrently for one
@@ -37,17 +37,17 @@ const subagentSystem = `You are an autonomous sub-agent spawned to complete ONE 
 // sub-agents. A single task runs inline; multiple tasks fan out in parallel
 // (bounded). Sub-agents inherit the parent's safety mode: read-only in
 // explore/plan, full capability in write/auto.
-func (m *Model) spawnSubagentTool() mcp.Tool {
-	return mcp.Tool{
+func (m *Model) spawnSubagentTool() tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "spawn_subagent",
 			Description: "Delegate self-contained task(s) to autonomous sub-agents that run to completion and report back. Each sub-agent has its own bounded loop and full capability within your current mode (always read/search; in write mode also edit/write files and run shell). Pass MULTIPLE tasks to run them in PARALLEL — ideal for independent work, e.g. investigate three modules at once, or apply an unrelated change in each of several files. WARNING: parallel sub-agents run concurrently with NO cross-task conflict detection, and their file edits are not individually checkpointed for /undo — only parallelize tasks that touch INDEPENDENT files. Give each task enough context to work without seeing this conversation.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"task":  {Type: "string", Description: "A single self-contained task. Use this OR tasks."},
-					"tasks": {Type: "array", Description: "Multiple self-contained tasks to run in parallel. Use for independent work on non-overlapping files.", Items: &mcp.Property{Type: "string"}},
+					"tasks": {Type: "array", Description: "Multiple self-contained tasks to run in parallel. Use for independent work on non-overlapping files.", Items: &tools.Property{Type: "string"}},
 				},
 			},
 		},

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func TestSmallModelTier(t *testing.T) {
@@ -28,7 +28,7 @@ func TestSmallModelTier(t *testing.T) {
 }
 
 func TestLeanToolsetForSmallModels(t *testing.T) {
-	m := &Model{mode: WriteMode, tools: mcp.DefaultRegistry()}
+	m := &Model{mode: WriteMode, tools: tools.DefaultRegistry()}
 
 	m.profile = ModelProfile{ParamsB: 36}
 	full := len(m.toolsForMode())

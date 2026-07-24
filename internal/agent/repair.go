@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // RepairArgsViaFormat asks the model, with JSON-schema-constrained decoding, to
@@ -16,7 +16,7 @@ import (
 // problem. It's self-contained (no conversation history needed) and degrades
 // gracefully — returning ok=false — when the model or Ollama version doesn't
 // honor `format`. Shared by the TUI loop and the headless sub-agent loop.
-func RepairArgsViaFormat(ctx context.Context, host ChatClient, reg *mcp.Registry, model string, numCtx int, call mcp.ToolCall) (json.RawMessage, bool) {
+func RepairArgsViaFormat(ctx context.Context, host ChatClient, reg *tools.Registry, model string, numCtx int, call tools.ToolCall) (json.RawMessage, bool) {
 	tool, ok := reg.Lookup(call.Function.Name)
 	if !ok {
 		return nil, false
@@ -43,7 +43,7 @@ func RepairArgsViaFormat(ctx context.Context, host ChatClient, reg *mcp.Registry
 	if err != nil {
 		return nil, false
 	}
-	out := mcp.SalvageJSON(json.RawMessage(strings.TrimSpace(resp.Message.Content)))
+	out := tools.SalvageJSON(json.RawMessage(strings.TrimSpace(resp.Message.Content)))
 	if len(out) == 0 || !json.Valid(out) {
 		return nil, false
 	}

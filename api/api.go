@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 type Message struct {
@@ -19,14 +19,14 @@ type Message struct {
 	Content   string         `json:"content"`
 	Thinking  string         `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
 	ToolName  string         `json:"tool_name,omitempty"`
-	ToolCalls []mcp.ToolCall `json:"tool_calls,omitempty"`
+	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
 }
 
 type ChatRequest struct {
 	Model    string          `json:"model"`
 	Messages []Message       `json:"messages"`
 	Stream   bool            `json:"stream"` // Set to true for streaming
-	Tools    []mcp.Tool      `json:"tools,omitempty"`
+	Tools    []tools.Tool      `json:"tools,omitempty"`
 	Options  map[string]any  `json:"options,omitempty"`
 	Format   json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
 	Think    *bool           `json:"think,omitempty"`  // enable reasoning on thinking-capable models

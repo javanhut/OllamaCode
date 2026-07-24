@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // toolTimeout bounds a single tool call so a slow or hung tool can't stall the
 // whole agent. run_shell honors the model's timeout_sec (capped); network-ish
 // tools get longer; everything else a modest default.
-func toolTimeout(call mcp.ToolCall) time.Duration {
+func toolTimeout(call tools.ToolCall) time.Duration {
 	switch call.Function.Name {
 	case "run_shell":
 		var a struct {
@@ -37,7 +37,7 @@ func toolTimeout(call mcp.ToolCall) time.Duration {
 // invokeWithTimeout runs one tool call with a deadline and panic recovery, so a
 // hanging or panicking handler surfaces as an error the model can react to
 // instead of killing the run.
-func invokeWithTimeout(ctx context.Context, reg *mcp.Registry, call mcp.ToolCall, timeout time.Duration) (string, error) {
+func invokeWithTimeout(ctx context.Context, reg *tools.Registry, call tools.ToolCall, timeout time.Duration) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	type result struct {

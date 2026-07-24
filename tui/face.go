@@ -253,3 +253,60 @@ func faceMoodFrame(mood faceMood, frame int) (string, string) {
 		return "active", " --- "
 	}
 }
+
+type faceTickMsg time.Time
+
+type faceMood int
+
+const (
+	faceMoodNeutral faceMood = iota
+	faceMoodHappy
+	faceMoodConcerned
+	faceMoodFrustrated
+	faceMoodConfused
+	faceMoodSurprised
+	faceMoodFocused
+)
+
+var faceMoodKeywords = map[faceMood][]string{
+	faceMoodHappy: {
+		"thanks", "thank you", "great", "nice", "awesome", "excellent", "perfect",
+		"works", "working", "fixed", "good", "love", "happy", "glad",
+	},
+	faceMoodConcerned: {
+		"worried", "concerned", "risky", "risk", "danger", "careful", "broken",
+		"fails", "failing", "failed", "error", "bug", "issue", "problem", "blocked",
+	},
+	faceMoodFrustrated: {
+		"annoyed", "frustrated", "mad", "angry", "upset", "ugh", "wtf", "terrible",
+		"awful", "bad", "doesnt work", "doesn't work", "not working", "still broken",
+	},
+	faceMoodConfused: {
+		"confused", "why", "what happened", "not sure", "unclear", "lost",
+		"question", "doesn't make sense", "doesnt make sense", "how come",
+	},
+	faceMoodSurprised: {
+		"wow", "surprised", "unexpected", "suddenly", "weird", "strange",
+		"really?", "seriously", "no way",
+	},
+	faceMoodFocused: {
+		"fix", "implement", "debug", "investigate", "ship", "build", "test",
+		"verify", "review", "patch", "change", "update",
+	},
+}
+
+type eyeDir int
+
+const (
+	eyeCenter eyeDir = iota
+	eyeLeft
+	eyeRight
+)
+
+type eyeLid int
+
+const (
+	lidOpen eyeLid = iota
+	lidHalf
+	lidClosed
+)

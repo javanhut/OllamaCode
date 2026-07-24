@@ -222,7 +222,7 @@ The project includes a `Makefile` for common development tasks.
 
 ### Testing
 
-The project has unit tests for the MCP tools and the API layer. To run all tests:
+The project has unit tests for the built-in tools and the API layer. To run all tests:
 
 ```bash
 go test ./...
@@ -231,7 +231,7 @@ go test ./...
 To run tests for specific packages:
 
 ```bash
-go test ./mcp
+go test ./tools
 go test ./api
 ```
 
@@ -240,8 +240,8 @@ go test ./api
 ```
 ├── api/
 │   └── api.go               # Ollama HTTP client (chat, streaming, embed, /api/show, ChatOnce)
-├── mcp/
-│   ├── mcp.go               # Tool registry and 45+ built-in tools
+├── tools/
+│   ├── registry.go          # Tool registry and 45+ built-in tools
 │   ├── validate.go          # Arg validation, nearest-tool (levenshtein), JSON schema
 │   ├── parse.go             # Parse tool calls emitted as text (model-agnostic fallback)
 │   ├── verify.go            # Pre-write syntax gate (go/parser, json)
@@ -249,7 +249,18 @@ go test ./api
 │   ├── codeintel.go         # Comment-filter + output caps for code search
 │   └── external.go          # JSON-RPC stdio bridge (dormant; not wired to config)
 ├── tui/
-│   ├── tui.go               # Bubbletea TUI (modals, viewport, input, modes, agent loop)
+│   ├── tui.go               # Entry point (Run)
+│   ├── model.go             # Bubbletea model: state, Init, layout
+│   ├── update.go            # Update loop + message types
+│   ├── keys.go              # Key handlers (chat, settings, picker, permission)
+│   ├── view.go              # View rendering (header, input, slash suggestions)
+│   ├── stream.go            # Submit, streaming, context assembly, compaction
+│   ├── dispatch.go          # Tool dispatch, permission prompts, edit previews
+│   ├── mode.go              # Safety modes (explore/plan/write/auto) + tool gating
+│   ├── transcript.go        # Transcript assembly and rendering
+│   ├── selection.go         # Mouse text selection
+│   ├── memory_tools.go      # remember/recall/forget + session-notes tools
+│   ├── modals.go            # Modal dialogs
 │   ├── profile.go           # Per-model profiles + dynamic num_ctx
 │   ├── tokens.go            # Token estimation
 │   ├── assemble.go          # Token-budgeted prompt assembly
@@ -261,6 +272,7 @@ go test ./api
 │   └── checkpoint.go        # Per-turn file snapshots for /undo
 ├── internal/
 │   ├── agent/               # Headless agent loop (shared by sub-agents and eval)
+│   ├── safeshell/           # Shell-command safety parsing (explore-mode allowlist, VCS-bypass interception)
 │   ├── semantic/            # Embedding index: build, search, incremental reindex
 │   ├── companion/           # CLI-side client that manages the companion subprocess
 │   ├── huffman/             # Context compaction codec

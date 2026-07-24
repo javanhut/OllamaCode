@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // fakeChat returns scripted responses in order, recording the requests it saw.
@@ -21,12 +21,12 @@ func (f *fakeChat) ChatOnce(_ context.Context, _ api.ChatRequest) (api.ChatRespo
 	return r, nil
 }
 
-func echoRegistry(seen *string) *mcp.Registry {
-	r := mcp.NewRegistry()
-	r.Register(mcp.Tool{
-		Function: mcp.Function{
+func echoRegistry(seen *string) *tools.Registry {
+	r := tools.NewRegistry()
+	r.Register(tools.Tool{
+		Function: tools.Function{
 			Name:       "echo",
-			Parameters: mcp.Schema{Type: "object", Properties: map[string]mcp.Property{"text": {Type: "string"}}},
+			Parameters: tools.Schema{Type: "object", Properties: map[string]tools.Property{"text": {Type: "string"}}},
 		},
 		Handler: func(_ context.Context, args json.RawMessage) (string, error) {
 			var a struct {
@@ -42,7 +42,7 @@ func echoRegistry(seen *string) *mcp.Registry {
 
 func toolResp(name, args string) api.ChatResponse {
 	return api.ChatResponse{Message: api.Message{
-		ToolCalls: []mcp.ToolCall{{Function: mcp.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}},
+		ToolCalls: []tools.ToolCall{{Function: tools.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}},
 	}}
 }
 

@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	glamourAnsi "github.com/charmbracelet/glamour/ansi"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 var (
@@ -143,7 +143,7 @@ func uniqueNames(in []string) []string {
 	return out
 }
 
-func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string {
+func renderCollapsedTool(call tools.ToolCall, content string, verbose bool) string {
 	status := "completed"
 	if strings.HasPrefix(content, "error:") {
 		status = "failed"
@@ -176,7 +176,7 @@ func renderCollapsedTool(call mcp.ToolCall, content string, verbose bool) string
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func renderToolCall(call mcp.ToolCall, verbose bool) string {
+func renderToolCall(call tools.ToolCall, verbose bool) string {
 	name := fmt.Sprintf("**›** `%s`", call.Function.Name)
 	if !verbose {
 		return name
@@ -339,3 +339,11 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 	}
 	return s
 }
+
+// LaTeX math notation patterns. We rewrite $…$ / $$…$$ as inline code so
+// the user sees a styled span instead of literal dollar signs (glamour has no
+// math renderer). Currency like "$5" doesn't match because it has no closer.
+var (
+	mathDisplayRe = regexp.MustCompile(`\$\$([^\n$]+?)\$\$`)
+	mathInlineRe  = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)
+)

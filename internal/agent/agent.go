@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // ChatClient is the subset of api.OllamaHost the loop needs; an interface so the
@@ -50,11 +50,11 @@ const (
 // decoding escalation, repeated-call and oscillation detection — and, rather
 // than dead-ending on the step cap, forces a final tool-less synthesis so
 // partial findings are always returned.
-func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, opts Options) (Result, error) {
+func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string, opts Options) (Result, error) {
 	if opts.MaxSteps <= 0 {
 		opts.MaxSteps = defaultMaxSteps
 	}
-	tools := filterTools(reg.Definitions(), opts.ToolFilter)
+	defs := filterTools(reg.Definitions(), opts.ToolFilter)
 	options := map[string]any{}
 	if opts.NumCtx > 0 {
 		options["num_ctx"] = opts.NumCtx
@@ -74,7 +74,7 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 		resp, err := host.ChatOnce(ctx, api.ChatRequest{
 			Model:    opts.Model,
 			Messages: msgs,
-			Tools:    tools,
+			Tools:    defs,
 			Options:  options,
 		})
 		if err != nil {
@@ -88,7 +88,7 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 			res.Output = resp.Message.Content
 			return res, nil
 		}
-		calls = mcp.DedupeCalls(calls)
+		calls = tools.DedupeCalls(calls)
 
 		res.Steps++
 		msgs = append(msgs, api.Message{Role: "assistant", Content: resp.Message.Content, ToolCalls: calls})
@@ -101,7 +101,7 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 					Content: "error: tool not permitted for this agent"})
 				continue
 			}
-			fp := mcp.CallFingerprint(c)
+			fp := tools.CallFingerprint(c)
 			recent = append(recent, fp)
 			if len(recent) > recentCallsKept {
 				recent = recent[1:]
@@ -120,23 +120,23 @@ func Run(ctx context.Context, host ChatClient, reg *mcp.Registry, task string, o
 			// Same tool-call robustness as the TUI loop: salvage almost-valid JSON,
 			// run with a per-call timeout + panic recovery, escalate argument
 			// errors to constrained decoding, and feed back actionable hints.
-			c.Function.Arguments = mcp.SalvageJSON(c.Function.Arguments)
+			c.Function.Arguments = tools.SalvageJSON(c.Function.Arguments)
 			out, err := invokeWithTimeout(ctx, reg, c, toolTimeout(c))
-			if err != nil && mcp.ShouldFormatRepair(c, err) {
+			if err != nil && tools.ShouldFormatRepair(c, err) {
 				if fixed, ok := RepairArgsViaFormat(ctx, host, reg, opts.Model, opts.NumCtx, c); ok {
 					c.Function.Arguments = fixed
 					out, err = invokeWithTimeout(ctx, reg, c, toolTimeout(c))
 				}
 			}
 			if err != nil {
-				out = mcp.RepairHint(c, err)
+				out = tools.RepairHint(c, err)
 			}
 			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: out})
 		}
 
 		// No forward motion — every call this round was a refused repeat, or the
 		// model is oscillating A/B/A/B. Stop and synthesize what we have.
-		if !progressed || mcp.IsOscillating(recent) {
+		if !progressed || tools.IsOscillating(recent) {
 			break
 		}
 	}
@@ -163,11 +163,11 @@ func finalize(ctx context.Context, host ChatClient, opts Options, options map[st
 	return resp.Message.Content
 }
 
-func filterTools(all []mcp.Tool, f func(string) bool) []mcp.Tool {
+func filterTools(all []tools.Tool, f func(string) bool) []tools.Tool {
 	if f == nil {
 		return all
 	}
-	out := make([]mcp.Tool, 0, len(all))
+	out := make([]tools.Tool, 0, len(all))
 	for _, t := range all {
 		if f(t.Function.Name) {
 			out = append(out, t)

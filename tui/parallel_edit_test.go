@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func mustArgs(t *testing.T, v any) json.RawMessage {
@@ -28,7 +28,7 @@ func TestApplyStagedOp(t *testing.T) {
 	if err := os.WriteFile(f, []byte("alpha beta gamma"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := &Model{tools: mcp.DefaultRegistry()}
+	m := &Model{tools: tools.DefaultRegistry()}
 	ctx := context.Background()
 
 	if _, err := m.applyStagedOp(ctx, stagedOp{kind: "edit", path: f, oldString: "beta", newString: "BETA"}); err != nil {
@@ -112,7 +112,7 @@ func TestPlannerToolGate(t *testing.T) {
 		}
 	}
 
-	m := &Model{tools: mcp.DefaultRegistry()}
+	m := &Model{tools: tools.DefaultRegistry()}
 	reg := m.plannerRegistry(&editStage{})
 	for _, tdef := range reg.Definitions() {
 		if !plannerAllowed(tdef.Function.Name) {

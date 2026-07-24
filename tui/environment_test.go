@@ -14,7 +14,7 @@ func TestEnvironmentBlock(t *testing.T) {
 		}
 	}
 	// The VCS line must be one of the two valid forms so what the model is told
-	// always matches what the git_* tools run against (mcp.DetectVCS).
+	// always matches what the git_* tools run against (tools.DetectVCS).
 	if !strings.Contains(b, "ivaldi (NOT git)") && !strings.Contains(b, "Version control: git") {
 		t.Errorf("VCS line malformed:\n%s", b)
 	}

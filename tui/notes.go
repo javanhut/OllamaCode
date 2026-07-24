@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func (n *sessionNotes) load() {
@@ -46,13 +47,13 @@ func (n *sessionNotes) appendLine(s string) {
 	n.save()
 }
 
-func readNotesTool(notes *sessionNotes) mcp.Tool {
-	return mcp.Tool{
+func readNotesTool(notes *sessionNotes) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "read_session_notes",
 			Description: "Read your persistent session notes — a scratchpad you can use to record observations, decisions, and reminders that persist across the whole conversation. Useful for keeping context when your own context window is small.",
-			Parameters:  mcp.Schema{Type: "object", Properties: map[string]mcp.Property{}},
+			Parameters:  tools.Schema{Type: "object", Properties: map[string]tools.Property{}},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			text := notes.get()
@@ -64,15 +65,15 @@ func readNotesTool(notes *sessionNotes) mcp.Tool {
 	}
 }
 
-func updateNotesTool(notes *sessionNotes) mcp.Tool {
-	return mcp.Tool{
+func updateNotesTool(notes *sessionNotes) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "update_session_notes",
 			Description: "Replace your session notes scratchpad with a new value. Use append_session_notes to add to it instead.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"content": {Type: "string", Description: "Full new content of the notes."},
 				},
 				Required: []string{"content"},
@@ -89,4 +90,11 @@ func updateNotesTool(notes *sessionNotes) mcp.Tool {
 			return fmt.Sprintf("notes updated (%d chars)", len(a.Content)), nil
 		},
 	}
+}
+
+const notesFile = ".ollama_notes.md"
+
+type sessionNotes struct {
+	mu   sync.Mutex
+	text string
 }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 type todoStatus string
@@ -80,21 +80,21 @@ func (t *todoList) openSummary() string {
 
 // todoWriteTool lets the model maintain a task checklist. The full list is passed
 // each call and replaces the previous one (like Claude Code's TodoWrite).
-func todoWriteTool(list *todoList) mcp.Tool {
-	return mcp.Tool{
+func todoWriteTool(list *todoList) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "todo_write",
 			Description: "Maintain a checklist for a multi-step task. Pass the FULL list each call — it replaces the previous one. Mark exactly ONE item \"in_progress\" while you work it, and flip it to \"completed\" the moment it's done, then start the next. Use this for any task with 3+ steps so progress is visible and nothing is dropped. Keep items short and concrete. Do NOT end your turn while items remain incomplete unless you're blocked.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"todos": {
 						Type:        "array",
 						Description: "The complete todo list, in order.",
-						Items: &mcp.Property{
+						Items: &tools.Property{
 							Type: "object",
-							Properties: map[string]mcp.Property{
+							Properties: map[string]tools.Property{
 								"content": {Type: "string", Description: "Short, concrete description of the step."},
 								"status":  {Type: "string", Enum: []string{"pending", "in_progress", "completed"}, Description: "pending | in_progress | completed"},
 							},

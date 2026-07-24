@@ -22,7 +22,7 @@ import (
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/agent"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 const evalSystem = `You are an automated coding agent being evaluated. Use the available tools to complete the task in the current working directory, then stop. Be efficient and do not ask questions.`
@@ -101,7 +101,7 @@ func main() {
 
 	h := api.OllamaHost{}
 	h.SetURI(*host)
-	reg := mcp.DefaultRegistry()
+	reg := tools.DefaultRegistry()
 
 	origWd, err := os.Getwd()
 	if err != nil {

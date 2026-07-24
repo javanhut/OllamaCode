@@ -7,32 +7,32 @@ import (
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
-func tc(name, args string) mcp.ToolCall {
-	return mcp.ToolCall{Function: mcp.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
+func tc(name, args string) tools.ToolCall {
+	return tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
 }
 
 func TestCallFingerprint_KeyOrderStable(t *testing.T) {
-	a := mcp.CallFingerprint(tc("edit_file", `{"path":"a","old_string":"x"}`))
-	b := mcp.CallFingerprint(tc("edit_file", `{"old_string":"x","path":"a"}`))
+	a := tools.CallFingerprint(tc("edit_file", `{"path":"a","old_string":"x"}`))
+	b := tools.CallFingerprint(tc("edit_file", `{"old_string":"x","path":"a"}`))
 	if a != b {
 		t.Fatalf("fingerprints should be key-order independent:\n%s\n%s", a, b)
 	}
 }
 
 func TestCallFingerprint_DiffersByArgs(t *testing.T) {
-	if mcp.CallFingerprint(tc("read_file", `{"path":"a"}`)) == mcp.CallFingerprint(tc("read_file", `{"path":"b"}`)) {
+	if tools.CallFingerprint(tc("read_file", `{"path":"a"}`)) == tools.CallFingerprint(tc("read_file", `{"path":"b"}`)) {
 		t.Fatal("different args must produce different fingerprints")
 	}
 }
 
 func TestBatchSingleTool(t *testing.T) {
-	if got := batchSingleTool([]mcp.ToolCall{tc("switch_mode", `{"mode":"plan","reason":"a"}`), tc("switch_mode", `{"mode":"plan","reason":"b"}`)}); got != "switch_mode" {
+	if got := batchSingleTool([]tools.ToolCall{tc("switch_mode", `{"mode":"plan","reason":"a"}`), tc("switch_mode", `{"mode":"plan","reason":"b"}`)}); got != "switch_mode" {
 		t.Fatalf("same tool, varying args should return name, got %q", got)
 	}
-	if got := batchSingleTool([]mcp.ToolCall{tc("read_file", `{}`), tc("grep", `{}`)}); got != "" {
+	if got := batchSingleTool([]tools.ToolCall{tc("read_file", `{}`), tc("grep", `{}`)}); got != "" {
 		t.Fatalf("mixed tools should return empty, got %q", got)
 	}
 	if got := batchSingleTool(nil); got != "" {
@@ -43,7 +43,7 @@ func TestBatchSingleTool(t *testing.T) {
 func TestRepeatGuardTreatsDifferentInspectionArgumentsAsProgress(t *testing.T) {
 	m := &Model{}
 	for _, path := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
-		_, warn, stop, _ := m.observeRepeatedBatch([]mcp.ToolCall{
+		_, warn, stop, _ := m.observeRepeatedBatch([]tools.ToolCall{
 			tc("read_file", `{"path":"`+path+`"}`),
 		})
 		if warn || stop {
@@ -57,7 +57,7 @@ func TestRepeatGuardTreatsDifferentInspectionArgumentsAsProgress(t *testing.T) {
 
 func TestRepeatGuardStopsExactInspectionRepeat(t *testing.T) {
 	m := &Model{}
-	calls := []mcp.ToolCall{tc("read_file", `{"path":"same.go"}`)}
+	calls := []tools.ToolCall{tc("read_file", `{"path":"same.go"}`)}
 	for round := 1; round <= 6; round++ {
 		_, warn, stop, announceStop := m.observeRepeatedBatch(calls)
 		if warn != (round == 3) {
@@ -72,13 +72,13 @@ func TestRepeatGuardStopsExactInspectionRepeat(t *testing.T) {
 func TestRepeatGuardWarnsOnlyOncePerTurn(t *testing.T) {
 	m := &Model{failedCalls: make(map[string]int)}
 	for range 3 {
-		_, _, _, _ = m.observeRepeatedBatch([]mcp.ToolCall{
+		_, _, _, _ = m.observeRepeatedBatch([]tools.ToolCall{
 			tc("switch_mode", `{"mode":"plan","reason":"first"}`),
 		})
 	}
 
 	// A mixed batch demonstrates progress and resets the current streak.
-	_, warn, _, _ := m.observeRepeatedBatch([]mcp.ToolCall{
+	_, warn, _, _ := m.observeRepeatedBatch([]tools.ToolCall{
 		tc("read_file", `{"path":"progress.go"}`),
 		tc("grep", `{"pattern":"progress"}`),
 	})
@@ -87,7 +87,7 @@ func TestRepeatGuardWarnsOnlyOncePerTurn(t *testing.T) {
 	}
 
 	for _, reason := range []string{"second-a", "second-b", "second-c"} {
-		_, warn, _, _ = m.observeRepeatedBatch([]mcp.ToolCall{
+		_, warn, _, _ = m.observeRepeatedBatch([]tools.ToolCall{
 			tc("switch_mode", `{"mode":"plan","reason":"`+reason+`"}`),
 		})
 		if warn {
@@ -102,16 +102,16 @@ func TestRepeatGuardWarnsOnlyOncePerTurn(t *testing.T) {
 }
 
 func TestIsOscillating(t *testing.T) {
-	if !mcp.IsOscillating([]string{"A", "B", "A", "B"}) {
+	if !tools.IsOscillating([]string{"A", "B", "A", "B"}) {
 		t.Fatal("ABAB should be detected as oscillating")
 	}
-	if mcp.IsOscillating([]string{"A", "A", "A", "A"}) {
+	if tools.IsOscillating([]string{"A", "A", "A", "A"}) {
 		t.Fatal("AAAA is repetition, not oscillation")
 	}
-	if mcp.IsOscillating([]string{"A", "B", "C", "D"}) {
+	if tools.IsOscillating([]string{"A", "B", "C", "D"}) {
 		t.Fatal("ABCD is progress, not oscillation")
 	}
-	if mcp.IsOscillating([]string{"A", "B"}) {
+	if tools.IsOscillating([]string{"A", "B"}) {
 		t.Fatal("too short to oscillate")
 	}
 }
@@ -126,31 +126,31 @@ func TestSalvageJSON(t *testing.T) {
 		{"here you go: {\"path\":\"x\"} thanks", `{"path":"x"}`}, // surrounding prose
 	}
 	for _, c := range cases {
-		got := string(mcp.SalvageJSON(json.RawMessage(c.in)))
+		got := string(tools.SalvageJSON(json.RawMessage(c.in)))
 		if !json.Valid([]byte(got)) {
-			t.Errorf("mcp.SalvageJSON(%q) produced invalid JSON %q", c.in, got)
+			t.Errorf("tools.SalvageJSON(%q) produced invalid JSON %q", c.in, got)
 			continue
 		}
 		if got != c.want {
-			t.Errorf("mcp.SalvageJSON(%q)=%q want %q", c.in, got, c.want)
+			t.Errorf("tools.SalvageJSON(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }
 
 func TestSalvageJSON_UnrepairableUnchanged(t *testing.T) {
 	in := json.RawMessage(`not json at all`)
-	if string(mcp.SalvageJSON(in)) != string(in) {
+	if string(tools.SalvageJSON(in)) != string(in) {
 		t.Fatal("unrepairable input must be returned unchanged")
 	}
 }
 
 func TestRepairHint_ValidationError(t *testing.T) {
 	call := tc("edit_file", `{"path":"a"}`)
-	err := mcp.ValidateArgs(mcp.EditFileTool().Function, call.Function.Arguments)
+	err := tools.ValidateArgs(tools.EditFileTool().Function, call.Function.Arguments)
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	hint := mcp.RepairHint(call, err)
+	hint := tools.RepairHint(call, err)
 	if !errorsContains(hint, "new_string") {
 		t.Fatalf("repair hint should name the missing field: %s", hint)
 	}
@@ -158,7 +158,7 @@ func TestRepairHint_ValidationError(t *testing.T) {
 
 func TestRepairHint_BrokenJSON(t *testing.T) {
 	call := tc("read_file", `{"path": broken`)
-	hint := mcp.RepairHint(call, errors.New("invalid arguments"))
+	hint := tools.RepairHint(call, errors.New("invalid arguments"))
 	if !errorsContains(hint, "valid JSON") {
 		t.Fatalf("expected broken-JSON guidance, got: %s", hint)
 	}
@@ -179,7 +179,7 @@ func indexOf(s, sub string) int {
 
 func TestDedupeCalls(t *testing.T) {
 	// Exact duplicate (key order differs) dropped; distinct args kept; order preserved.
-	got := dedupeCalls([]mcp.ToolCall{
+	got := dedupeCalls([]tools.ToolCall{
 		tc("edit_file", `{"path":"a","old_string":"x"}`),
 		tc("read_file", `{"path":"b"}`),
 		tc("edit_file", `{"old_string":"x","path":"a"}`),
@@ -200,7 +200,7 @@ func TestStaleMessagesDropped(t *testing.T) {
 	m := &Model{mode: ExploreMode, turnGen: 2, streamBuf: &strings.Builder{}}
 	m.pending = &pendingBatch{
 		gen:     2,
-		calls:   []mcp.ToolCall{tc("read_file", `{"path":"a"}`), tc("read_file", `{"path":"b"}`)},
+		calls:   []tools.ToolCall{tc("read_file", `{"path":"a"}`), tc("read_file", `{"path":"b"}`)},
 		results: make([]api.Message, 2),
 		started: []bool{true, true},
 	}

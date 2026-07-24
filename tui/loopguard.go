@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Loop-safety tunables.
@@ -44,13 +44,13 @@ func (m *Model) resetTurnGuards() {
 	}
 }
 
-// dedupeCalls: see mcp.DedupeCalls (shared with the headless sub-agent loop).
-func dedupeCalls(calls []mcp.ToolCall) []mcp.ToolCall { return mcp.DedupeCalls(calls) }
+// dedupeCalls: see tools.DedupeCalls (shared with the headless sub-agent loop).
+func dedupeCalls(calls []tools.ToolCall) []tools.ToolCall { return tools.DedupeCalls(calls) }
 
 // batchSingleTool returns the tool name if every call in a batch is the same
 // tool, else "". Used to detect a model spamming one tool (e.g. switch_mode)
 // with varying arguments — which evades fingerprint-based repeat detection.
-func batchSingleTool(calls []mcp.ToolCall) string {
+func batchSingleTool(calls []tools.ToolCall) string {
 	if len(calls) == 0 {
 		return ""
 	}
@@ -75,7 +75,7 @@ var argumentSensitiveRepeatTools = map[string]bool{
 
 // batchRepeatIdentity returns the display tool name and semantic repeat key for
 // a single-tool batch. Mixed batches are progress and return empty identities.
-func batchRepeatIdentity(calls []mcp.ToolCall) (string, string) {
+func batchRepeatIdentity(calls []tools.ToolCall) (string, string) {
 	tool := batchSingleTool(calls)
 	if tool == "" {
 		return "", ""
@@ -85,7 +85,7 @@ func batchRepeatIdentity(calls []mcp.ToolCall) (string, string) {
 	}
 	fingerprints := make([]string, len(calls))
 	for i, call := range calls {
-		fingerprints[i] = mcp.CallFingerprint(call)
+		fingerprints[i] = tools.CallFingerprint(call)
 	}
 	// Reordering the same parallel reads is still the same action.
 	sort.Strings(fingerprints)
@@ -96,7 +96,7 @@ func batchRepeatIdentity(calls []mcp.ToolCall) (string, string) {
 // at most once per user turn. stop remains true after the hard threshold so a
 // text-form tool call cannot bypass a single tool-less response; announceStop
 // keeps the transcript explanation to one copy.
-func (m *Model) observeRepeatedBatch(calls []mcp.ToolCall) (tool string, warn, stop, announceStop bool) {
+func (m *Model) observeRepeatedBatch(calls []tools.ToolCall) (tool string, warn, stop, announceStop bool) {
 	tool, key := batchRepeatIdentity(calls)
 	if key == "" {
 		m.lastStepRepeatKey = ""
@@ -123,8 +123,8 @@ func (m *Model) observeRepeatedBatch(calls []mcp.ToolCall) (tool string, warn, s
 	return tool, warn, stop, announceStop
 }
 
-// canonicalJSON/callFingerprint/isOscillating moved to package mcp
+// canonicalJSON/callFingerprint/isOscillating moved to package tools
 // (CanonicalJSON/CallFingerprint/IsOscillating), and salvageJSON/repairHint/
-// shouldFormatRepair to mcp too (SalvageJSON/RepairHint/ShouldFormatRepair), so
+// shouldFormatRepair to tools too (SalvageJSON/RepairHint/ShouldFormatRepair), so
 // the headless sub-agent loop reuses the same tool-call safety. See
-// mcp/loopguard.go and mcp/repair.go.
+// tools/loopguard.go and tools/repair.go.
