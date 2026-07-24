@@ -15,10 +15,10 @@ import (
 )
 
 type Message struct {
-	Role      string         `json:"role"`
-	Content   string         `json:"content"`
-	Thinking  string         `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
-	ToolName  string         `json:"tool_name,omitempty"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	Thinking  string           `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
+	ToolName  string           `json:"tool_name,omitempty"`
 	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -26,7 +26,7 @@ type ChatRequest struct {
 	Model    string          `json:"model"`
 	Messages []Message       `json:"messages"`
 	Stream   bool            `json:"stream"` // Set to true for streaming
-	Tools    []tools.Tool      `json:"tools,omitempty"`
+	Tools    []tools.Tool    `json:"tools,omitempty"`
 	Options  map[string]any  `json:"options,omitempty"`
 	Format   json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
 	Think    *bool           `json:"think,omitempty"`  // enable reasoning on thinking-capable models
