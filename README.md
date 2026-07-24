@@ -5,6 +5,8 @@ A terminal UI chat client for Ollama with built-in filesystem and shell tool cal
 ![Go](https://img.shields.io/badge/Go-1.26-blue)
 ![bubbletea](https://img.shields.io/badge/framework-bubbletea-v2-purple)
 
+[![Go CI](https://github.com/javanhut/OllamaCode/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/OllamaCode/actions/workflows/ci.yml)
+
 ## Features
 
 - **Streaming chat** with local Ollama models
