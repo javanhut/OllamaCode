@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
