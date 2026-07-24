@@ -19,6 +19,9 @@ jobs:
       with:
         go-version: '1.26' # Use the desired Go version
 
+    - name: Install Gio Linux dependencies
+      run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libx11-dev libx11-xcb-dev libxcursor-dev libvulkan-dev
+
     - name: Check formatting (go fmt)
       run: go fmt ./...
 

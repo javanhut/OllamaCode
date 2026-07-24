@@ -125,7 +125,7 @@ run = [
 [commands.test]
 desc = "runs go test"
 alias = ["t"]
-run = ["go test"]
+run = ["go test ./..."]
 
 [commands.format]
 desc = "Runs go format on binary"
