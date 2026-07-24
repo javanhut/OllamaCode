@@ -1,0 +1,26 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true # If your project uses submodules, uncomment this.
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26' # Use the desired Go version
+
+    - name: Check formatting (go fmt)
+      run: go fmt ./...
+
+    - name: Run unit tests (go test)
+      run: go test -v ./...
