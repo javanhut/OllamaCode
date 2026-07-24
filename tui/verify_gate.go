@@ -103,14 +103,7 @@ func (m *Model) endTurnTail() []tea.Cmd {
 		}
 	}
 	if len(m.queue) > 0 {
-		next := m.queue[0]
-		m.queue = m.queue[1:]
-		m.history = append(m.history, api.Message{Role: "user", Content: next})
-		m.logActivity("Message (dequeued): " + next)
-		m.resetTurnGuards()
-		cmds = append(cmds, m.startStream())
-		m.refreshTranscript()
-		m.viewport.GotoBottom()
+		cmds = append(cmds, m.dequeueNext())
 	}
 	return cmds
 }

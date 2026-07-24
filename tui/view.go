@@ -236,31 +236,58 @@ func (m *Model) slashSuggestionsView() string {
 	return b.String()
 }
 
-func (m *Model) inputView() string {
-	width := m.width
-	if width <= 0 {
-		width = lipgloss.Width(m.input.View())
-	}
-
+// inputPrefix renders the label that sits left of the input band. layout()
+// measures it to size the textarea, so the math lives in exactly one place.
+func (m *Model) inputPrefix() string {
 	c := m.mode.color()
 	label := "message"
 	if m.streaming {
 		label = "queued while streaming"
 	}
-	prefix := lipgloss.NewStyle().
+	return lipgloss.NewStyle().
 		Background(c).
 		Foreground(lipgloss.Color("232")).
 		Bold(true).
 		Padding(0, 1).
 		Render(label)
+}
+
+// narrowStatusLine is the one-line status strip shown above the input band
+// when the terminal is too narrow for the sidebar (<60 cols); wider layouts
+// carry status and toast in the sidebar instead. It is always exactly one
+// line so the band height — and the layout math built on it — stays stable.
+func (m *Model) narrowStatusLine() string {
+	if m.sidebarWidth() > 0 {
+		return ""
+	}
+	text, busy := m.statusText()
+	var line string
+	if busy {
+		line = m.spinner.View() + " " + bodyStyle.Copy().Bold(true).Render(text)
+	} else {
+		line = mutedStyle.Render(text)
+	}
+	if m.toast != "" {
+		line += "  " + hintStyle.Render(truncatePlain(m.toast, max(m.width-lipgloss.Width(text)-4, 10)))
+	}
+	return line
+}
+
+func (m *Model) inputView() string {
+	prefix := m.inputPrefix()
 
 	// The mascot is drawn separately as a corner overlay (see overlayFace), so
-	// the input takes the full width here.
-	inputW := max(1, width-lipgloss.Width(prefix)-2)
-	input := inputBandStyle.Width(inputW).Render(m.input.View())
+	// the input takes the full width here. The textarea already wraps at the
+	// width layout() gave it (same prefix math), so the band must NOT re-wrap
+	// with Style.Width — that hard re-wrap mangled long pastes into orphan
+	// fragments.
+	input := inputBandStyle.Render(m.input.View())
 	bottomBar := prefix + input
 
 	suggestions := m.slashSuggestionsView()
+	if status := m.narrowStatusLine(); status != "" {
+		return suggestions + "\n" + status + "\n" + bottomBar
+	}
 	return suggestions + "\n" + bottomBar
 }
 

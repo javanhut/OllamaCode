@@ -240,6 +240,7 @@ type Model struct {
 	contextLimit   int
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)
 	compacting     bool   // guards against overlapping compaction passes
+	retrieving     bool   // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
 	turnGen            int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
@@ -517,5 +518,7 @@ func (m *Model) layout() {
 	}
 	m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
 
-	m.input.SetWidth(m.width - 4)
+	// Wrap the textarea at the room actually left of the prefix (same math as
+	// inputView) so the textarea — and only the textarea — wraps long input.
+	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())-2))
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -203,7 +204,11 @@ func (m *Model) startStreamWithRAGGate(query string) []tea.Cmd {
 		cmds = append(cmds, c)
 	}
 	if m.ragEnabled() && m.ragReady {
-		cmds = append(cmds, m.retrieveRAGCmd(query)) // startStream fires on ragRetrievedMsg
+		// The model call waits on retrieval (fires on ragRetrievedMsg); flag it
+		// so the UI shows a searching state instead of looking idle.
+		m.retrieving = true
+		m.busySince = time.Now()
+		cmds = append(cmds, m.retrieveRAGCmd(query))
 	} else {
 		cmds = append(cmds, m.startStream())
 	}

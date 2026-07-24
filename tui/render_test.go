@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func TestLastTurnDiffs(t *testing.T) {
@@ -38,6 +40,32 @@ func TestSplitDiff(t *testing.T) {
 	// No diff present -> whole thing is summary.
 	if s, d := splitDiff("wrote 10 bytes to x\nNew Hash: z"); d != "" || s != "wrote 10 bytes to x\nNew Hash: z" {
 		t.Fatalf("expected no diff, got summary=%q diff=%q", s, d)
+	}
+}
+
+func TestStripLatexMath_SkipsFencedCode(t *testing.T) {
+	// $…$ inside a fenced code block must stay literal; outside it rewrites.
+	in := "outside $x + y$ here\n```\ninside $x + y$ code\n```"
+	got := stripLatexMath(in)
+	if !strings.Contains(got, "`x + y` here") {
+		t.Fatalf("inline math outside fence not rewritten:\n%s", got)
+	}
+	if !strings.Contains(got, "```\ninside $x + y$ code\n```") {
+		t.Fatalf("math inside fenced code was rewritten:\n%s", got)
+	}
+}
+
+func TestRenderCollapsedTool_FencedDump(t *testing.T) {
+	call := tools.ToolCall{Function: tools.ToolCallFunction{Name: "run_shell"}}
+	content := "# not a heading\n- not a list\nhas ``` backticks\n\x1b[31mred\x1b[0m"
+	got := renderCollapsedTool(call, content, true, 80)
+	// Raw markdown metacharacters must sit inside a fence longer than the
+	// backtick run in the content, and ANSI escapes must be stripped.
+	if !strings.Contains(got, "````\n# not a heading\n- not a list\nhas ``` backticks\nred\n````") {
+		t.Fatalf("expected fenced, stripped dump, got:\n%s", got)
+	}
+	if strings.Contains(got, "> ") {
+		t.Fatalf("dump still uses blockquote lines:\n%s", got)
 	}
 }
 

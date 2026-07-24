@@ -11,6 +11,7 @@ import (
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/session"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -161,10 +162,19 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "n", "esc":
 		i := m.pending.index
 		call := m.pending.calls[i]
+		// Count the denial as a failure of this exact call so the identical-call
+		// short-circuit in processPendingTools fires on a retry, and record it in
+		// recentCalls so oscillation detection can see reject-retry loops.
+		fp := tools.CallFingerprint(call)
+		m.failedCalls[fp]++
+		m.recentCalls = append(m.recentCalls, fp)
+		if len(m.recentCalls) > recentCallsKept {
+			m.recentCalls = m.recentCalls[len(m.recentCalls)-recentCallsKept:]
+		}
 		m.pending.results[i] = api.Message{
 			Role:     "tool",
 			ToolName: call.Function.Name,
-			Content:  "denied by user",
+			Content:  "denied by user. Do NOT retry this call or a minor variant of it — the user rejected it. Take a different approach, or ask the user how to proceed in plain text.",
 		}
 		m.pending.started[i] = true
 		m.pending.done++

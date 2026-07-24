@@ -31,7 +31,9 @@ func (m *Model) refreshTranscript() {
 				flushTurn()
 				b.WriteString(userStyle.Render("You"))
 				b.WriteString("\n")
-				b.WriteString(msg.Content)
+				// Strip escapes/CR/control chars so pasted content can't
+				// corrupt the terminal layout.
+				b.WriteString(stripControl(msg.Content))
 				b.WriteString("\n\n")
 				i++
 			case "assistant", "tool":
@@ -48,14 +50,23 @@ func (m *Model) refreshTranscript() {
 			}
 		}
 
-		if m.streaming {
+		switch {
+		case m.streaming:
 			if openTurn == nil {
 				openTurn = &assistantTurn{}
 			}
 			openTurn.streaming = true
 			if m.streamBuf.Len() > 0 {
-				openTurn.contents = append(openTurn.contents, m.streamBuf.String())
+				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String()})
 			}
+		case m.retrieving || m.compacting || m.verifying:
+			// Turn-start gates (RAG retrieval, compaction) and the verify gate
+			// run with m.streaming false; open a turn anyway so the phase
+			// spinner renders instead of the transcript looking frozen.
+			if openTurn == nil {
+				openTurn = &assistantTurn{}
+			}
+			openTurn.streaming = true
 		}
 		flushTurn()
 	}
@@ -78,11 +89,18 @@ func (m *Model) refreshTranscript() {
 	}
 }
 
+// turnSegment is one ordered piece of an assistant turn: either a block of
+// assistant text or a single visible tool call, in the order they happened.
+type turnSegment struct {
+	text string         // non-empty => text segment
+	tool *toolCallEntry // non-nil => tool-call segment
+}
+
 // assistantTurn is one rendered Layla block: all assistant content between
-// two user messages, plus the visible tool calls fired during it.
+// two user messages, plus the visible tool calls fired during it, kept in
+// chronological order.
 type assistantTurn struct {
-	contents  []string
-	toolCalls []toolCallEntry
+	segments  []turnSegment
 	streaming bool
 }
 
@@ -106,7 +124,7 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 		}
 		if msg.Role == "assistant" {
 			if msg.Content != "" {
-				t.contents = append(t.contents, msg.Content)
+				t.segments = append(t.segments, turnSegment{text: msg.Content})
 			}
 			for _, call := range msg.ToolCalls {
 				resultIdx := -1
@@ -128,7 +146,7 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 					entry.result = m.history[resultIdx].Content
 					entry.hasResult = true
 				}
-				t.toolCalls = append(t.toolCalls, entry)
+				t.segments = append(t.segments, turnSegment{tool: &entry})
 			}
 		}
 		i++
@@ -136,22 +154,34 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 	return t, i
 }
 
-// writeAssistantTurn renders a turn as a single Layla block: header,
-// concatenated content, then tool calls — collapsed by default, expanded when
-// the user has toggled `ctrl+t`.
+// writeAssistantTurn renders a turn as a single Layla block: header, then the
+// turn's segments in chronological order — text where it was produced, tool
+// calls where they fired. Tool calls are collapsed by default, expanded when
+// the user has toggled `ctrl+t`; consecutive calls group into one summary.
 func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool) {
 	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
 
-	fullContent := strings.Join(t.contents, "")
-	if fullContent != "" {
-		b.WriteString(m.renderMarkdown(fullContent, true))
-		b.WriteString("\n")
+	hasText := false
+	for _, seg := range t.segments {
+		if seg.text != "" {
+			hasText = true
+			break
+		}
 	}
 
-	if t.streaming && fullContent == "" && m.pending == nil {
+	if t.streaming && !hasText && m.pending == nil {
+		phase := " Thinking..."
+		switch {
+		case m.retrieving:
+			phase = " Searching code..."
+		case m.compacting:
+			phase = " Compacting context..."
+		case m.verifying:
+			phase = " Verifying..."
+		}
 		b.WriteString(m.spinner.View())
-		b.WriteString(mutedStyle.Render(" Thinking..."))
+		b.WriteString(mutedStyle.Render(phase))
 		b.WriteString("\n")
 		// Live reasoning ticker: the last line of the model's thinking stream,
 		// so long reasoning reads as progress instead of a frozen spinner.
@@ -161,41 +191,60 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		}
 	}
 
-	if len(t.toolCalls) > 0 {
+	toolWidth := max(m.viewport.Width()-4, 20)
+	for i := 0; i < len(t.segments); i++ {
+		seg := t.segments[i]
+		if seg.tool == nil {
+			// Partial stream text changes every tick, so skip the render cache
+			// while streaming instead of caching strings that will never recur.
+			b.WriteString(m.renderMarkdown(seg.text, !t.streaming))
+			b.WriteString("\n")
+			continue
+		}
+		// Group the run of consecutive tool-call segments.
+		j := i
+		for j < len(t.segments) && t.segments[j].tool != nil {
+			j++
+		}
+		group := t.segments[i:j]
+		i = j - 1
+
 		b.WriteString("\n")
 		if m.expandTools {
 			b.WriteString(mutedStyle.Render(fmt.Sprintf("▾ %d tool call%s (ctrl+t to collapse)",
-				len(t.toolCalls), plural(len(t.toolCalls)))))
+				len(group), plural(len(group)))))
 			b.WriteString("\n")
-			for _, entry := range t.toolCalls {
+			for _, s := range group {
+				entry := s.tool
 				if entry.hasResult {
 					// When a mutating tool reports a diff, show it colorized (green
 					// additions / red deletions) below the header instead of a plain
-					// blockquote — so edits read like any other coding CLI.
+					// dump — so edits read like any other coding CLI.
 					if summary, diff := splitDiff(entry.result); diff != "" {
-						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, summary, m.cfg.Verbose), true))
+						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, summary, m.cfg.Verbose, toolWidth), true))
 						b.WriteString("\n")
 						b.WriteString(colorizeDiff(diff, m.viewport.Width()-2))
 					} else {
-						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, entry.result, m.cfg.Verbose), true))
+						b.WriteString(m.renderMarkdown(renderCollapsedTool(entry.call, entry.result, m.cfg.Verbose, toolWidth), true))
 					}
 				} else {
-					b.WriteString(m.renderMarkdown(renderToolCall(entry.call, m.cfg.Verbose), true))
+					b.WriteString(m.renderMarkdown(renderToolCall(entry.call, m.cfg.Verbose, toolWidth), true))
 				}
 				b.WriteString("\n")
 			}
 		} else {
-			names := make([]string, 0, len(t.toolCalls))
-			for _, entry := range t.toolCalls {
-				names = append(names, entry.call.Function.Name)
+			names := make([]string, 0, len(group))
+			for _, s := range group {
+				names = append(names, s.tool.call.Function.Name)
 			}
 			summary := fmt.Sprintf("▸ %d tool call%s — %s · ctrl+t to expand",
-				len(t.toolCalls), plural(len(t.toolCalls)), strings.Join(uniqueNames(names), ", "))
+				len(group), plural(len(group)), strings.Join(uniqueNames(names), ", "))
 			b.WriteString(mutedStyle.Render(summary))
 			b.WriteString("\n")
 			// Even when tool calls are collapsed, always surface file diffs so the
 			// user sees the changes the agent made — like any other coding CLI.
-			for _, entry := range t.toolCalls {
+			for _, s := range group {
+				entry := s.tool
 				if _, diff := splitDiff(entry.result); diff != "" {
 					b.WriteString(mutedStyle.Render("  ✎ " + entry.call.Function.Name))
 					b.WriteString("\n")
@@ -210,10 +259,15 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString(m.spinner.View())
 		label := m.currentToolLabel()
 		if label != "" {
-			b.WriteString(mutedStyle.Render(fmt.Sprintf(" running %s… (%d/%d)", label, m.pending.done, len(m.pending.calls))))
+			b.WriteString(mutedStyle.Render(fmt.Sprintf(" running %s… (%d/%d)%s", label, m.pending.done, len(m.pending.calls), m.elapsedSuffix())))
 		} else {
-			b.WriteString(mutedStyle.Render(" working…"))
+			b.WriteString(mutedStyle.Render(" working…" + m.elapsedSuffix()))
 		}
+		b.WriteString("\n")
+	}
+	if t.streaming && m.verifying {
+		b.WriteString(m.spinner.View())
+		b.WriteString(mutedStyle.Render(" verifying…" + m.elapsedSuffix()))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")

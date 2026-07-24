@@ -29,6 +29,10 @@ type chatErrMsg struct {
 	gen int
 	err error
 }
+
+// retryStreamMsg fires after a retry backoff delay to re-kick a failed stream;
+// gen guards against stale retries from a cancelled or replaced turn.
+type retryStreamMsg struct{ gen int }
 type chatToolCallsMsg struct {
 	gen     int
 	content string
@@ -86,7 +90,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if (m.streaming && m.streamBuf.Len() == 0) || m.pending != nil {
+		// Keep the phase spinners and elapsed counters moving during any busy
+		// phase, including stalls mid-stream and the turn-start/verify gates.
+		if m.streaming || m.pending != nil || m.verifying || m.retrieving || m.compacting {
 			m.refreshTranscript()
 		}
 		if dc := m.maybeDream(); dc != nil {
@@ -202,6 +208,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.ClearHighlights()
 		}
 		if k := msg.String(); k == "ctrl+c" {
+			// Mid-turn, ctrl+c interrupts the turn (like esc) instead of
+			// quitting; it only quits when idle.
+			if m.streaming {
+				return m, m.interruptTurn()
+			}
 			return m, tea.Quit
 		}
 		if msg.String() == "esc" && m.slashVisible {
@@ -210,16 +221,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.slashSelected = 0
 			return m, nil
 		}
-		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil {
-			m.stream.cancel()
-			m.turnGen++ // orphan any in-flight stream/tool messages
-			m.streaming = false
-			m.stream = nil
-			m.pending = nil
-			m.busySince = time.Time{}
-			m.toast = "stopped"
-			m.refreshTranscript()
-			return m, nil
+		// Not at a permission prompt: there, esc means "deny this call" and is
+		// handled by updatePermission, not by cancelling the whole turn.
+		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil && m.state != statePermission {
+			return m, m.interruptTurn()
 		}
 		if msg.String() == "ctrl+t" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			m.expandTools = !m.expandTools
@@ -511,6 +516,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale completion from a cancelled/replaced stream
 		}
 		m.streamRetries = 0
+		// A successful completion supersedes any "stream error — retrying"
+		// toast left over from a recovered transient failure.
+		if strings.HasPrefix(m.toast, "stream error") {
+			m.toast = ""
+		}
 		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.content != "" {
@@ -619,6 +629,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ragRetrievedMsg:
 		// Retrieval finished for a user turn; record the block and start the
 		// model call now that relevant context is in hand.
+		m.retrieving = false
 		m.lastRagQuery = msg.query
 		m.lastRagBlock = msg.block
 		cmds = append(cmds, m.startStream())
@@ -630,14 +641,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale error (e.g. "context canceled" from an esc'd stream)
 		}
 		// Transient failure (connection reset, 5xx, idle timeout): retry the
-		// stream a bounded number of times before killing the turn. History is
-		// intact, so the request simply regenerates from the same state.
+		// stream a bounded number of times before killing the turn, with a
+		// linear backoff so a struggling backend gets room to recover. History
+		// is intact, so the request simply regenerates from the same state.
 		if !m.compacting && m.streamRetries < maxStreamRetries {
 			m.streamRetries++
+			delay := time.Duration(m.streamRetries) * 2 * time.Second
 			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))
-			m.toast = fmt.Sprintf("stream error — retrying (%d/%d)", m.streamRetries, maxStreamRetries)
+			m.toast = fmt.Sprintf("stream error — retrying (%d/%d) in %ds…", m.streamRetries, maxStreamRetries, int(delay.Seconds()))
 			m.streamBuf.Reset() // discard the partial response; the retry regenerates it
-			cmds = append(cmds, m.startStream())
+			gen := m.turnGen
+			cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg { return retryStreamMsg{gen: gen} }))
 			m.refreshTranscript()
 			break
 		}
@@ -655,15 +669,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 		if len(m.queue) > 0 {
-			next := m.queue[0]
-			m.queue = m.queue[1:]
-			m.history = append(m.history, api.Message{Role: "user", Content: next})
-			m.logActivity("Message (dequeued): " + next)
-			m.resetTurnGuards()
-			cmds = append(cmds, m.startStream())
-			m.refreshTranscript()
-			m.viewport.GotoBottom()
+			cmds = append(cmds, m.dequeueNext())
 		}
+
+	case retryStreamMsg:
+		if msg.gen != m.turnGen {
+			break // stale retry from a cancelled/replaced turn
+		}
+		cmds = append(cmds, m.startStream())
+		m.refreshTranscript()
 
 	case companionTranscriptMsg:
 		if m.state == stateChat {
@@ -718,15 +732,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pullInput, cmd = m.pullInput.Update(msg)
 		cmds = append(cmds, cmd)
 	case stateChat:
-		prevH := m.input.Height()
+		prevBandH := lipgloss.Height(m.inputView())
 		prevSlash := len(m.slashSuggestions)
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
 		m.updateSlashSuggestions()
-		// Relayout when the input grows/shrinks or the slash menu's height changes
-		// so the viewport stays sized correctly above the (taller) input area.
-		if m.input.Height() != prevH || len(m.slashSuggestions) != prevSlash {
+		// Relayout when the rendered input band grows/shrinks (wrapped pastes,
+		// slash menu, narrow-mode status line) so the viewport stays sized
+		// correctly above the input area. The rendered height — not just the
+		// textarea's own Height() — is what actually takes screen rows.
+		if lipgloss.Height(m.inputView()) != prevBandH || len(m.slashSuggestions) != prevSlash {
 			m.layout()
 		}
 		m.viewport, cmd = m.viewport.Update(msg)

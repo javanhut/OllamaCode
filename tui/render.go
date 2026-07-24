@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	glamourAnsi "github.com/charmbracelet/glamour/ansi"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -143,7 +144,59 @@ func uniqueNames(in []string) []string {
 	return out
 }
 
-func renderCollapsedTool(call tools.ToolCall, content string, verbose bool) string {
+// stripControl removes ANSI escape sequences and stray control characters
+// (except \n and \t) so pasted text or tool output can't corrupt the terminal
+// layout when echoed back into the transcript.
+func stripControl(s string) string {
+	s = ansi.Strip(s)
+	return strings.Map(func(r rune) rune {
+		if r < ' ' && r != '\n' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// codeFence returns a backtick fence guaranteed to be longer than any
+// backtick run in content, so content can never close its own code block.
+func codeFence(content string) string {
+	longest, run := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	return strings.Repeat("`", max(3, longest+1))
+}
+
+// fencedDump wraps raw content in a fenced code block so markdown
+// metacharacters in tool output aren't re-parsed by the renderer. Lines are
+// capped at maxLines and truncated to width cells.
+func fencedDump(content string, maxLines, width int) string {
+	content = stripControl(content)
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	truncated := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+
+	var b strings.Builder
+	b.WriteString(codeFence(content))
+	for _, line := range lines {
+		b.WriteString("\n" + ansi.Truncate(line, width, "..."))
+	}
+	if truncated {
+		b.WriteString("\n…")
+	}
+	b.WriteString("\n" + codeFence(content))
+	return b.String()
+}
+
+func renderCollapsedTool(call tools.ToolCall, content string, verbose bool, width int) string {
 	status := "completed"
 	if strings.HasPrefix(content, "error:") {
 		status = "failed"
@@ -154,42 +207,23 @@ func renderCollapsedTool(call tools.ToolCall, content string, verbose bool) stri
 		return header
 	}
 
-	const maxLines = 12
-	const maxWidth = 200
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
-	}
-
-	var b strings.Builder
-	b.WriteString(header)
-	b.WriteString("\n")
-	for _, line := range lines {
-		b.WriteString("> " + truncatePlain(line, maxWidth))
-		b.WriteString("\n")
-	}
-	if truncated {
-		b.WriteString("> …")
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return header + "\n" + fencedDump(content, 12, width)
 }
 
-func renderToolCall(call tools.ToolCall, verbose bool) string {
+func renderToolCall(call tools.ToolCall, verbose bool, width int) string {
 	name := fmt.Sprintf("**›** `%s`", call.Function.Name)
 	if !verbose {
 		return name
 	}
-	args := strings.TrimSpace(string(call.Function.Arguments))
+	args := stripControl(strings.TrimSpace(string(call.Function.Arguments)))
 	if args == "" {
 		args = "{}"
 	}
-	args = truncatePlain(strings.ReplaceAll(args, "\n", " "), 200)
-	return name + " " + args
+	args = ansi.Truncate(strings.ReplaceAll(args, "\n", " "), width, "...")
+	return name + "\n" + codeFence(args) + "\n" + args + "\n" + codeFence(args)
 }
 
-func renderToolResult(name, content string, verbose bool) string {
+func renderToolResult(name, content string, verbose bool, width int) string {
 	status := "completed"
 	if strings.HasPrefix(content, "error:") {
 		status = "failed"
@@ -200,26 +234,7 @@ func renderToolResult(name, content string, verbose bool) string {
 		return header
 	}
 
-	const maxLines = 12
-	const maxWidth = 200
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
-	}
-
-	var b strings.Builder
-	b.WriteString(header)
-	b.WriteString("\n")
-	for _, line := range lines {
-		b.WriteString("> " + truncatePlain(line, maxWidth))
-		b.WriteString("\n")
-	}
-	if truncated {
-		b.WriteString("> …")
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return header + "\n" + fencedDump(content, 12, width)
 }
 
 // laylaMarkdownStyle returns a glamour style based on the dark theme but with
@@ -254,13 +269,23 @@ func stripLatexMath(s string) string {
 		return s
 	}
 
-	// Handle multi-line $$ ... $$ and \[ ... \] blocks by converting to code blocks
-	// Handle inline $ ... $ and \( ... \) by converting to inline code
+	// Split on ``` fences and rewrite math only in the non-code segments
+	// (even indices), so $…$ inside code blocks stays literal.
+	segments := strings.Split(s, "```")
+	for i := 0; i < len(segments); i += 2 {
+		segments[i] = rewriteMath(segments[i])
+	}
+	return strings.Join(segments, "```")
+}
+
+// rewriteMath applies the math replacements to a single non-code segment:
+// multi-line $$ … $$ and \[ … \] blocks become code blocks, inline $ … $
+// and \( … \) become inline code.
+func rewriteMath(s string) string {
 	s = regexp.MustCompile(`(?s)\$\$(.*?)\$\$`).ReplaceAllString(s, "```latex\n$1\n```")
 	s = regexp.MustCompile(`(?s)\\\[(.*?)\\\]`).ReplaceAllString(s, "```latex\n$1\n```")
 	s = regexp.MustCompile(`\\\((.*?)\\\)`).ReplaceAllString(s, "`$1`")
 	s = mathInlineRe.ReplaceAllString(s, "`$1`")
-
 	return s
 }
 

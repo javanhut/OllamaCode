@@ -44,6 +44,10 @@ func (m *Model) statusText() (string, bool) {
 			return fmt.Sprintf("TOOLS %d/%d · %s%s", m.pending.done, len(m.pending.calls), label, m.elapsedSuffix()), true
 		}
 		return fmt.Sprintf("TOOLS %d/%d%s", m.pending.done, len(m.pending.calls), m.elapsedSuffix()), true
+	case m.retrieving:
+		return "SEARCHING CODE" + m.elapsedSuffix(), true
+	case m.compacting:
+		return "COMPACTING" + m.elapsedSuffix(), true
 	case m.streaming && m.streamBuf.Len() == 0:
 		return "THINKING" + m.elapsedSuffix(), true
 	case m.streaming:

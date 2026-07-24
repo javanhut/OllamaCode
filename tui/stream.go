@@ -30,6 +30,15 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 
+	// Keep the queue FIFO: anything already waiting goes first, so a new
+	// submission lines up behind it and the head starts now.
+	if len(m.queue) > 0 {
+		m.queue = append(m.queue, value)
+		m.input.Reset()
+		m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
+		return m.dequeueNext()
+	}
+
 	// If we dreamt while the user was away, hand those thoughts to the model so
 	// it can mention them in its reply.
 	if dctx, ok := m.dreamWakeContext(); ok {
@@ -64,6 +73,47 @@ func (m *Model) submit() tea.Cmd {
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
 	return tea.Batch(cmds...)
+}
+
+// dequeueNext pops the oldest queued message and starts a new turn with it.
+// Shared by endTurnTail, the chatErrMsg final-failure path, and interruptTurn
+// so the queue always drains FIFO with fresh per-turn guards.
+func (m *Model) dequeueNext() tea.Cmd {
+	next := m.queue[0]
+	m.queue = m.queue[1:]
+	m.history = append(m.history, api.Message{Role: "user", Content: next})
+	m.logActivity("Message (dequeued): " + next)
+	m.resetTurnGuards()
+	cmd := m.startStream()
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	return cmd
+}
+
+// interruptTurn cancels the in-flight turn, clears stream state, and runs the
+// oldest queued message next when one is waiting. Shared by the esc/ctrl+s
+// cancel and ctrl+c mid-turn so both paths behave identically.
+func (m *Model) interruptTurn() tea.Cmd {
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	m.turnGen++ // orphan any in-flight stream/tool messages
+	m.streaming = false
+	m.stream = nil
+	m.pending = nil
+	m.busySince = time.Time{}
+	m.resetTurnGuards()
+	m.streamBuf.Reset()
+	if m.state == statePermission {
+		m.state = stateChat
+	}
+	if len(m.queue) > 0 {
+		m.toast = "stopped — running queued message"
+		return m.dequeueNext()
+	}
+	m.toast = "stopped"
+	m.refreshTranscript()
+	return nil
 }
 
 func (m *Model) compactContext() tea.Cmd {
