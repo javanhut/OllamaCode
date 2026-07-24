@@ -66,7 +66,7 @@ func StartAudioCapture() (<-chan AudioFrame, func()) {
 			}
 			samples := make([]int16, AudioFrameSize)
 			var sum float64
-			for i := 0; i < AudioFrameSize; i++ {
+			for i := range AudioFrameSize {
 				s := int16(binary.LittleEndian.Uint16(buf[i*2:]))
 				samples[i] = s
 				v := float64(s) / 32768.0

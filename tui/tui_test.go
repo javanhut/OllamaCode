@@ -10,7 +10,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func TestParseModeSwitchArgs(t *testing.T) {
@@ -53,22 +53,23 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 	m := &Model{
 		mode:       PlanMode,
 		state:      stateChat,
-		tools:      mcp.NewRegistry(),
+		tools:      tools.NewRegistry(),
 		notes:      &sessionNotes{},
 		transcript: &strings.Builder{},
 		streamBuf:  &strings.Builder{},
-		mdCache:    map[string]string{},
+		md:         newMarkdownRenderer(),
+		notesMd:    newMarkdownRenderer(),
 		history: []api.Message{{
 			Role: "assistant",
-			ToolCalls: []mcp.ToolCall{
+			ToolCalls: []tools.ToolCall{
 				{
-					Function: mcp.ToolCallFunction{
+					Function: tools.ToolCallFunction{
 						Name:      "switch_mode",
 						Arguments: json.RawMessage(`{"mode":"write","reason":"ready to edit"}`),
 					},
 				},
 				{
-					Function: mcp.ToolCallFunction{
+					Function: tools.ToolCallFunction{
 						Name:      "write_file",
 						Arguments: json.RawMessage(`{"path":"example.txt","content":"hello"}`),
 					},
@@ -142,14 +143,14 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 	defer func() { defaultToolCallTimeout = oldTimeout }()
 
 	m := &Model{
-		tools: mcp.NewRegistry(),
+		tools: tools.NewRegistry(),
 		cfg:   config{Host: DefaultHost},
 	}
-	m.tools.Register(mcp.Tool{
+	m.tools.Register(tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name: "stuck_tool",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
 			},
 		},
@@ -160,8 +161,8 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 	})
 
 	start := time.Now()
-	raw := m.invokeToolCmd(0, mcp.ToolCall{
-		Function: mcp.ToolCallFunction{
+	raw := m.invokeToolCmd(0, 0, tools.ToolCall{
+		Function: tools.ToolCallFunction{
 			Name:      "stuck_tool",
 			Arguments: json.RawMessage(`{}`),
 		},
@@ -182,12 +183,12 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 func TestToolCallTimeoutPolicy(t *testing.T) {
 	tests := []struct {
 		name string
-		call mcp.ToolCall
+		call tools.ToolCall
 		want time.Duration
 	}{
 		{
 			name: "compat git_show is short",
-			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+			call: tools.ToolCall{Function: tools.ToolCallFunction{
 				Name:      "git_show",
 				Arguments: json.RawMessage(`{}`),
 			}},
@@ -195,7 +196,7 @@ func TestToolCallTimeoutPolicy(t *testing.T) {
 		},
 		{
 			name: "shell requested timeout gets cleanup grace",
-			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+			call: tools.ToolCall{Function: tools.ToolCallFunction{
 				Name:      "run_shell",
 				Arguments: json.RawMessage(`{"timeout_sec":1}`),
 			}},
@@ -203,7 +204,7 @@ func TestToolCallTimeoutPolicy(t *testing.T) {
 		},
 		{
 			name: "unknown tools do not get long budget",
-			call: mcp.ToolCall{Function: mcp.ToolCallFunction{
+			call: tools.ToolCall{Function: tools.ToolCallFunction{
 				Name:      "custom_tool",
 				Arguments: json.RawMessage(`{}`),
 			}},
@@ -260,57 +261,40 @@ func TestTranscriptLineAtVisualOffsetAccountsForSoftWrap(t *testing.T) {
 	}
 }
 
-func TestIsExploreReadOnlyShell(t *testing.T) {
-	allowed := []string{
-		"ls -la",
-		"cat README.md",
-		"head -n 20 main.go",
-		"grep -rn foo .",
-		"rg --files",
-		"find . -name '*.go'",
-		"git status",
-		"git log --oneline -n 5",
-		"git diff HEAD~1",
-		"go version",
-		"go list ./...",
-		"ls | wc -l",
-		"cat file.txt | grep foo | sort | uniq",
-		"ps aux 2>&1",
-		"ls -la && pwd",
-		"FOO=bar env",
-		"cat 'has > in name.txt'",
-	}
-	for _, cmd := range allowed {
-		ok, reason := isExploreReadOnlyShell(cmd)
-		if !ok {
-			t.Errorf("expected %q to be allowed; rejected: %s", cmd, reason)
-		}
+func TestProcessPendingToolsFinalizesSynchronousRejection(t *testing.T) {
+	call := tools.ToolCall{Function: tools.ToolCallFunction{
+		Name:      "run_shell",
+		Arguments: json.RawMessage(`{"command":"rm forbidden"}`),
+	}}
+	m := &Model{
+		mode:        ExploreMode,
+		state:       stateChat,
+		tools:       tools.DefaultRegistry(),
+		notes:       &sessionNotes{},
+		transcript:  &strings.Builder{},
+		streamBuf:   &strings.Builder{},
+		md:          newMarkdownRenderer(),
+		failedCalls: make(map[string]int),
+		maxSteps:    25,
+		pending: &pendingBatch{
+			calls:   []tools.ToolCall{call},
+			results: make([]api.Message, 1),
+			started: make([]bool, 1),
+		},
 	}
 
-	blocked := []string{
-		"rm -rf /tmp/foo",
-		"mv a b",
-		"echo hi > out.txt",
-		"cat a >> b",
-		"sed -i 's/a/b/' file",
-		"sudo cat /etc/shadow",
-		"git push",
-		"git commit -m oops",
-		"git checkout main",
-		"go build ./...",
-		"go run main.go",
-		"$(rm -rf /)",
-		"`whoami`",
-		"ls; rm foo",
-		"ls && rm foo",
-		"npm install",
-		"curl https://example.com",
+	cmd := m.processPendingTools()
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
 	}
-	for _, cmd := range blocked {
-		ok, _ := isExploreReadOnlyShell(cmd)
-		if ok {
-			t.Errorf("expected %q to be blocked, but it was allowed", cmd)
-		}
+	if cmd == nil {
+		t.Fatal("expected rejected batch to advance to the next model stream")
+	}
+	if m.pending != nil {
+		t.Fatal("synchronously rejected batch remained pending")
+	}
+	if len(m.history) != 1 || !strings.Contains(m.history[0].Content, "not in the explore-mode") {
+		t.Fatalf("expected rejection in history, got %#v", m.history)
 	}
 }
 
@@ -364,9 +348,9 @@ func TestCurrentToolLabel(t *testing.T) {
 		t.Errorf("no pending: expected empty, got %q", got)
 	}
 	m.pending = &pendingBatch{
-		calls: []mcp.ToolCall{
-			{Function: mcp.ToolCallFunction{Name: "read_file"}},
-			{Function: mcp.ToolCallFunction{Name: "grep"}},
+		calls: []tools.ToolCall{
+			{Function: tools.ToolCallFunction{Name: "read_file"}},
+			{Function: tools.ToolCallFunction{Name: "grep"}},
 		},
 		done: 1,
 	}
@@ -494,7 +478,7 @@ func TestFaceAnimatesAcrossTicks(t *testing.T) {
 			setup(m)
 
 			seen := map[string]bool{}
-			for i := 0; i < 12; i++ {
+			for range 12 {
 				seen[m.faceView()] = true
 				next, _ := m.Update(faceTickMsg(time.Now()))
 				m = next.(*Model)
@@ -519,8 +503,8 @@ func TestAutoModePromptBypass(t *testing.T) {
 	}
 
 	// Test path inside workspace (trusted folder)
-	callInside := mcp.ToolCall{
-		Function: mcp.ToolCallFunction{
+	callInside := tools.ToolCall{
+		Function: tools.ToolCallFunction{
 			Name:      "write_file",
 			Arguments: json.RawMessage(`{"path":"src/main.go","content":"hello"}`),
 		},
@@ -530,8 +514,8 @@ func TestAutoModePromptBypass(t *testing.T) {
 	}
 
 	// Test path outside workspace (untrusted folder)
-	callOutside := mcp.ToolCall{
-		Function: mcp.ToolCallFunction{
+	callOutside := tools.ToolCall{
+		Function: tools.ToolCallFunction{
 			Name:      "write_file",
 			Arguments: json.RawMessage(`{"path":"../../outside.txt","content":"hello"}`),
 		},
@@ -541,8 +525,8 @@ func TestAutoModePromptBypass(t *testing.T) {
 	}
 
 	// Test destination outside workspace (untrusted folder) for move_file
-	callMoveOutside := mcp.ToolCall{
-		Function: mcp.ToolCallFunction{
+	callMoveOutside := tools.ToolCall{
+		Function: tools.ToolCallFunction{
 			Name:      "move_file",
 			Arguments: json.RawMessage(`{"source":"src/main.go","destination":"../../outside.txt"}`),
 		},

@@ -38,10 +38,7 @@ func Render(gtx layout.Context, elapsed time.Duration, state *UIState, level flo
 
 	cx := float32(sz.X) / 2
 	cy := float32(sz.Y) / 2
-	short := sz.X
-	if sz.Y < short {
-		short = sz.Y
-	}
+	short := min(sz.Y, sz.X)
 	baseR := float32(short) / 3.5
 	t := elapsed.Seconds()
 

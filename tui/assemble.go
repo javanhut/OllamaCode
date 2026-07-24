@@ -26,7 +26,7 @@ func (m *Model) assembleMessages(ragBlock string) []api.Message {
 		budget = m.contextLimit / 2
 	}
 
-	sys := api.Message{Role: "system", Content: systemPrompt}
+	sys := api.Message{Role: "system", Content: m.activeSystemPrompt()}
 	dyn := api.Message{Role: "system", Content: m.buildDynamicContext(ragBlock)}
 	base := estimateMsgTokens(sys) + estimateMsgTokens(dyn)
 

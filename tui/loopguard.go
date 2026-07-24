@@ -1,13 +1,10 @@
 package tui
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"regexp"
+	"sort"
 	"strings"
 
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Loop-safety tunables.
@@ -15,6 +12,8 @@ const (
 	defaultMaxSteps     = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
 	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
 	recentCallsKept     = 12 // fingerprint ring length for oscillation detection
+	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
+	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
 )
 
 func maxStepsFromConfig(c config) int {
@@ -28,23 +27,30 @@ func maxStepsFromConfig(c config) int {
 // every new user turn (fresh submit or a dequeued message).
 func (m *Model) resetTurnGuards() {
 	m.stepCount = 0
+	m.streamRetries = 0
 	m.recentCalls = m.recentCalls[:0]
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
-	m.lastStepTool = ""
+	m.lastStepRepeatKey = ""
 	m.sameToolStreak = 0
+	m.sameToolWarned = false
+	m.sameToolStopWarned = false
 	m.turnTouchedFiles = false
 	m.verifyAttempts = 0
 	m.challengedThisTurn = false
+	m.autoContinues = 0
 	for k := range m.failedCalls {
 		delete(m.failedCalls, k)
 	}
 }
 
+// dedupeCalls: see tools.DedupeCalls (shared with the headless sub-agent loop).
+func dedupeCalls(calls []tools.ToolCall) []tools.ToolCall { return tools.DedupeCalls(calls) }
+
 // batchSingleTool returns the tool name if every call in a batch is the same
 // tool, else "". Used to detect a model spamming one tool (e.g. switch_mode)
 // with varying arguments — which evades fingerprint-based repeat detection.
-func batchSingleTool(calls []mcp.ToolCall) string {
+func batchSingleTool(calls []tools.ToolCall) string {
 	if len(calls) == 0 {
 		return ""
 	}
@@ -57,83 +63,68 @@ func batchSingleTool(calls []mcp.ToolCall) string {
 	return name
 }
 
-// canonicalJSON returns a stable serialization of a JSON value with object keys
-// sorted (encoding/json marshals map keys in sorted order), so two semantically
-// identical argument blobs produce the same fingerprint regardless of key order
-// or whitespace. Falls back to the trimmed raw string when it isn't valid JSON.
-func canonicalJSON(raw json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return strings.TrimSpace(string(raw))
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return strings.TrimSpace(string(raw))
-	}
-	return string(b)
+// argumentSensitiveRepeatTools are naturally iterative inspection operations.
+// Different arguments mean the model is gathering different information, not
+// repeating an action. Exact repeats are still guarded.
+var argumentSensitiveRepeatTools = map[string]bool{
+	"read_file": true, "list_directory": true, "find_files": true,
+	"grep": true, "file_info": true, "find_symbol": true,
+	"code_definition": true, "code_references": true, "code_hover": true,
+	"semantic_search": true, "git_diff": true, "git_log": true,
 }
 
-// callFingerprint identifies a tool call by name + canonical arguments, so
-// repeated and oscillating calls can be detected cheaply.
-func callFingerprint(c mcp.ToolCall) string {
-	return c.Function.Name + "\x00" + canonicalJSON(c.Function.Arguments)
+// batchRepeatIdentity returns the display tool name and semantic repeat key for
+// a single-tool batch. Mixed batches are progress and return empty identities.
+func batchRepeatIdentity(calls []tools.ToolCall) (string, string) {
+	tool := batchSingleTool(calls)
+	if tool == "" {
+		return "", ""
+	}
+	if !argumentSensitiveRepeatTools[tool] {
+		return tool, tool
+	}
+	fingerprints := make([]string, len(calls))
+	for i, call := range calls {
+		fingerprints[i] = tools.CallFingerprint(call)
+	}
+	// Reordering the same parallel reads is still the same action.
+	sort.Strings(fingerprints)
+	return tool, strings.Join(fingerprints, "\x01")
 }
 
-// isOscillating reports whether the last four fingerprints form an A,B,A,B
-// pattern — the model alternating between two actions without progress.
-func isOscillating(recent []string) bool {
-	n := len(recent)
-	if n < 4 {
-		return false
+// observeRepeatedBatch advances the per-turn repetition state. warn is emitted
+// at most once per user turn. stop remains true after the hard threshold so a
+// text-form tool call cannot bypass a single tool-less response; announceStop
+// keeps the transcript explanation to one copy.
+func (m *Model) observeRepeatedBatch(calls []tools.ToolCall) (tool string, warn, stop, announceStop bool) {
+	tool, key := batchRepeatIdentity(calls)
+	if key == "" {
+		m.lastStepRepeatKey = ""
+		m.sameToolStreak = 0
+		return "", false, false, false
 	}
-	a, b, c, d := recent[n-4], recent[n-3], recent[n-2], recent[n-1]
-	return a == c && b == d && a != b
-}
-
-var (
-	codeFenceRe   = regexp.MustCompile("(?s)```[a-zA-Z]*\\s*(.*?)\\s*```")
-	trailingComma = regexp.MustCompile(`,(\s*[}\]])`)
-)
-
-// salvageJSON makes a conservative, best-effort attempt to repair almost-valid
-// tool arguments emitted by weak models: it strips ```json fences, trims to the
-// outermost {...}, and removes trailing commas. The repaired value is returned
-// ONLY if it newly parses as valid JSON; otherwise the original is returned
-// untouched. It never rewrites string contents, so it can't corrupt values.
-func salvageJSON(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 || json.Valid(raw) {
-		return raw
+	if key == m.lastStepRepeatKey {
+		m.sameToolStreak++
+	} else {
+		m.lastStepRepeatKey = key
+		m.sameToolStreak = 1
 	}
-	s := string(raw)
-	if m := codeFenceRe.FindStringSubmatch(s); m != nil {
-		s = m[1]
+	if m.sameToolStreak >= 3 && !m.sameToolWarned {
+		m.sameToolWarned = true
+		warn = true
 	}
-	if i := strings.IndexByte(s, '{'); i >= 0 {
-		if j := strings.LastIndexByte(s, '}'); j > i {
-			s = s[i : j+1]
+	if m.sameToolStreak >= 5 {
+		stop = true
+		if !m.sameToolStopWarned {
+			m.sameToolStopWarned = true
+			announceStop = true
 		}
 	}
-	s = trailingComma.ReplaceAllString(s, "$1")
-	if json.Valid([]byte(s)) {
-		return json.RawMessage(s)
-	}
-	return raw
+	return tool, warn, stop, announceStop
 }
 
-// repairHint turns a tool error into model-actionable feedback. Validation
-// errors already render a named, schema-aware message; broken-JSON arguments get
-// explicit guidance to resend a single object; everything else passes through.
-func repairHint(call mcp.ToolCall, err error) string {
-	var ve *mcp.ValidationError
-	if errors.As(err, &ve) {
-		return "error: " + ve.Error()
-	}
-	if len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments) {
-		raw := string(call.Function.Arguments)
-		if len(raw) > 300 {
-			raw = raw[:300] + "…"
-		}
-		return fmt.Sprintf("error: arguments for %q were not valid JSON: %s\nResend ONLY a single JSON object with the tool's exact fields.", call.Function.Name, raw)
-	}
-	return fmt.Sprintf("error: %v. Check the arguments and try again.", err)
-}
+// canonicalJSON/callFingerprint/isOscillating moved to package tools
+// (CanonicalJSON/CallFingerprint/IsOscillating), and salvageJSON/repairHint/
+// shouldFormatRepair to tools too (SalvageJSON/RepairHint/ShouldFormatRepair), so
+// the headless sub-agent loop reuses the same tool-call safety. See
+// tools/loopguard.go and tools/repair.go.

@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/javanhut/ollama_code/internal/agent"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // parallel_edit splits one large change into independent subtasks, plans each
@@ -65,21 +65,33 @@ var plannerToolNames = map[string]bool{
 	"stage_delete": true,
 }
 
-// plannerAllowed is the tool gate for a planning worker: the read-only
-// sub-agent set (minus code_index, which writes an index file and would race
-// across parallel workers) plus the staging tools.
+// plannerAllowed is the tool gate for a planning worker: strictly read-only
+// tools plus the staging tools. Planners investigate and stage proposals; they
+// never apply changes (unlike a full-capability sub-agent). Excludes recursion,
+// mode/prompt/session/memory tools, and code_index (writes an index file that
+// would race across parallel workers).
 func plannerAllowed(name string) bool {
 	if plannerToolNames[name] {
 		return true
 	}
-	return subagentAllowed(name) && name != "code_index"
+	if !readOnlyToolNames[name] {
+		return false
+	}
+	switch name {
+	case "spawn_subagent", "switch_mode", "ask_user",
+		"remember", "recall", "forget",
+		"update_session_notes", "append_session_notes",
+		"code_index":
+		return false
+	}
+	return true
 }
 
 // plannerRegistry builds an isolated tool registry for one worker: the allowed
 // read-only tools plus staging tools bound to that worker's own stage, so
 // concurrent workers never share an edit buffer.
-func (m *Model) plannerRegistry(stage *editStage) *mcp.Registry {
-	reg := mcp.NewRegistry()
+func (m *Model) plannerRegistry(stage *editStage) *tools.Registry {
+	reg := tools.NewRegistry()
 	for _, t := range m.tools.Definitions() {
 		if plannerAllowed(t.Function.Name) {
 			reg.Register(t)
@@ -91,15 +103,15 @@ func (m *Model) plannerRegistry(stage *editStage) *mcp.Registry {
 	return reg
 }
 
-func stageEditTool(stage *editStage) mcp.Tool {
-	return mcp.Tool{
+func stageEditTool(stage *editStage) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "stage_edit",
 			Description: "Propose an exact-string replacement in a file. Does NOT write now — the edit is queued and applied later by the orchestrator. old_string must already exist in the file (and be unique unless replace_all is set), mirroring edit_file.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"path":        {Type: "string", Description: "File to edit."},
 					"old_string":  {Type: "string", Description: "Exact text currently in the file to replace."},
 					"new_string":  {Type: "string", Description: "Replacement text."},
@@ -140,15 +152,15 @@ func stageEditTool(stage *editStage) mcp.Tool {
 	}
 }
 
-func stageWriteTool(stage *editStage) mcp.Tool {
-	return mcp.Tool{
+func stageWriteTool(stage *editStage) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "stage_write",
 			Description: "Propose writing a file's full contents (creating it or overwriting it). Does NOT write now — queued and applied later by the orchestrator. Prefer stage_edit for incremental changes to existing files.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"path":    {Type: "string", Description: "File to create or overwrite."},
 					"content": {Type: "string", Description: "Full new contents of the file."},
 					"summary": {Type: "string", Description: "One-line description of this change."},
@@ -174,15 +186,15 @@ func stageWriteTool(stage *editStage) mcp.Tool {
 	}
 }
 
-func stageDeleteTool(stage *editStage) mcp.Tool {
-	return mcp.Tool{
+func stageDeleteTool(stage *editStage) tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "stage_delete",
 			Description: "Propose deleting a file (or directory tree with recursive=true). Does NOT delete now — queued and applied later by the orchestrator.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"path":      {Type: "string", Description: "File or directory to delete."},
 					"recursive": {Type: "boolean", Description: "Delete a directory and its contents (default false)."},
 					"summary":   {Type: "string", Description: "One-line description of this change."},
@@ -231,29 +243,29 @@ func (m *Model) applyStagedOp(ctx context.Context, op stagedOp) (string, error) 
 		return "", err
 	}
 	m.snapshotBeforeMutate([]string{op.path})
-	return m.tools.Invoke(ctx, mcp.ToolCall{Function: mcp.ToolCallFunction{Name: name, Arguments: raw}})
+	return m.tools.Invoke(ctx, tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: raw}})
 }
 
 // parallelEditTool is the orchestrator: fan out planning workers, then apply
 // their proposals serially and safely. Registered as a destructive tool so the
 // normal permission prompt gates the whole delegation once before it runs.
-func (m *Model) parallelEditTool() mcp.Tool {
-	return mcp.Tool{
+func (m *Model) parallelEditTool() tools.Tool {
+	return tools.Tool{
 		Type: "function",
-		Function: mcp.Function{
+		Function: tools.Function{
 			Name:        "parallel_edit",
 			Description: "Split a large change into independent subtasks and complete them faster than one agent could. Each subtask is planned by its own read-only worker IN PARALLEL; the workers propose edits, which are then applied SERIALLY and safely (with /undo checkpoints and conflict detection). Give each subtask a DISJOINT set of files — workers must not edit the same file. Overlapping or stale edits are reported as conflicts, never silently merged. Use for genuinely parallelizable work (e.g. \"rename X across these 5 packages\", \"add the same guard to each of these handlers\"). For a single focused change, just edit directly.",
-			Parameters: mcp.Schema{
+			Parameters: tools.Schema{
 				Type: "object",
-				Properties: map[string]mcp.Property{
+				Properties: map[string]tools.Property{
 					"tasks": {
 						Type:        "array",
 						Description: "Independent subtasks. Each must be self-contained (the worker does not see this conversation) and target files disjoint from the others.",
-						Items: &mcp.Property{
+						Items: &tools.Property{
 							Type: "object",
-							Properties: map[string]mcp.Property{
+							Properties: map[string]tools.Property{
 								"task":  {Type: "string", Description: "Self-contained instruction for this slice of the change."},
-								"files": {Type: "array", Description: "Files this subtask owns (advisory scope hint).", Items: &mcp.Property{Type: "string"}},
+								"files": {Type: "array", Description: "Files this subtask owns (advisory scope hint).", Items: &tools.Property{Type: "string"}},
 							},
 							Required: []string{"task"},
 						},
@@ -377,8 +389,8 @@ func (m *Model) parallelEditTool() mcp.Tool {
 }
 
 func peFirstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return before
 	}
 	return s
 }

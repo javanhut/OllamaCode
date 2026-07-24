@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -68,14 +69,14 @@ func TestContinuousChat(t *testing.T) {
 	ctx := context.Background()
 	respChan, errChan := host.ContinuousChat(ctx, ChatRequest{Model: "test"})
 
-	var content string
+	var content strings.Builder
 	for {
 		select {
 		case chunk, ok := <-respChan:
 			if !ok {
 				goto done
 			}
-			content += chunk.Message.Content
+			content.WriteString(chunk.Message.Content)
 		case err := <-errChan:
 			if err != nil {
 				t.Fatalf("ContinuousChat failed: %v", err)
@@ -83,8 +84,8 @@ func TestContinuousChat(t *testing.T) {
 		}
 	}
 done:
-	if content != "Hello world" {
-		t.Errorf("expected 'Hello world', got %q", content)
+	if content.String() != "Hello world" {
+		t.Errorf("expected 'Hello world', got %q", content.String())
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/mcp"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func msg(role, content string) api.Message { return api.Message{Role: role, Content: content} }
@@ -42,7 +42,7 @@ func TestHistoryWindow_NoDanglingToolResult(t *testing.T) {
 	// assistant(tool_call) -> tool(result) -> user. A tight budget would cut to
 	// the tool message; the window must pull back to include the assistant call.
 	big := strings.Repeat("z", 200)
-	assistant := api.Message{Role: "assistant", ToolCalls: []mcp.ToolCall{{Function: mcp.ToolCallFunction{Name: "read_file"}}}}
+	assistant := api.Message{Role: "assistant", ToolCalls: []tools.ToolCall{{Function: tools.ToolCallFunction{Name: "read_file"}}}}
 	h := []api.Message{
 		msg("user", big),
 		assistant,
