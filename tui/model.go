@@ -456,6 +456,12 @@ func (m *Model) layout() {
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	m.keyInput.SetWidth(min(m.width-6, 80))
 	m.pullInput.SetWidth(min(m.width-6, 80))
+
+	// Size the textarea BEFORE measuring the band: inputView() renders the
+	// textarea, so measuring first would size the viewport from the previous
+	// frame's wrap and leave a stale row behind when the input shrinks.
+	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())))
+
 	headerH := lipgloss.Height(m.headerView())
 	inputH := max(lipgloss.Height(m.inputView()), 2)
 	vpH := max(m.height-headerH-inputH, 1)
@@ -518,7 +524,26 @@ func (m *Model) layout() {
 	}
 	m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
 
-	// Wrap the textarea at the room actually left of the prefix (same math as
-	// inputView) so the textarea — and only the textarea — wraps long input.
-	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())-2))
+}
+
+// atFirstVisualRow / atLastVisualRow report whether the cursor sits on the
+// topmost / bottommost rendered row of the input, accounting for soft wrap: a
+// single long hard line still occupies several rows, and up/down must walk
+// those rows before they mean anything else.
+func (m *Model) atFirstVisualRow() bool {
+	return m.input.Line() == 0 && m.input.LineInfo().RowOffset == 0
+}
+
+func (m *Model) atLastVisualRow() bool {
+	li := m.input.LineInfo()
+	return m.input.Line() == m.input.LineCount()-1 && li.RowOffset >= li.Height-1
+}
+
+// inputIsHistory reports whether the buffer is safe to overwrite with a history
+// entry — empty, or still exactly the entry we last recalled.
+func (m *Model) inputIsHistory() bool {
+	if m.input.Value() == "" {
+		return true
+	}
+	return m.historyIndex < len(m.userHistory) && m.input.Value() == m.userHistory[m.historyIndex]
 }

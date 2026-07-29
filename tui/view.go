@@ -238,18 +238,43 @@ func (m *Model) slashSuggestionsView() string {
 
 // inputPrefix renders the label that sits left of the input band. layout()
 // measures it to size the textarea, so the math lives in exactly one place.
+// The label is pinned to a fixed width. It used to swap "message" for the much
+// longer "queued while streaming", which changed the prefix width mid-typing and
+// re-wrapped whatever was already in the buffer.
+const inputLabelWidth = 7
+
 func (m *Model) inputPrefix() string {
 	c := m.mode.color()
 	label := "message"
 	if m.streaming {
-		label = "queued while streaming"
+		label = "queued"
 	}
 	return lipgloss.NewStyle().
 		Background(c).
 		Foreground(lipgloss.Color("232")).
 		Bold(true).
 		Padding(0, 1).
+		Width(inputLabelWidth + 2).
 		Render(label)
+}
+
+// inputPrefixColumn stacks the label over a matching gutter so it lines up with
+// a textarea that has grown past one row. Plain concatenation left rows 2..N
+// starting at column 0 while row 1 sat behind the label.
+func (m *Model) inputPrefixColumn(height int) string {
+	prefix := m.inputPrefix()
+	if height <= 1 {
+		return prefix
+	}
+	gutter := lipgloss.NewStyle().
+		Background(panelColor).
+		Render(strings.Repeat(" ", lipgloss.Width(prefix)))
+	rows := make([]string, height)
+	rows[0] = prefix
+	for i := 1; i < height; i++ {
+		rows[i] = gutter
+	}
+	return strings.Join(rows, "\n")
 }
 
 // narrowStatusLine is the one-line status strip shown above the input band
@@ -274,15 +299,17 @@ func (m *Model) narrowStatusLine() string {
 }
 
 func (m *Model) inputView() string {
-	prefix := m.inputPrefix()
-
 	// The mascot is drawn separately as a corner overlay (see overlayFace), so
 	// the input takes the full width here. The textarea already wraps at the
 	// width layout() gave it (same prefix math), so the band must NOT re-wrap
 	// with Style.Width — that hard re-wrap mangled long pastes into orphan
 	// fragments.
 	input := inputBandStyle.Render(m.input.View())
-	bottomBar := prefix + input
+	bottomBar := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.inputPrefixColumn(lipgloss.Height(input)),
+		input,
+	)
 
 	suggestions := m.slashSuggestionsView()
 	if status := m.narrowStatusLine(); status != "" {

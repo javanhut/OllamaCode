@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/javanhut/ollama_code/api"
@@ -213,7 +214,7 @@ func TestTranscriptVerifyingLine(t *testing.T) {
 
 func TestLayoutSizesTextareaToPrefix(t *testing.T) {
 	m := statusTestModel() // width 80, laid out
-	bandW := 80 - lipgloss.Width(m.inputPrefix()) - 2
+	bandW := 80 - lipgloss.Width(m.inputPrefix())
 	m.input.SetValue(strings.Repeat("x", 300))
 	for i, line := range strings.Split(m.input.View(), "\n") {
 		if w := lipgloss.Width(line); w > bandW {
@@ -224,5 +225,64 @@ func TestLayoutSizesTextareaToPrefix(t *testing.T) {
 		if w := lipgloss.Width(line); w > 80 {
 			t.Fatalf("inputView line %d width = %d, exceeds terminal width 80", i, w)
 		}
+	}
+}
+
+// The prefix used to grow from "message" to "queued while streaming", which
+// re-wrapped whatever was already typed the moment a stream started.
+func TestInputPrefixWidthStableWhileStreaming(t *testing.T) {
+	m := statusTestModel()
+	idle := lipgloss.Width(m.inputPrefix())
+	m.streaming = true
+	if busy := lipgloss.Width(m.inputPrefix()); busy != idle {
+		t.Fatalf("prefix width changed while streaming: %d -> %d", idle, busy)
+	}
+}
+
+// Every row of a grown input must start past the label gutter, not at column 0.
+func TestInputBandRowsAlignUnderPrefix(t *testing.T) {
+	m := statusTestModel()
+	m.input.SetValue(strings.Repeat("x", 300))
+	m.layout()
+	band := m.inputPrefixColumn(lipgloss.Height(m.input.View()))
+	rows := strings.Split(band, "\n")
+	if len(rows) < 2 {
+		t.Fatalf("expected the input to wrap to multiple rows, got %d", len(rows))
+	}
+	want := lipgloss.Width(m.inputPrefix())
+	for i, r := range rows {
+		if got := lipgloss.Width(r); got != want {
+			t.Fatalf("gutter row %d width = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// Arrowing around inside a message must not swap it for a history entry.
+func TestArrowKeysDoNotClobberTypedInput(t *testing.T) {
+	m := statusTestModel()
+	m.userHistory = []string{"older message"}
+	m.historyIndex = len(m.userHistory)
+	m.input.SetValue("line one\nline two")
+	m.input.CursorEnd()
+
+	for name, code := range map[string]rune{"up": tea.KeyUp, "down": tea.KeyDown} {
+		before := m.input.Value()
+		mm, _ := m.Update(tea.KeyPressMsg{Code: code})
+		got := mm.(*Model).input.Value()
+		if got != before {
+			t.Fatalf("%q rewrote the buffer: %q -> %q", name, before, got)
+		}
+	}
+}
+
+// ...but on the first row with an untouched buffer, up still recalls history.
+func TestUpRecallsHistoryFromFirstRow(t *testing.T) {
+	m := statusTestModel()
+	m.userHistory = []string{"older message"}
+	m.historyIndex = len(m.userHistory)
+
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := mm.(*Model).input.Value(); got != "older message" {
+		t.Fatalf("up did not recall history, got %q", got)
 	}
 }

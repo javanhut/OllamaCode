@@ -311,15 +311,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "enter" {
 				return m.updateChatKey(msg)
 			}
-			if msg.String() == "up" && (m.input.Value() == "" || (m.historyIndex < len(m.userHistory) && m.input.Value() == m.userHistory[m.historyIndex])) {
+			// History recall only fires when the cursor is on the first/last
+			// *visual* row and the buffer is untouched; otherwise up/down are
+			// ordinary cursor movement inside a multi-line message. Without the
+			// row check, arrowing through a wrapped message silently replaced it.
+			if msg.String() == "up" && m.atFirstVisualRow() && m.inputIsHistory() {
 				if len(m.userHistory) > 0 && m.historyIndex > 0 {
 					m.historyIndex--
 					m.input.SetValue(m.userHistory[m.historyIndex])
 					m.input.CursorEnd()
+					m.layout()
 					return m, nil
 				}
 			}
-			if msg.String() == "down" && m.historyIndex < len(m.userHistory) {
+			if msg.String() == "down" && m.atLastVisualRow() && m.inputIsHistory() && m.historyIndex < len(m.userHistory) {
 				m.historyIndex++
 				if m.historyIndex < len(m.userHistory) {
 					m.input.SetValue(m.userHistory[m.historyIndex])
@@ -327,6 +332,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.input.SetValue("")
 				}
+				m.layout()
 				return m, nil
 			}
 		}
