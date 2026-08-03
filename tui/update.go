@@ -241,6 +241,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
+		// Search takes every key while its prompt is focused.
+		if m.search.active && m.state == stateChat {
+			return m.updateSearch(msg)
+		}
+		if msg.String() == "ctrl+f" && m.state == stateChat {
+			m.openSearch()
+			m.layout()
+			return m, nil
+		}
+		// n/N step through matches once the prompt is dismissed but hits remain.
+		if m.state == stateChat && len(m.search.matches) > 0 && m.input.Value() == "" {
+			switch msg.String() {
+			case "n":
+				m.stepMatch(1)
+				return m, nil
+			case "N":
+				m.stepMatch(-1)
+				return m, nil
+			case "esc":
+				m.closeSearch(false)
+				m.layout()
+				return m, nil
+			}
+		}
+		// Jump back to the live end of the transcript (the scroll cue names it).
+		if msg.String() == "ctrl+g" && m.state == stateChat {
+			m.viewport.GotoBottom()
+			m.layout()
+			return m, nil
+		}
 		if msg.String() == "ctrl+o" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			m.cfg.Verbose = !m.cfg.Verbose
 			saveConfig(m.cfg)
@@ -292,7 +322,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.helpViewport, cmd = m.helpViewport.Update(msg)
 			return m, cmd
-		case stateNotes:
+		case stateNotes, stateStats:
 			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
 				m.state = stateChat
 				m.input.Focus()

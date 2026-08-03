@@ -151,7 +151,7 @@ func (m *Model) todoSidebar(inner int) string {
 		case todoCompleted:
 			b.WriteString(mutedStyle.Render("✔ " + text))
 		case todoInProgress:
-			b.WriteString(bodyStyle.Copy().Bold(true).Render("▶ " + text))
+			b.WriteString(bodyStyle.Bold(true).Render("▶ " + text))
 		default:
 			b.WriteString(bodyStyle.Render("☐ " + text))
 		}

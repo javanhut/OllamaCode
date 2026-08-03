@@ -107,6 +107,24 @@ uninstall-companion:
 	fi
 	@echo "Uninstall complete."
 
+# Formatting and static checks. Fails on unformatted files instead of quietly
+# rewriting them, so the gate is usable from CI.
+lint:
+	@echo "--- Checking formatting ---"
+	@unformatted=$$(gofmt -l . | grep -v '^vendor/' || true); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
+	fi
+	@echo "--- go vet ---"
+	go vet ./...
+
+# Run the test suite.
+test:
+	go test ./...
+
+# Everything CI should run.
+check: lint test
+
 # Target to clean generated files and directories
 clean:
 	@echo "--- Cleaning up built files and directories ---"
@@ -114,4 +132,4 @@ clean:
 	@echo "Cleanup complete."
 
 # --- Phony Markers ---
-.PHONY: all setup build install uninstall run dev clean build-companion run-companion dev-companion install-companion uninstall-companion
+.PHONY: all setup build install uninstall run dev lint test check clean build-companion run-companion dev-companion install-companion uninstall-companion

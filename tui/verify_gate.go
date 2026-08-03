@@ -96,7 +96,15 @@ func (m *Model) verifyRunCmd(command, label string) tea.Cmd {
 // move on while the build is still broken).
 func (m *Model) endTurnTail() []tea.Cmd {
 	var cmds []tea.Cmd
+	// Bank the turn's timing, then re-render: the caller already refreshed the
+	// transcript before this point, so without a second pass the ⏱ footer (and
+	// the /show_thinking block) wouldn't appear until the next redraw.
+	atBottom := m.viewport.AtBottom()
 	m.finishTurnClock()
+	m.refreshTranscript()
+	if atBottom {
+		m.viewport.GotoBottom()
+	}
 	m.lastActivity = time.Now()
 	if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
 		if c := m.compactContext(); c != nil {

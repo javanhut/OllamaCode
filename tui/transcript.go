@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 
 	"github.com/javanhut/ollama_code/api"
@@ -46,6 +47,15 @@ func (m *Model) refreshTranscript() {
 			case "assistant", "tool":
 				turn, next := m.collectAssistantTurn(i)
 				turn.userIdx = userIdx
+				// A turn with something after it can never change again, so render
+				// it once and reuse the string. Without this every frame re-ran the
+				// tool grouping and re-colorized every diff in the whole session —
+				// on a 60ms streaming cadence.
+				if next < len(m.history) {
+					b.WriteString(m.cachedTurn(&turn, i, next))
+					i = next
+					continue
+				}
 				openTurn = &turn
 				i = next
 			default:
@@ -95,6 +105,47 @@ func (m *Model) refreshTranscript() {
 	if m.sel.active {
 		m.applySelectionHighlight()
 	}
+}
+
+// turnCacheLimit keeps the cache from growing without bound in a long session.
+// Entries are cheap (one rendered turn each); this just puts a ceiling on it.
+const turnCacheLimit = 256
+
+// cachedTurn renders a sealed turn, reusing the previous render when nothing
+// that affects it has changed. The key is a hash of the turn's own messages, so
+// anything that rewrites history — compaction, /clear, /load, undo — misses
+// naturally instead of needing every mutation site to invalidate by hand.
+func (m *Model) cachedTurn(t *assistantTurn, start, next int) string {
+	stamp := fmt.Sprintf("%d|%t|%t|%t|%s|%s",
+		m.viewport.Width(), m.expandTools, m.cfg.Verbose, m.cfg.Thinking, m.mode, m.activeModelName())
+	if stamp != m.turnCacheStamp || len(m.turnCache) > turnCacheLimit {
+		m.turnCache = make(map[uint64]string)
+		m.turnCacheStamp = stamp
+	}
+
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%d|", t.userIdx)
+	if r, ok := m.turnRecords[t.userIdx]; ok {
+		fmt.Fprintf(h, "%d|%d|%d|%d|", r.total, r.tools, r.calls, len(r.thinking))
+	}
+	for _, msg := range m.history[start:next] {
+		h.Write([]byte(msg.Role))
+		h.Write([]byte(msg.ToolName))
+		h.Write([]byte(msg.Content))
+		for _, c := range msg.ToolCalls {
+			h.Write([]byte(c.Function.Name))
+			h.Write(c.Function.Arguments)
+		}
+	}
+	key := h.Sum64()
+	if out, ok := m.turnCache[key]; ok {
+		return out
+	}
+	var tb strings.Builder
+	m.writeAssistantTurn(&tb, t, false)
+	out := tb.String()
+	m.turnCache[key] = out
+	return out
 }
 
 // turnSegment is one ordered piece of an assistant turn: either a block of
@@ -168,7 +219,7 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 // calls where they fired. Tool calls are collapsed by default, expanded when
 // the user has toggled `ctrl+t`; consecutive calls group into one summary.
 func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool) {
-	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
+	b.WriteString(assistantStyle.Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
 
 	// The reasoning that produced this answer, when /show_thinking is on. It ran

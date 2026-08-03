@@ -187,7 +187,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// file nothing has mutated is always wasted work.
 		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
 			m.history = append(m.history, api.Message{
-				Role: "system",
+				Role:    "system",
 				Content: fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`)),
 			})
 			if stopRereads {

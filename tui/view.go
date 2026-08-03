@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -40,6 +39,7 @@ var slashCommands = []struct {
 	{"/welcome", "toggle the startup welcome panel on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
+	{"/stats", "session timing and token totals"},
 	{"/show_thinking", "toggle the model's reasoning in the transcript"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
@@ -119,6 +119,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
 	case stateDiff:
 		v.SetContent(m.overlayModal(base, m.diffModal()))
+	case stateStats:
+		v.SetContent(m.overlayModal(base, m.statsModal()))
 	default:
 		v.SetContent(base)
 	}
@@ -129,6 +131,12 @@ type windowRange struct{ start, end int }
 
 func (m *Model) viewChat() string {
 	main := m.viewport.View()
+	// Paint the scroll cue over the transcript's last row rather than adding a
+	// band: a band changes the viewport height, which changes whether the user
+	// is at the bottom, which decides whether the cue shows at all.
+	if cue := m.scrollCue(); cue != "" {
+		main = overlay(main, cue, max(m.viewport.Width()-lipgloss.Width(cue), 0), m.viewport.Height()-1)
+	}
 	if bar := m.sidebarView(m.viewport.Height()); bar != "" {
 		main = lipgloss.JoinHorizontal(lipgloss.Top, main, sidebarGap, bar)
 	}
@@ -361,20 +369,47 @@ func (m *Model) inputPrefixColumn(height int) string {
 // carry status and toast in the sidebar instead. It is always exactly one
 // line so the band height — and the layout math built on it — stays stable.
 func (m *Model) narrowStatusLine() string {
-	if m.sidebarWidth() > 0 {
+	// Width, not sidebarWidth(): layout() measures this band before it knows the
+	// viewport height, and sidebar visibility depends on that height.
+	if m.width >= 60 {
 		return ""
 	}
 	text, busy := m.statusText()
 	var line string
 	if busy {
-		line = m.spinner.View() + " " + bodyStyle.Copy().Bold(true).Render(text)
+		line = m.spinner.View() + " " + bodyStyle.Bold(true).Render(text)
 	} else {
 		line = mutedStyle.Render(text)
 	}
-	if m.toast != "" {
-		line += "  " + hintStyle.Render(truncatePlain(m.toast, max(m.width-lipgloss.Width(text)-4, 10)))
+	if toast := m.activeToast(); toast != "" {
+		line += "  " + hintStyle.Render(truncatePlain(toast, max(m.width-lipgloss.Width(text)-4, 10)))
 	}
 	return line
+}
+
+// scrollCue tells the user the transcript continues below when they've scrolled
+// up — otherwise a streaming reply lands off-screen with nothing to say so.
+// Only shown when already scrolled up, so adding the row can't flip the state
+// that produced it.
+func (m *Model) scrollCue() string {
+	if m.viewport.Height() <= 0 || m.viewport.AtBottom() {
+		return ""
+	}
+	below := m.viewport.TotalLineCount() - m.viewport.YOffset() - m.viewport.Height()
+	if below <= 0 {
+		return ""
+	}
+	text := fmt.Sprintf(" ↓ %d more line%s · ctrl+g to jump ", below, plural(below))
+	if w := m.viewport.Width(); lipgloss.Width(text) > w {
+		text = fmt.Sprintf(" ↓ %d ", below)
+		if lipgloss.Width(text) > w {
+			return ""
+		}
+	}
+	return lipgloss.NewStyle().
+		Background(surfaceColor).
+		Foreground(lipgloss.Color("245")).
+		Render(text)
 }
 
 func (m *Model) inputView() string {
@@ -393,6 +428,9 @@ func (m *Model) inputView() string {
 	// Join only the bands that have content — an empty suggestion menu used to
 	// contribute a blank row, leaving a dead gap above the input.
 	var bands []string
+	if s := m.searchBar(); s != "" {
+		bands = append(bands, s)
+	}
 	if s := m.slashSuggestionsView(); s != "" {
 		bands = append(bands, s)
 	}
@@ -429,14 +467,14 @@ func (m *Model) welcomePanel() string {
 
 	title := fmt.Sprintf(" Ollama Code %s ", appVersion)
 	topFill := max(0, width-lipgloss.Width(title)-3)
-	panelBorder := borderStyle.Copy().Foreground(m.mode.color())
+	panelBorder := borderStyle.Foreground(m.mode.color())
 	top := panelBorder.Render("╭─") + headingStyle.Render(title) + panelBorder.Render(strings.Repeat("─", topFill)+"╮")
 	bottom := panelBorder.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	inner := width - 4 // 1 char border + 1 char pad on each side
 	rowStyle := lipgloss.NewStyle().Background(surfaceColor)
 
 	rows := []string{""}
-	rows = append(rows, centerCell(bodyStyle.Copy().Bold(true).Render("Layla's in. Let's write something worth keeping."), inner))
+	rows = append(rows, centerCell(bodyStyle.Bold(true).Render("Layla's in. Let's write something worth keeping."), inner))
 	rows = append(rows, "")
 	rows = append(rows, llamaRows(inner)...)
 	rows = append(rows, "")
@@ -528,94 +566,11 @@ const ollamaLlamaSmallASCII = `
       @@@@              @@@@
 `
 
-const ollamaLlamaASCII = `
-                     @@@@                                                  @@@@
-                  @@@@@@@@@@@                                          @@@@@@@@@@@
-                @@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@
-               @@@@@@@@@@@@@@@@@                                    @@@@@@@@@@@@@@@@@
-              @@@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@@
-             @@@@@@@@@  @@@@@@@@@@                                @@@@@@@@@@  @@@@@@@@@
-            @@@@@@@@@    @@@@@@@@@                                @@@@@@@@@    @@@@@@@@@
-            @@@@@@@@@     @@@@@@@@@                              @@@@@@@@@     @@@@@@@@@
-           @@@@@@@@@       @@@@@@@@                              @@@@@@@@       @@@@@@@@@
-           @@@@@@@@@       @@@@@@@@@         @@@@@@@@@@         @@@@@@@@@       @@@@@@@@@
-           @@@@@@@@        @@@@@@@@@    @@@@@@@@@@@@@@@@@@@@    @@@@@@@@@        @@@@@@@@
-           @@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@             @@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@                    @@@@@@@@@@@@         @@@@@@@@@
-           @@@@@@@@     @@@@@@@@@@@@@                          @@@@@@@@@@@@@     @@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@@@                              @@@@@@@@@@@@@@@@@@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@@                                @@@@@@@@@@@@@@@@@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@@@@@
-         @@@@@@@@@@@@@@@@@@@@@@@                                    @@@@@@@@@@@@@@@@@@@@@@@
-       @@@@@@@@@@@@@@                                                          @@@@@@@@@@@@@@
-     @@@@@@@@@@@@                                                                  @@@@@@@@@@@@
-    @@@@@@@@@@@                                                                      @@@@@@@@@@@
-   @@@@@@@@@@                                                                          @@@@@@@@@@
-  @@@@@@@@@@                                                                            @@@@@@@@@@
- @@@@@@@@@@                                                                              @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@                                     @@@@@@@@@@                                     @@@@@@@@
-@@@@@@@@             @@@@@@@            @@@@@@@@@@@@@@@@@@@@            @@@@@@@             @@@@@@@@
-@@@@@@@@            @@@@@@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@       @@@@@@@@@@            @@@@@@@@
-@@@@@@@@           @@@@@@@@@@@    @@@@@@@@@@@@@@@  @@@@@@@@@@@@@@@    @@@@@@@@@@@           @@@@@@@@
-@@@@@@@@@          @@@@@@@@@@@   @@@@@@@@@                @@@@@@@@@   @@@@@@@@@@@          @@@@@@@@@
-@@@@@@@@@           @@@@@@@@@  @@@@@@@@                      @@@@@@@@  @@@@@@@@@          @@@@@@@@@
- @@@@@@@@@            @@@@@   @@@@@@@                          @@@@@@@   @@@@@            @@@@@@@@@
-  @@@@@@@@@                   @@@@@@         @@@@@@@@@@         @@@@@@                   @@@@@@@@@
-   @@@@@@@@@@                 @@@@@@         @@@@@@@@@@          @@@@@                 @@@@@@@@@@
-    @@@@@@@@@@               @@@@@@            @@@@@@            @@@@@@               @@@@@@@@@@
-    @@@@@@@@@@               @@@@@@            @@@@@@            @@@@@@               @@@@@@@@@@
-    @@@@@@@@@                 @@@@@@           @@@@@@           @@@@@@                 @@@@@@@@@
-   @@@@@@@@@                  @@@@@@@                          @@@@@@@                  @@@@@@@@@
-  @@@@@@@@@                    @@@@@@@@                      @@@@@@@@                    @@@@@@@@@
-  @@@@@@@@@                     @@@@@@@@@@@              @@@@@@@@@@@                     @@@@@@@@@
- @@@@@@@@@                        @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        @@@@@@@@@
- @@@@@@@@@                           @@@@@@@@@@@@@@@@@@@@@@@@@@                           @@@@@@@@@
- @@@@@@@@                                 @@@@@@@@@@@@@@@@                                 @@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
- @@@@@@@@                                                                                  @@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-    @@@@@@@@@@                                                                        @@@@@@@@@@
-     @@@@@@@@@@                                                                       @@@@@@@@@
-     @@@@@@@@@                                                                        @@@@@@@@@
-    @@@@@@@@@@                                                                         @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-  @@@@@@@@                                                                                @@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-  @@@@@@@@                                                                                @@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-   @@@@@@@@                                                                              @@@@@@@@@
-`
-
 func (m *Model) activeModelName() string {
 	if strings.TrimSpace(m.modelName) == "" {
 		return "Layla (no brain)"
 	}
 	return "Layla"
-}
-
-func displayName() string {
-	name := strings.TrimSpace(os.Getenv("USER"))
-	if name == "" {
-		return "there"
-	}
-	return name
 }
 
 func padCell(s string, width int) string {

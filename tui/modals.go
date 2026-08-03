@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -295,6 +296,8 @@ func (m *Model) helpContent(innerW int) string {
 		{"ctrl+↑/↓", "scroll one line (alt)"},
 		{"pgup/pgdn", "page up/down"},
 		{"ctrl+u/d", "half page up/down"},
+		{"ctrl+g", "jump to the newest output"},
+		{"ctrl+f", "find in the transcript (n/N to step)"},
 		{"ctrl+c", "quit"},
 		{"ctrl+t", "expand/collapse tool calls in transcript"},
 		{"ctrl+s/esc", "stop a streaming response"},
@@ -352,6 +355,54 @@ func (m *Model) notesModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// statsModal reports what the session has cost so far, built from the per-turn
+// records the transcript footers already use.
+func (m *Model) statsModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Session stats", "esc", innerW))
+	b.WriteString("\n\n")
+
+	row := func(k, v string) {
+		b.WriteString(modalMutedStyle.Render(padCell(k, 16)) + modalBodyStyle.Render(v))
+		b.WriteString("\n")
+	}
+
+	var total, tools, slowest time.Duration
+	var calls, turns int
+	for _, r := range m.turnRecords {
+		turns++
+		total += r.total
+		tools += r.tools
+		calls += r.calls
+		slowest = max(slowest, r.total)
+	}
+	if turns == 0 {
+		b.WriteString(modalMutedStyle.Render("No completed turns yet."))
+		b.WriteString("\n\n")
+		b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
+		return modalStyle.Width(w).Render(b.String())
+	}
+
+	row("turns", fmt.Sprintf("%d", turns))
+	row("total time", shortDuration(total))
+	row("thinking", shortDuration(total-tools))
+	row("tools", fmt.Sprintf("%s · %d call%s", shortDuration(tools), calls, plural(calls)))
+	row("slowest turn", shortDuration(slowest))
+	row("average turn", shortDuration(total/time.Duration(turns)))
+	b.WriteString("\n")
+	if m.contextLimit > 0 {
+		row("context", fmt.Sprintf("%dk / %dk tokens", m.totalTokens/1000, m.contextLimit/1000))
+	}
+	row("model", m.modelName)
+	row("mode", strings.ToUpper(m.mode.String()))
+
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
+	return modalStyle.Width(w).Render(b.String())
+}
+
 // diffModal renders the full-screen, scrollable diff viewer (/diff). It uses a
 // bordered box with no filled background so the diff colors from colorizeDiff
 // read the same as they do in the transcript.
@@ -362,7 +413,7 @@ func (m *Model) diffModal() string {
 		BorderForeground(c).
 		Padding(0, 1).
 		Width(m.modalWidth())
-	title := headingStyle.Copy().Foreground(c).Render("Diff — last turn")
+	title := headingStyle.Foreground(c).Render("Diff — last turn")
 	hint := mutedStyle.Render("  ↑/↓ scroll · esc close")
 	return style.Render(title + hint + "\n\n" + m.diffViewport.View())
 }
@@ -385,10 +436,10 @@ func (m *Model) permissionModal() string {
 	w := m.modalWidth()
 	innerW := m.modalInner()
 
-	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
-	maxLines := max(m.height-4,
-		// absolute minimum safety boundary
-		8)
+	// Content must fit within m.height-4 (border 2 + vertical padding 2). This
+	// used to floor at 8 lines, which on a short terminal deliberately overflowed
+	// the screen — on the one modal you have to read before approving anything.
+	maxLines := max(m.height-4, 1)
 
 	var headerSection []string
 	headerSection = append(headerSection, m.modalHeader("Tool wants to run", "n=deny", innerW))

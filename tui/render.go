@@ -223,20 +223,6 @@ func renderToolCall(call tools.ToolCall, verbose bool, width int) string {
 	return name + "\n" + codeFence(args) + "\n" + args + "\n" + codeFence(args)
 }
 
-func renderToolResult(name, content string, verbose bool, width int) string {
-	status := "completed"
-	if strings.HasPrefix(content, "error:") {
-		status = "failed"
-	}
-
-	header := fmt.Sprintf("**←** `%s` (%s)", name, status)
-	if !verbose {
-		return header
-	}
-
-	return header + "\n" + fencedDump(content, 12, width)
-}
-
 // laylaMarkdownStyle returns a glamour style based on the dark theme but with
 // heading prefixes ("##", "###", …) stripped and replaced with bold colored
 // titles, so headings actually look like headings instead of literal hashes.
@@ -368,7 +354,4 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 // LaTeX math notation patterns. We rewrite $…$ / $$…$$ as inline code so
 // the user sees a styled span instead of literal dollar signs (glamour has no
 // math renderer). Currency like "$5" doesn't match because it has no closer.
-var (
-	mathDisplayRe = regexp.MustCompile(`\$\$([^\n$]+?)\$\$`)
-	mathInlineRe  = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)
-)
+var mathInlineRe = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)

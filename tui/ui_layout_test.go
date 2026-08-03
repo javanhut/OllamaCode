@@ -1,11 +1,13 @@
 package tui
 
 import (
-	"charm.land/lipgloss/v2"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/javanhut/ollama_code/api"
 )
 
 // Modal headers must fit on one line: the title and its hint share a row, and a
@@ -151,5 +153,87 @@ func TestHeaderIsOneRowAtEveryWidth(t *testing.T) {
 		if !strings.Contains(stripANSI(lines[0]), "E") {
 			t.Errorf("width %d: mode chip dropped: %q", w, stripANSI(lines[0]))
 		}
+	}
+}
+
+// The whole screen must fit the terminal at any size: every row within the
+// width, and exactly as many rows as the terminal has.
+func TestChatViewFitsEveryTerminalSize(t *testing.T) {
+	sizes := [][2]int{{20, 10}, {30, 12}, {40, 16}, {50, 20}, {59, 24}, {80, 8}, {100, 30}, {200, 60}}
+	for _, size := range sizes {
+		mm, _ := New().Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		m := mm.(*Model)
+		m.modelName = "kimi-k3:cloud"
+		m.history = []api.Message{
+			{Role: "user", Content: "hello there this is a longish message"},
+			{Role: "assistant", Content: "and a longish reply that will wrap on narrow terminals"},
+		}
+		m.toast = "loaded model kimi-k3:cloud"
+		m.refreshTranscript()
+
+		lines := strings.Split(m.viewChat(), "\n")
+		if len(lines) != size[1] {
+			t.Errorf("%v: %d rows, want %d", size, len(lines), size[1])
+		}
+		for i, l := range lines {
+			if w := lipgloss.Width(l); w > size[0] {
+				t.Errorf("%v: row %d is %d wide: %q", size, i, w, stripANSI(l))
+				break
+			}
+		}
+	}
+}
+
+// Scrolled up, the transcript says so — and the cue is an overlay, so it can
+// never change the layout that decides whether it appears.
+func TestScrollCueDoesNotResizeTheLayout(t *testing.T) {
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m := mm.(*Model)
+	for i := range 40 {
+		m.history = append(m.history, api.Message{Role: "user", Content: fmt.Sprintf("line %d", i)})
+	}
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	atBottom := strings.Split(m.viewChat(), "\n")
+	if strings.Contains(stripANSI(strings.Join(atBottom, "\n")), "more line") {
+		t.Error("cue shown while pinned to the bottom")
+	}
+	m.viewport.SetYOffset(0)
+	scrolled := strings.Split(m.viewChat(), "\n")
+	if !strings.Contains(stripANSI(strings.Join(scrolled, "\n")), "more line") {
+		t.Error("no cue after scrolling up")
+	}
+	if len(atBottom) != len(scrolled) {
+		t.Errorf("cue changed the row count: %d vs %d", len(atBottom), len(scrolled))
+	}
+}
+
+// Sealed turns render once; only the open turn is rebuilt each frame.
+func TestSealedTurnsAreCached(t *testing.T) {
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m := mm.(*Model)
+	m.history = []api.Message{
+		{Role: "user", Content: "one"},
+		{Role: "assistant", Content: "first answer"},
+		{Role: "user", Content: "two"},
+		{Role: "assistant", Content: "second answer"},
+	}
+	m.refreshTranscript()
+	first := m.transcript.String()
+	if len(m.turnCache) != 1 { // only turn one is sealed; turn two is still open
+		t.Errorf("cached %d turns, want 1", len(m.turnCache))
+	}
+	m.refreshTranscript()
+	if m.transcript.String() != first {
+		t.Error("cached render differs from a fresh one")
+	}
+	// A setting that changes rendering must invalidate.
+	m.expandTools = true
+	m.refreshTranscript()
+	if m.turnCacheStamp == "" {
+		t.Error("cache stamp not tracked")
+	}
+	if !strings.Contains(stripANSI(m.transcript.String()), "first answer") {
+		t.Error("turn dropped after invalidation")
 	}
 }

@@ -481,6 +481,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.toast = "no file diffs in the last turn"
 				return m, nil
 			}
+			m.diffSource = d
 			m.diffViewport.SetContent(colorizeDiff(d, m.diffViewport.Width()))
 			m.diffViewport.GotoTop()
 			m.state = stateDiff
@@ -548,6 +549,10 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.toast = "verbose mode off"
 			}
 			m.refreshTranscript()
+			return m, nil
+		case "/stats":
+			m.input.Reset()
+			m.state = stateStats
 			return m, nil
 		case "/show_thinking", "/thinking":
 			m.input.Reset()

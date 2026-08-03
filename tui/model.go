@@ -58,6 +58,8 @@ var (
 	selectionStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("62")).
 			Foreground(lipgloss.Color("230"))
+	searchHitStyle     = lipgloss.NewStyle().Background(lipgloss.Color("58")).Foreground(lipgloss.Color("230"))
+	searchCurrentStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("232")).Bold(true)
 
 	modalBg = surfaceColor
 
@@ -102,6 +104,7 @@ const (
 	statePermission
 	stateNotes
 	stateDiff
+	stateStats
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -316,6 +319,15 @@ type Model struct {
 	turnToolTime  time.Duration
 	turnToolCalls int
 	turnThinking  strings.Builder
+
+	turnCache      map[uint64]string // rendered sealed turns, keyed by content hash
+	turnCacheStamp string            // render settings the cache was built under
+
+	search        search    // transcript find (ctrl+f)
+	sidebarHidden bool      // no room for the panel; decided in layout()
+	toastAt       time.Time // when the current toast text first appeared
+	toastSeen     string    // text toastAt refers to
+	diffSource    string    // raw diff behind the /diff viewer, so a resize can re-wrap it
 }
 
 // turnRecord is what one user command produced: wall clock end to end, the
@@ -491,9 +503,14 @@ func (m *Model) layout() {
 	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())))
 
 	headerH := lipgloss.Height(m.headerView())
-	inputH := max(lipgloss.Height(m.inputView()), 2)
+	// No floor: the band is one row when nothing is stacked above the input, and
+	// reserving two left an unused row at the bottom of every screen.
+	inputH := max(lipgloss.Height(m.inputView()), 1)
 	vpH := max(m.height-headerH-inputH, 1)
 
+	// Decide the sidebar before sizing the transcript: reserving its columns for
+	// a panel that won't render leaves the right third of the screen empty.
+	m.sidebarHidden = !m.sidebarFits(vpH)
 	vpW := max(m.width-m.sidebarSpace(), 10)
 	notesW := max(sidebarInner(m.sidebarWidth()), 1)
 	notesVH := m.sidebarNotesHeight(vpH)
@@ -544,14 +561,30 @@ func (m *Model) layout() {
 		m.viewport.SetHeight(vpH)
 		m.notesViewport.SetWidth(notesW)
 		m.notesViewport.SetHeight(notesVH)
+		// Re-wrap on width change: these two viewports get their content once, at
+		// open time, so a resize used to leave them wrapped to the old width.
+		reflowDiff := diffVW != m.diffViewport.Width()
+		reflowHelp := helpVW != m.helpViewport.Width()
 		m.diffViewport.SetWidth(diffVW)
 		m.diffViewport.SetHeight(diffVH)
 		m.helpViewport.SetWidth(helpVW)
 		m.helpViewport.SetHeight(helpVH)
+		if reflowHelp {
+			m.helpViewport.SetContent(m.helpContent(helpVW))
+		}
+		if reflowDiff && m.diffSource != "" {
+			m.diffViewport.SetContent(colorizeDiff(m.diffSource, diffVW))
+		}
 	}
 	m.viewport.SoftWrap = true
 	m.notesViewport.SoftWrap = true
 	m.viewport.StyleLineFunc = func(line int) lipgloss.Style {
+		if hit, current := m.searchedLine(line); hit {
+			if current {
+				return searchCurrentStyle.Width(m.viewport.Width())
+			}
+			return searchHitStyle.Width(m.viewport.Width())
+		}
 		if !m.selectedTranscriptLine(line) {
 			return lipgloss.NewStyle()
 		}

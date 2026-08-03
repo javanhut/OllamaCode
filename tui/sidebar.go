@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -13,13 +14,23 @@ const sidebarCols = 32
 // sidebarGap is the blank column pair between the transcript and the sidebar.
 const sidebarGap = "  "
 
-// sidebarWidth returns the sidebar's total width, or 0 when the terminal is too
-// narrow to spare the columns.
+// sidebarWidth returns the sidebar's total width, or 0 when the terminal can't
+// spare the columns. layout() clears sidebarHidden once it knows the viewport
+// height — without that the transcript kept the sidebar's 34 columns reserved on
+// short terminals where the panel doesn't render at all. The zero value is
+// "visible", so a Model built without layout() behaves as before.
 func (m *Model) sidebarWidth() int {
-	if m.width < 60 {
+	if m.width < 60 || m.sidebarHidden {
 		return 0
 	}
 	return sidebarCols
+}
+
+// sidebarFits reports whether the panel is worth drawing at this viewport
+// height. Both layout() (to reserve columns) and sidebarView() (to draw) go
+// through it, so they can never disagree.
+func (m *Model) sidebarFits(vpH int) bool {
+	return m.width >= 60 && vpH >= 6
 }
 
 // sidebarSpace is how many columns the sidebar takes away from the transcript,
@@ -62,8 +73,26 @@ func (m *Model) statusText() (string, bool) {
 	return "READY", false
 }
 
+// toastTTL is how long a toast stays on screen. They used to persist until the
+// next message was sent, so "loaded model X" sat in the panel all session.
+const toastTTL = 5 * time.Second
+
+// activeToast returns the toast if it's still fresh. It stamps the clock the
+// first time it sees a given text, so every m.toast assignment in the codebase
+// keeps working without knowing about expiry.
+func (m *Model) activeToast() string {
+	if m.toast != m.toastSeen {
+		m.toastSeen = m.toast
+		m.toastAt = time.Now()
+	}
+	if m.toast == "" || time.Since(m.toastAt) > toastTTL {
+		return ""
+	}
+	return m.toast
+}
+
 func (m *Model) sidebarHeading(s string) string {
-	return headingStyle.Copy().Foreground(m.mode.color()).Render(s)
+	return headingStyle.Foreground(m.mode.color()).Render(s)
 }
 
 // sidebarSections returns the panel's stacked blocks — everything except the
@@ -72,10 +101,10 @@ func (m *Model) sidebarSections(inner int) []string {
 	var out []string
 
 	mode := lipgloss.NewStyle().Foreground(m.mode.color()).Bold(true).Render(strings.ToUpper(m.mode.String()))
-	out = append(out, m.sidebarHeading("Mode")+"\n"+mode+"\n"+mutedStyle.Copy().Width(inner).Render(m.mode.hint()))
+	out = append(out, m.sidebarHeading("Mode")+"\n"+mode+"\n"+mutedStyle.Width(inner).Render(m.mode.hint()))
 
 	text, busy := m.statusText()
-	line := bodyStyle.Copy().Bold(true).Render(truncatePlain(text, inner-2))
+	line := bodyStyle.Bold(true).Render(truncatePlain(text, inner-2))
 	if busy {
 		line = m.spinner.View() + " " + line
 	}
@@ -88,8 +117,8 @@ func (m *Model) sidebarSections(inner int) []string {
 			status += "\n" + mutedStyle.Render(tokens)
 		}
 	}
-	if m.toast != "" {
-		status += "\n" + hintStyle.Copy().Width(inner).Render(m.toast)
+	if toast := m.activeToast(); toast != "" {
+		status += "\n" + hintStyle.Width(inner).Render(toast)
 	}
 	out = append(out, status)
 
@@ -146,7 +175,7 @@ func (m *Model) sidebarKeys() string {
 // sidebarView renders the always-on right panel to exactly `height` rows.
 func (m *Model) sidebarView(height int) string {
 	w := m.sidebarWidth()
-	if w == 0 || height < 6 {
+	if w == 0 || !m.sidebarFits(height) {
 		return ""
 	}
 	inner := sidebarInner(w)
