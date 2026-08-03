@@ -118,6 +118,7 @@ type config struct {
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
 	Verbose  bool     `json:"verbose,omitempty"`
+	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
 	MaxSteps   int                     `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
 	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
@@ -244,29 +245,29 @@ type Model struct {
 	retrieving     bool   // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
-	turnGen            int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
-	streamRetries      int            // transient stream errors retried this turn
-	stepCount          int            // tool-call rounds since the last user message
-	autoContinues      int            // times we've nudged the model to keep going on open todos this turn
-	maxSteps           int            // budget per turn (cfg.MaxSteps, default 25)
-	recentCalls        []string       // ring of recent call fingerprints (oscillation)
-	failedCalls        map[string]int // fingerprint -> consecutive failure count
-	oscillationWarned  bool           // corrective nudge emitted once per turn
-	suppressToolsOnce  bool           // next stream sends no tools (step budget hit)
-	lastStepRepeatKey  string         // semantic identity of the previous single-tool batch
-	sameToolStreak     int            // consecutive steps repeating that identity
-	sameToolWarned     bool           // early repeat warning emitted this user turn
-	sameToolStopWarned bool           // hard-stop explanation emitted this user turn
-	turnTouchedFiles   bool           // a file-mutating tool succeeded this turn
-	verifying          bool           // a compile check is running
-	verifyAttempts     int            // failed compile checks this turn
-	challengedThisTurn bool           // self-check challenge already issued this turn
-	turnReads          map[string]int // read tool + cleaned path -> times read this turn
-	rereadEvents       int            // re-reads of unchanged files this turn
-	rereadStopAnnounced bool          // hard-stop explanation for re-read loops emitted
-	lastPreamble       string         // normalized previous assistant preamble this turn
-	preambleStreak     int            // consecutive near-duplicate preambles
-	preambleWarned     bool           // preamble-echo warning emitted this turn
+	turnGen             int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	streamRetries       int            // transient stream errors retried this turn
+	stepCount           int            // tool-call rounds since the last user message
+	autoContinues       int            // times we've nudged the model to keep going on open todos this turn
+	maxSteps            int            // budget per turn (cfg.MaxSteps, default 25)
+	recentCalls         []string       // ring of recent call fingerprints (oscillation)
+	failedCalls         map[string]int // fingerprint -> consecutive failure count
+	oscillationWarned   bool           // corrective nudge emitted once per turn
+	suppressToolsOnce   bool           // next stream sends no tools (step budget hit)
+	lastStepRepeatKey   string         // semantic identity of the previous single-tool batch
+	sameToolStreak      int            // consecutive steps repeating that identity
+	sameToolWarned      bool           // early repeat warning emitted this user turn
+	sameToolStopWarned  bool           // hard-stop explanation emitted this user turn
+	turnTouchedFiles    bool           // a file-mutating tool succeeded this turn
+	verifying           bool           // a compile check is running
+	verifyAttempts      int            // failed compile checks this turn
+	challengedThisTurn  bool           // self-check challenge already issued this turn
+	turnReads           map[string]int // read tool + cleaned path -> times read this turn
+	rereadEvents        int            // re-reads of unchanged files this turn
+	rereadStopAnnounced bool           // hard-stop explanation for re-read loops emitted
+	lastPreamble        string         // normalized previous assistant preamble this turn
+	preambleStreak      int            // consecutive near-duplicate preambles
+	preambleWarned      bool           // preamble-echo warning emitted this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -306,22 +307,25 @@ type Model struct {
 	faceFrame       int
 	faceLastKey     time.Time
 
-	// Per-turn timing, keyed by the index of the user message that started the
-	// turn, so each answer can report how long it took.
-	turnTimes     map[int]turnTiming
+	// Per-turn record, keyed by the index of the user message that started the
+	// turn, so each answer can report what it cost and what it was thinking.
+	turnRecords   map[int]turnRecord
 	turnAnchor    int
 	turnStart     time.Time
 	turnToolStart time.Time
 	turnToolTime  time.Duration
 	turnToolCalls int
+	turnThinking  strings.Builder
 }
 
-// turnTiming is what one user command cost: wall clock end to end, and the
-// slice of it spent running tools (the rest is model time).
-type turnTiming struct {
-	total time.Duration
-	tools time.Duration
-	calls int
+// turnRecord is what one user command produced: wall clock end to end, the
+// slice of it spent running tools (the rest is model time), and the reasoning
+// stream, kept so /show_thinking can surface it after the fact.
+type turnRecord struct {
+	total    time.Duration
+	tools    time.Duration
+	calls    int
+	thinking string
 }
 
 type liveEmbedder struct{ m *Model }

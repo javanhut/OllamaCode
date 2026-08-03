@@ -458,6 +458,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.thinkTail) > 400 {
 				m.thinkTail = m.thinkTail[len(m.thinkTail)-400:]
 			}
+			m.recordThinking(msg.content) // kept for /show_thinking to replay later
 		} else {
 			m.thinkTail = "" // answer started; drop the ticker
 			m.streamBuf.WriteString(msg.content)

@@ -390,7 +390,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pending = nil
 			m.queue = nil
 			m.history = nil
-			m.turnTimes = nil
+			m.turnRecords = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
 			m.refreshTranscript()
@@ -549,6 +549,17 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshTranscript()
 			return m, nil
+		case "/show_thinking", "/thinking":
+			m.input.Reset()
+			m.cfg.Thinking = !m.cfg.Thinking
+			saveConfig(m.cfg)
+			if m.cfg.Thinking {
+				m.toast = "thinking shown — reasoning from this session is replayed"
+			} else {
+				m.toast = "thinking hidden"
+			}
+			m.refreshTranscript()
+			return m, nil
 		case "/archive":
 			m.input.Reset()
 			if m.kvStore == nil {
@@ -611,7 +622,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.history = append([]api.Message(nil), s.Messages...)
-			m.turnTimes = nil // timings belong to the session we just left
+			m.turnRecords = nil // timings belong to the session we just left
 			m.notes.set(s.Notes)
 			m.modelName = s.Model
 			if s.Mode != "" {

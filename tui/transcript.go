@@ -171,6 +171,12 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
 
+	// The reasoning that produced this answer, when /show_thinking is on. It ran
+	// before the answer, so it reads first.
+	if !t.streaming {
+		b.WriteString(m.thinkingBlock(t.userIdx, m.viewport.Width()))
+	}
+
 	hasText := false
 	for _, seg := range t.segments {
 		if seg.text != "" {

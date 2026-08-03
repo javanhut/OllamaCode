@@ -2,7 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Per-turn timing. Every user command is clocked end to end and split into the
@@ -25,6 +28,19 @@ func (m *Model) startTurnClock() {
 	m.turnToolStart = time.Time{}
 	m.turnToolTime = 0
 	m.turnToolCalls = 0
+	m.turnThinking.Reset()
+}
+
+// maxTurnThinking bounds the reasoning kept per turn. Reasoning streams are
+// usually a few KB; this stops a runaway one from growing the session forever.
+const maxTurnThinking = 32 << 10
+
+// recordThinking accumulates the turn's reasoning stream for later reading.
+func (m *Model) recordThinking(s string) {
+	if m.turnThinking.Len() >= maxTurnThinking {
+		return
+	}
+	m.turnThinking.WriteString(s)
 }
 
 // markToolsStart / markToolsDone bracket a batch of tool calls. Permission
@@ -49,13 +65,14 @@ func (m *Model) finishTurnClock() {
 		return
 	}
 	m.markToolsDone() // an interrupted turn can end mid-batch
-	if m.turnTimes == nil {
-		m.turnTimes = map[int]turnTiming{}
+	if m.turnRecords == nil {
+		m.turnRecords = map[int]turnRecord{}
 	}
-	m.turnTimes[m.turnAnchor] = turnTiming{
-		total: time.Since(m.turnStart),
-		tools: m.turnToolTime,
-		calls: m.turnToolCalls,
+	m.turnRecords[m.turnAnchor] = turnRecord{
+		total:    time.Since(m.turnStart),
+		tools:    m.turnToolTime,
+		calls:    m.turnToolCalls,
+		thinking: strings.TrimSpace(m.turnThinking.String()),
 	}
 	m.turnStart = time.Time{}
 }
@@ -63,22 +80,42 @@ func (m *Model) finishTurnClock() {
 // rebaseTurnTimes shifts the keys after compaction drops the first n messages,
 // so timings stay attached to their turns instead of sliding onto other ones.
 func (m *Model) rebaseTurnTimes(dropped int) {
-	if len(m.turnTimes) == 0 || dropped <= 0 {
+	if len(m.turnRecords) == 0 || dropped <= 0 {
 		return
 	}
-	shifted := make(map[int]turnTiming, len(m.turnTimes))
-	for k, v := range m.turnTimes {
+	shifted := make(map[int]turnRecord, len(m.turnRecords))
+	for k, v := range m.turnRecords {
 		if k-dropped >= 0 {
 			shifted[k-dropped] = v
 		}
 	}
-	m.turnTimes = shifted
+	m.turnRecords = shifted
 	m.turnAnchor -= dropped
+}
+
+// thinkingBlock replays a finished turn's reasoning when /show_thinking is on.
+// It's indented and dimmed so it reads as an aside, not as the answer.
+func (m *Model) thinkingBlock(userIdx, width int) string {
+	if !m.cfg.Thinking {
+		return ""
+	}
+	t, ok := m.turnRecords[userIdx]
+	if !ok || t.thinking == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(hintStyle.Render("┌ thinking"))
+	b.WriteString("\n")
+	for _, line := range strings.Split(ansi.Wordwrap(t.thinking, max(width-4, 20), " -"), "\n") {
+		b.WriteString(hintStyle.Render("│ " + line))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // timingFooter is the muted one-liner under a finished turn.
 func (m *Model) timingFooter(userIdx int) string {
-	t, ok := m.turnTimes[userIdx]
+	t, ok := m.turnRecords[userIdx]
 	if !ok || t.total <= 0 {
 		return ""
 	}

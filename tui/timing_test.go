@@ -27,7 +27,7 @@ func TestShortDuration(t *testing.T) {
 }
 
 func TestTimingFooterSplitsThinkAndTools(t *testing.T) {
-	m := &Model{turnTimes: map[int]turnTiming{
+	m := &Model{turnRecords: map[int]turnRecord{
 		0: {total: 8 * time.Second, tools: 2 * time.Second, calls: 3},
 		2: {total: 4500 * time.Millisecond},
 	}}
@@ -49,21 +49,21 @@ func TestTimingFooterSplitsThinkAndTools(t *testing.T) {
 func TestRebaseTurnTimesAfterCompaction(t *testing.T) {
 	m := &Model{
 		turnAnchor: 6,
-		turnTimes: map[int]turnTiming{
+		turnRecords: map[int]turnRecord{
 			0: {total: time.Second},
 			4: {total: 2 * time.Second},
 			6: {total: 3 * time.Second},
 		},
 	}
 	m.rebaseTurnTimes(4)
-	if _, ok := m.turnTimes[0]; !ok || m.turnTimes[0].total != 2*time.Second {
-		t.Errorf("index 4 did not move to 0: %v", m.turnTimes)
+	if _, ok := m.turnRecords[0]; !ok || m.turnRecords[0].total != 2*time.Second {
+		t.Errorf("index 4 did not move to 0: %v", m.turnRecords)
 	}
-	if m.turnTimes[2].total != 3*time.Second {
-		t.Errorf("index 6 did not move to 2: %v", m.turnTimes)
+	if m.turnRecords[2].total != 3*time.Second {
+		t.Errorf("index 6 did not move to 2: %v", m.turnRecords)
 	}
-	if len(m.turnTimes) != 2 {
-		t.Errorf("dropped turns should be forgotten: %v", m.turnTimes)
+	if len(m.turnRecords) != 2 {
+		t.Errorf("dropped turns should be forgotten: %v", m.turnRecords)
 	}
 	if m.turnAnchor != 2 {
 		t.Errorf("live anchor = %d, want 2", m.turnAnchor)
@@ -89,7 +89,7 @@ func TestTurnClockLandsInTranscript(t *testing.T) {
 	m.history = append(m.history, api.Message{Role: "assistant", Content: "answer two"})
 	m.finishTurnClock()
 
-	got, ok := m.turnTimes[2]
+	got, ok := m.turnRecords[2]
 	if !ok {
 		t.Fatal("no timing recorded for the turn")
 	}
@@ -99,5 +99,60 @@ func TestTurnClockLandsInTranscript(t *testing.T) {
 	m.refreshTranscript()
 	if !strings.Contains(stripANSI(m.transcript.String()), "⏱") {
 		t.Error("transcript shows no timing footer")
+	}
+}
+
+// /show_thinking replays reasoning captured earlier in the session; off, it
+// leaves no trace in the transcript.
+func TestShowThinkingToggle(t *testing.T) {
+	// The toggle persists via saveConfig — keep the real config out of it.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	m := mm.(*Model)
+	m.history = []api.Message{
+		{Role: "user", Content: "why?"},
+		{Role: "assistant", Content: "because."},
+	}
+	m.turnRecords = map[int]turnRecord{0: {total: time.Second, thinking: "weighing the options"}}
+
+	m.refreshTranscript()
+	if strings.Contains(stripANSI(m.transcript.String()), "weighing the options") {
+		t.Error("reasoning shown while the toggle is off")
+	}
+
+	m = typeKeys(t, m, "/show_thinking")
+	m = press(t, m, tea.KeyEnter, 0)
+	if !m.cfg.Thinking {
+		t.Fatal("/show_thinking did not turn the toggle on")
+	}
+	if got := stripANSI(m.transcript.String()); !strings.Contains(got, "weighing the options") ||
+		!strings.Contains(got, "thinking") {
+		t.Errorf("reasoning not replayed:\n%s", got)
+	}
+
+	m = typeKeys(t, m, "/show_thinking")
+	m = press(t, m, tea.KeyEnter, 0)
+	if m.cfg.Thinking {
+		t.Error("second /show_thinking did not turn it back off")
+	}
+	if strings.Contains(stripANSI(m.transcript.String()), "weighing the options") {
+		t.Error("reasoning still shown after toggling off")
+	}
+}
+
+// Reasoning is captured per turn regardless of the toggle, and bounded.
+func TestRecordThinkingIsBounded(t *testing.T) {
+	m := &Model{}
+	m.history = []api.Message{{Role: "user", Content: "go"}}
+	m.startTurnClock()
+	for range 100 {
+		m.recordThinking(strings.Repeat("x", 1024))
+	}
+	m.finishTurnClock()
+	got := len(m.turnRecords[0].thinking)
+	if got == 0 || got > maxTurnThinking+1024 {
+		t.Errorf("kept %d bytes of reasoning, want 0 < n <= %d", got, maxTurnThinking+1024)
 	}
 }

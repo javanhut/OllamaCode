@@ -40,6 +40,7 @@ var slashCommands = []struct {
 	{"/welcome", "toggle the startup welcome panel on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
+	{"/show_thinking", "toggle the model's reasoning in the transcript"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
 }
