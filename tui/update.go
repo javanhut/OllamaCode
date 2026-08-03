@@ -183,8 +183,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
-		if m.state == stateChat {
-			var cmd tea.Cmd
+		var cmd tea.Cmd
+		switch m.state {
+		case stateChat:
 			m.viewport, cmd = m.viewport.Update(msg)
 			cmds = append(cmds, cmd)
 
@@ -192,6 +193,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.notesViewport, cmd = m.notesViewport.Update(msg)
 				cmds = append(cmds, cmd)
 			}
+		case stateHelp:
+			m.helpViewport, cmd = m.helpViewport.Update(msg)
+			cmds = append(cmds, cmd)
+		case stateDiff:
+			m.diffViewport, cmd = m.diffViewport.Update(msg)
+			cmds = append(cmds, cmd)
 		}
 		return m, tea.Batch(cmds...)
 
@@ -247,16 +254,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
-		// Shift+Tab: cycle the slash-command menu backwards when it's open.
-		if msg.String() == "shift+tab" && m.slashVisible && len(m.slashSuggestions) > 0 {
-			n := len(m.slashSuggestions)
-			m.slashSelected = (m.slashSelected - 1 + n) % n
-			return m, nil
-		}
-		// Tab: cycle the slash-command menu forwards if open, else cycle mode.
-		if msg.String() == "tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
+		// Shift+Tab: cycle the slash-command menu backwards when it's open,
+		// otherwise cycle the workflow mode.
+		if msg.String() == "shift+tab" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			if m.slashVisible && len(m.slashSuggestions) > 0 {
-				m.slashSelected = (m.slashSelected + 1) % len(m.slashSuggestions)
+				n := len(m.slashSuggestions)
+				m.slashSelected = (m.slashSelected - 1 + n) % n
 				return m, nil
 			}
 			changed := m.applyModeTransition(m.mode.next(), "")
@@ -267,17 +270,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			return m, nil
 		}
+		// Tab: cycle the slash-command menu forwards when it's open.
+		if msg.String() == "tab" && m.slashVisible && len(m.slashSuggestions) > 0 {
+			m.slashSelected = (m.slashSelected + 1) % len(m.slashSuggestions)
+			return m, nil
+		}
 		switch m.state {
 		case stateSettings:
 			return m.updateSettings(msg)
 		case stateModelPicker:
 			return m.updatePicker(msg)
 		case stateHelp:
-			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
+			switch msg.String() {
+			case "esc", "enter", "q":
 				m.state = stateChat
 				m.input.Focus()
+				return m, nil
 			}
-			return m, nil
+			var cmd tea.Cmd
+			m.helpViewport, cmd = m.helpViewport.Update(msg)
+			return m, cmd
 		case stateNotes:
 			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
 				m.state = stateChat
@@ -461,6 +473,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content:   preamble,
 			ToolCalls: calls,
 		})
+		// Preamble echo guard: a stuck model re-announces the same intent in
+		// slightly different words before every tool call. Call it out once;
+		// if it keeps going, force a plain-text answer.
+		if warn, stopEcho := m.observePreamble(preamble); warn {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[REPEATING YOURSELF] That message restates your previous one. Do not re-announce or rephrase your intent — if you need information, call the tool; if you already have the answer, give it. No narration before tool calls.",
+			})
+		} else if stopEcho {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[LOOP BROKEN] You keep restating the same message. Tools are disabled for your next response — answer the user in plain text.",
+			})
+			m.suppressToolsOnce = true
+		}
 		m.pending = &pendingBatch{
 			calls:   calls,
 			results: make([]api.Message, len(calls)),
@@ -491,8 +518,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				call := m.pending.calls[msg.index]
 				if strings.HasPrefix(msg.result.Content, "error:") {
 					m.failedCalls[tools.CallFingerprint(call)]++
-				} else if len(tools.MutatedPaths(call.Function.Name, call.Function.Arguments)) > 0 {
+				} else if mutated := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(mutated) > 0 {
 					m.turnTouchedFiles = true // a file edit succeeded → verify before finishing
+					m.forgetReads(mutated)    // re-reading a just-changed file is legitimate
 				}
 			}
 			if msg.modeSwitch != nil && !strings.HasPrefix(msg.result.Content, "error:") {

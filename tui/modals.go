@@ -252,18 +252,27 @@ func renderProgressBar(completed, total int64, width int) string {
 func (m *Model) helpModal() string {
 	w := m.modalWidth()
 	innerW := w - 4
+	header := m.modalHeader("Help", "esc", innerW)
+	hint := modalMutedStyle.Render("  ↑/↓ scroll · esc close")
+	return modalStyle.Width(w).Render(header + hint + "\n\n" + m.helpViewport.View())
+}
+
+// helpContent renders the help rows into the given width. Kept separate from
+// helpModal so the /help entry point can load it into the scroll viewport.
+func (m *Model) helpContent(innerW int) string {
 	rows := []struct{ key, desc string }{
 		{"", "Modes"},
 		{"explore", "read-only — model can only inspect"},
 		{"plan", "read + update session notes"},
 		{"write", "all tools; writes need your approval"},
 		{"auto", "autonomous — unlimited changes in workspace"},
-		{"tab", "cycle modes"},
+		{"shift+tab", "cycle modes"},
 		{"", ""},
 		{"", "Slash commands"},
 		{"/help", "show this screen"},
 		{"/settings", "change Ollama URL"},
-		{"/model", "pick a model"},
+		{"/model", "show/set current model (use, ctx, temp)"},
+		{"/models", "list, switch, or pull models"},
 		{"/notes", "view session notes"},
 		{"/clear", "reset the conversation"},
 		{"/copy", "copy last response to system clipboard"},
@@ -298,8 +307,6 @@ func (m *Model) helpModal() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(m.modalHeader("Help", "esc", innerW))
-	b.WriteString("\n\n")
 	keyW := 14
 	for _, r := range rows {
 		if r.key == "" && r.desc == "" {
@@ -316,10 +323,7 @@ func (m *Model) helpModal() string {
 		b.WriteString(modalBodyStyle.Render(truncatePlain(r.desc, innerW-keyW)))
 		b.WriteString("\n")
 	}
-	hint := modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close")
-	b.WriteString("\n")
-	b.WriteString(hint)
-	return modalStyle.Width(w).Render(b.String())
+	return b.String()
 }
 
 func (m *Model) notesModal() string {

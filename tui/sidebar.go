@@ -124,7 +124,7 @@ func (m *Model) dreamSidebar(inner int) string {
 }
 
 func (m *Model) sidebarKeys() string {
-	return mutedStyle.Render("tab mode · ctrl+t tools") + "\n" + mutedStyle.Render("/help · enter send")
+	return mutedStyle.Render("shift+tab mode · ctrl+t tools") + "\n" + mutedStyle.Render("/help · enter send")
 }
 
 // sidebarView renders the always-on right panel to exactly `height` rows.

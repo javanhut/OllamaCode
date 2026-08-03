@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,6 +142,116 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// modelUsage is shown whenever /model args don't parse.
+const modelUsage = "usage: /model [use <name>] [ctx <tokens>] [temp <0.0-2.0>] — no args shows current model settings"
+
+// modelInfoCommand implements /model: the per-model settings surface. No args
+// prints the active model's configuration; args change it. /models stays the
+// interactive list/switch/pull picker — the two commands deliberately do
+// different things.
+func (m *Model) modelInfoCommand(args string) {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		m.showModelInfo()
+		return
+	}
+	name := ""
+	switch fields[0] {
+	case "use":
+		if len(fields) != 2 {
+			m.toast = modelUsage
+			return
+		}
+		name = fields[1]
+	case "ctx":
+		if len(fields) != 2 {
+			m.toast = modelUsage
+			return
+		}
+		n, err := strconv.Atoi(fields[1])
+		if err != nil || n < 1024 {
+			m.toast = "ctx must be a number ≥ 1024"
+			return
+		}
+		p := m.profile
+		p.NumCtx = n
+		m.saveProfile(p)
+		m.toast = fmt.Sprintf("num_ctx for %s set to %d", m.modelName, m.contextLimit)
+		return
+	case "temp":
+		if len(fields) != 2 {
+			m.toast = modelUsage
+			return
+		}
+		f, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil || f < 0 || f > 2 {
+			m.toast = "temp must be a number between 0.0 and 2.0"
+			return
+		}
+		p := m.profile
+		p.Temperature = &f
+		m.saveProfile(p)
+		m.toast = fmt.Sprintf("temperature for %s set to %.2f", m.modelName, f)
+		return
+	default:
+		// A bare name is shorthand for "/model use <name>".
+		if len(fields) == 1 {
+			name = fields[0]
+		} else {
+			m.toast = modelUsage
+			return
+		}
+	}
+	m.modelName = name
+	m.cfg.Model = name
+	saveConfig(m.cfg)
+	m.resolveProfile()
+	m.toast = "default model set to " + name
+}
+
+// saveProfile persists a profile override for the current model and applies it.
+func (m *Model) saveProfile(p ModelProfile) {
+	if m.cfg.Profiles == nil {
+		m.cfg.Profiles = map[string]ModelProfile{}
+	}
+	m.cfg.Profiles[m.modelName] = p
+	saveConfig(m.cfg)
+	m.applyProfile(p)
+}
+
+// showModelInfo renders the active model's settings into the transcript.
+func (m *Model) showModelInfo() {
+	if m.modelName == "" {
+		m.toast = "no model selected — use /models to pick one"
+		return
+	}
+	p := m.profile
+	var b strings.Builder
+	fmt.Fprintf(&b, "Current model: %s\n", m.modelName)
+	fmt.Fprintf(&b, "- context (num_ctx): %d tokens\n", m.contextLimit)
+	if p.ParamsB > 0 {
+		fmt.Fprintf(&b, "- parameters: %.1fB\n", p.ParamsB)
+	}
+	fmt.Fprintf(&b, "- tools: %t · thinking: %t\n", p.SupportsTools, p.SupportsThinking)
+	temp := "ollama default"
+	if p.Temperature != nil {
+		temp = fmt.Sprintf("%.2f", *p.Temperature)
+	} else if p.smallModel() {
+		temp = "0.20 (auto: small model)"
+	}
+	fmt.Fprintf(&b, "- temperature: %s\n", temp)
+	if p.TopP != nil {
+		fmt.Fprintf(&b, "- top_p: %.2f\n", *p.TopP)
+	}
+	if p.NumPredict != nil {
+		fmt.Fprintf(&b, "- num_predict: %d\n", *p.NumPredict)
+	}
+	b.WriteString("Change with: /model use <name> · /model ctx <tokens> · /model temp <value> — or /models to list, switch, and pull.")
+	m.history = append(m.history, api.Message{Role: "system", Content: b.String()})
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+}
+
 // cancelPull aborts an in-flight model download and clears the streaming state.
 
 func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -240,6 +351,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if val == "/model" || strings.HasPrefix(val, "/model ") {
+			m.input.Reset()
+			m.modelInfoCommand(strings.TrimSpace(strings.TrimPrefix(val, "/model")))
+			return m, nil
+		}
 		switch val {
 		case "/auto":
 			m.input.Reset()
@@ -256,7 +372,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.keyInput.SetValue(m.cfg.APIKey)
 			m.focusSettings()
 			return m, nil
-		case "/model", "/models":
+		case "/models":
 			m.input.Reset()
 			m.statusMsg = "refreshing…"
 			m.statusErr = false
@@ -348,6 +464,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "/help", "/?":
 			m.input.Reset()
+			m.helpViewport.SetContent(m.helpContent(m.helpViewport.Width()))
+			m.helpViewport.GotoTop()
 			m.state = stateHelp
 			return m, nil
 		case "/notes":

@@ -227,6 +227,7 @@ type Model struct {
 
 	notesViewport viewport.Model
 	diffViewport  viewport.Model // full-screen scrollable diff viewer (/diff)
+	helpViewport  viewport.Model // scrollable help viewer (/help)
 	spinner       spinner.Model
 	gitBranch     string
 	queue         []string
@@ -260,6 +261,12 @@ type Model struct {
 	verifying          bool           // a compile check is running
 	verifyAttempts     int            // failed compile checks this turn
 	challengedThisTurn bool           // self-check challenge already issued this turn
+	turnReads          map[string]int // read tool + cleaned path -> times read this turn
+	rereadEvents       int            // re-reads of unchanged files this turn
+	rereadStopAnnounced bool          // hard-stop explanation for re-read loops emitted
+	lastPreamble       string         // normalized previous assistant preamble this turn
+	preambleStreak     int            // consecutive near-duplicate preambles
+	preambleWarned     bool           // preamble-echo warning emitted this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -474,6 +481,11 @@ func (m *Model) layout() {
 	diffVW := max(m.modalWidth()-2, 20)
 	diffVH := max(m.height-6, 4)
 
+	// Help viewer: modal box minus border (2) + padding (4) horizontally, and
+	// minus chrome + header/blank lines vertically.
+	helpVW := max(m.modalWidth()-6, 20)
+	helpVH := max(m.height-8, 4)
+
 	if !m.ready {
 		m.viewport = viewport.New(
 			viewport.WithWidth(vpW),
@@ -501,6 +513,10 @@ func (m *Model) layout() {
 			viewport.WithWidth(diffVW),
 			viewport.WithHeight(diffVH),
 		)
+		m.helpViewport = viewport.New(
+			viewport.WithWidth(helpVW),
+			viewport.WithHeight(helpVH),
+		)
 	} else {
 		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
@@ -508,6 +524,8 @@ func (m *Model) layout() {
 		m.notesViewport.SetHeight(notesVH)
 		m.diffViewport.SetWidth(diffVW)
 		m.diffViewport.SetHeight(diffVH)
+		m.helpViewport.SetWidth(helpVW)
+		m.helpViewport.SetHeight(helpVH)
 	}
 	m.viewport.SoftWrap = true
 	m.notesViewport.SoftWrap = true

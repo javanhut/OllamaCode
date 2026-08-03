@@ -181,6 +181,26 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.suppressToolsOnce = true
 		}
 
+		// Re-read guard: the streak guard above resets on any interleaved call,
+		// so it misses a model re-reading files it already has. Re-reading a
+		// file nothing has mutated is always wasted work.
+		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
+			m.history = append(m.history, api.Message{
+				Role: "system",
+				Content: fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`)),
+			})
+			if stopRereads {
+				if !m.rereadStopAnnounced {
+					m.rereadStopAnnounced = true
+					m.history = append(m.history, api.Message{
+						Role:    "system",
+						Content: "[LOOP BROKEN] You keep re-reading files you already have the contents of. Tools are disabled for your next message — answer the user in plain text with what you know.",
+					})
+				}
+				m.suppressToolsOnce = true
+			}
+		}
+
 		// Step budget: cap tool-call rounds per user turn so a confused model
 		// can't loop forever burning tokens.
 		m.stepCount++
@@ -213,7 +233,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.pending.results[i] = api.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press tab to switch modes)", call.Function.Name, m.mode),
+				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press shift+tab to switch modes)", call.Function.Name, m.mode),
 			}
 			m.pending.started[i] = true
 			m.pending.done++

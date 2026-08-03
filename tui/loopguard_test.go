@@ -177,6 +177,113 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestRereadGuardCatchesInterleavedRereads(t *testing.T) {
+	m := &Model{}
+	// Read a.go, do something else, read a.go again: the streak guard resets
+	// on the interleaved call, but the re-read guard must still catch it.
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); len(rereads) != 0 {
+		t.Fatalf("first read reported as re-read: %v", rereads)
+	}
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("grep", `{"pattern":"x","path":"a.go"}`)}); len(rereads) != 0 {
+		t.Fatalf("grep with same path is a different question, got rereads: %v", rereads)
+	}
+	rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"./a.go"}`)})
+	if len(rereads) != 1 || rereads[0] != "a.go" {
+		t.Fatalf("re-read via ./a.go not caught or misreported: %v", rereads)
+	}
+}
+
+func TestRereadGuardStopsAfterCap(t *testing.T) {
+	m := &Model{}
+	stop := false
+	for range 5 {
+		if _, stop = m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); stop {
+			break
+		}
+	}
+	if !stop {
+		t.Fatal("re-read loop never hit the stop cap")
+	}
+	if m.rereadEvents < maxRereadEvents {
+		t.Fatalf("expected at least %d reread events, got %d", maxRereadEvents, m.rereadEvents)
+	}
+}
+
+func TestForgetReadsAllowsRereadAfterMutation(t *testing.T) {
+	m := &Model{}
+	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)})
+	m.forgetReads(tools.MutatedPaths("edit_file", json.RawMessage(`{"path":"a.go"}`)))
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); len(rereads) != 0 {
+		t.Fatalf("re-read after mutation treated as a loop: %v", rereads)
+	}
+}
+
+func TestSimilarPreamble(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"Let me check how the guard behaves.", "  let   me CHECK how the guard behaves. ", true},
+		{"Let me check how the guard behaves.", "Let me check how the guard behaves", true}, // containment
+		{"Let me check exactly how the bypass guard behaves when .git exists",
+			"Let me check exactly what the bypass guard does when .git exists", true}, // reworded echo
+		{"Let me check how the guard behaves.", "The build fails because of a missing import.", false},
+		{"", "anything at all", false},
+	}
+	for _, c := range cases {
+		if got := similarPreamble(c.a, c.b); got != c.want {
+			t.Errorf("similarPreamble(%q, %q)=%v want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestObservePreambleWarnsOnceThenStops(t *testing.T) {
+	m := &Model{}
+	first := "Good question — let me check exactly how the bypass guard behaves."
+	echo := "Good question — let me check exactly what the bypass guard does here."
+
+	if warn, stop := m.observePreamble(first); warn || stop {
+		t.Fatal("first preamble should not trigger anything")
+	}
+	if warn, _ := m.observePreamble(echo); !warn {
+		t.Fatal("first echo should warn")
+	}
+	// second echo: no repeated warning, and no stop yet
+	if warn, stop := m.observePreamble(echo); warn || stop {
+		t.Fatalf("second echo: warn=%v stop=%v, want both false", warn, stop)
+	}
+	// third echo: the model ignored the warning — stop it
+	if _, stop := m.observePreamble(echo); !stop {
+		t.Fatal("persistent echoing should eventually stop tools")
+	}
+}
+
+func TestObservePreambleIgnoresShortAndDistinct(t *testing.T) {
+	m := &Model{}
+	m.observePreamble("OK")
+	if warn, _ := m.observePreamble("OK"); warn {
+		t.Fatal("short acks should not count as echoes")
+	}
+	m.observePreamble("I'll start by mapping the repository layout and entry points.")
+	if warn, _ := m.observePreamble("The build cache is stale, so I'm clearing it before rerunning tests."); warn {
+		t.Fatal("distinct preambles should not warn")
+	}
+}
+
+func TestResetTurnGuardsClearsNewState(t *testing.T) {
+	m := &Model{failedCalls: map[string]int{}}
+	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)})
+	m.observePreamble("Good question — let me check exactly how the bypass guard behaves.")
+	m.observePreamble("Good question — let me check exactly how the bypass guard behaves!")
+	m.resetTurnGuards()
+	if len(m.turnReads) != 0 || m.rereadEvents != 0 || m.rereadStopAnnounced {
+		t.Fatal("resetTurnGuards did not clear re-read state")
+	}
+	if m.lastPreamble != "" || m.preambleStreak != 0 || m.preambleWarned {
+		t.Fatal("resetTurnGuards did not clear preamble state")
+	}
+}
+
 func TestDedupeCalls(t *testing.T) {
 	// Exact duplicate (key order differs) dropped; distinct args kept; order preserved.
 	got := dedupeCalls([]tools.ToolCall{
