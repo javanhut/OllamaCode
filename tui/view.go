@@ -44,12 +44,28 @@ var slashCommands = []struct {
 	{"/mode", "switch mode (explore, plan, write, auto)"},
 }
 
+// isSlashCommand reports whether val is exactly a known command. The suggestion
+// list deliberately omits the exact match, so without this check Enter would
+// swap a fully-typed "/model" for the only remaining suggestion, "/models".
+func isSlashCommand(val string) bool {
+	for _, c := range slashCommands {
+		if c.name == val {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) dismissSlash() {
+	m.slashVisible = false
+	m.slashSuggestions = nil
+	m.slashSelected = 0
+}
+
 func (m *Model) updateSlashSuggestions() {
 	val := m.input.Value()
 	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") || strings.Contains(val, "\n") {
-		m.slashVisible = false
-		m.slashSuggestions = nil
-		m.slashSelected = 0
+		m.dismissSlash()
 		return
 	}
 	var matches []string
@@ -68,9 +84,7 @@ func (m *Model) updateSlashSuggestions() {
 			m.slashSelected = 0
 		}
 	} else {
-		m.slashVisible = false
-		m.slashSuggestions = nil
-		m.slashSelected = 0
+		m.dismissSlash()
 	}
 }
 
@@ -132,31 +146,70 @@ func (m *Model) headerView() string {
 		width = 80
 	}
 
-	brand := lipgloss.NewStyle().
+	chip := lipgloss.NewStyle().
 		Background(c).
 		Foreground(lipgloss.Color("232")).
 		Bold(true).
-		Padding(0, 1).
-		Render("ollama code")
-	modelText := m.activeModelName()
-	if width < 42 {
-		modelText = ""
+		Padding(0, 1)
+	mode := strings.ToUpper(m.mode.String())
+	brand := chip.Render("ollama code")
+	modeChip := chip.Render(mode)
+	// Shrink the badges before anything is allowed to wrap onto a second row.
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		brand = chip.Render("oc")
 	}
-	model := bodyStyle.Copy().Background(surfaceColor).Bold(true).Render(modelText)
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		modeChip = chip.Render(mode[:1])
+	}
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		modeChip = ""
+	}
 
-	right := ""
-	metaSpace := width - lipgloss.Width(brand) - lipgloss.Width(model) - 3
-	branch := ""
-	if m.gitBranch != "" && metaSpace > 4 {
-		branch = "  " + truncatePlain(m.gitBranch, metaSpace-2)
+	// Right edge: branch and context usage, then the mode chip — it balances the
+	// brand badge and keeps the mode visible when the sidebar is hidden. The
+	// whole right half of this row used to be dead space.
+	var meta []string
+	if m.gitBranch != "" {
+		// Trim the branch, not the joined string — a long branch name would
+		// otherwise eat the context counter, which is the more useful half.
+		meta = append(meta, truncatePlain(m.gitBranch, max(width/5, 12)))
 	}
-	meta := mutedStyle.Copy().Background(surfaceColor).Render(branch)
+	if m.totalTokens > 0 && m.contextLimit > 0 {
+		meta = append(meta, fmt.Sprintf("%dk/%dk ctx", m.totalTokens/1000, m.contextLimit/1000))
+	}
+	metaStyle := mutedStyle.Background(surfaceColor)
+	if m.contextLimit > 0 && m.totalTokens > m.contextLimit*8/10 {
+		metaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(surfaceColor)
+	}
+	// roomFor is what the left side has left once brand, right side and the gap
+	// between them are accounted for. Both the meta and the model name test
+	// against it, so they can't disagree about who gets the last columns.
+	who := m.activeModelName()
+	roomFor := func(right string) int {
+		return width - lipgloss.Width(brand) - lipgloss.Width(right) - 4
+	}
+	right := modeChip
+	if s := strings.Join(meta, " · "); s != "" && width >= 60 {
+		// Identity outranks the meta: only keep branch/ctx if the name still fits.
+		if withMeta := metaStyle.Render(s+"  ") + right; roomFor(withMeta) > lipgloss.Width(who) {
+			right = withMeta
+		}
+	}
+
+	// Left: assistant name plus the loaded model, trimmed to what's left over.
 	left := brand
-	if modelText != "" {
-		left += chromeStyle.Render("  ") + model
+	if room := roomFor(right); room > lipgloss.Width(who) {
+		label := bodyStyle.Background(surfaceColor).Bold(true).Render(who)
+		if name := strings.TrimSpace(m.modelName); name != "" {
+			// Below ~10 columns a truncated model name is noise; drop it instead.
+			if avail := room - lipgloss.Width(who) - 3; avail >= 10 {
+				label += mutedStyle.Background(surfaceColor).Render(" · " + truncatePlain(name, avail))
+			}
+		}
+		left += chromeStyle.Render("  ") + label
 	}
-	left += meta
-	pad := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
+
+	pad := max(0, width-lipgloss.Width(left)-lipgloss.Width(right))
 	row := chromeStyle.Width(width).Render(left + chromeStyle.Render(strings.Repeat(" ", pad)) + right)
 	rule := lipgloss.NewStyle().Foreground(c).Render(strings.Repeat("─", width))
 	return row + "\n" + rule
@@ -194,46 +247,71 @@ func slashDesc(name string) string {
 	return ""
 }
 
+// slashMenuRows caps how many commands the completion menu shows at once. A
+// bare "/" matches every command, and drawing all of them buried the transcript
+// and squeezed the sidebar until its box couldn't close.
+const slashMenuRows = 8
+
 func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
 	}
-	rowStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252"))
-	selStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("39")).
-		Foreground(lipgloss.Color("232")).
-		Bold(true)
-	hintStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("245")).
-		Italic(true)
+	c := m.mode.color()
+	nameStyle := lipgloss.NewStyle().Foreground(c).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	selStyle := lipgloss.NewStyle().Background(c).Foreground(lipgloss.Color("232")).Bold(true)
 
-	// Width the rows to the widest command + description so the highlight bar is
-	// a clean vertical block.
+	total := len(m.slashSuggestions)
+	rows := slashMenuRows
+	if m.height > 0 {
+		rows = clamp(m.height/3, 3, slashMenuRows) // never eat the transcript on a short terminal
+	}
+	win := pickerWindow(total, m.slashSelected, rows)
+
+	hint := "↑↓ move · tab complete · enter select"
+	counter := ""
+	if win.end-win.start < total {
+		counter = fmt.Sprintf("%d/%d", m.slashSelected+1, total)
+	}
+
+	// Measure across every match, not just the visible window, so the box
+	// doesn't jitter in width while scrolling.
 	nameW, descW := 0, 0
 	for _, s := range m.slashSuggestions {
-		if w := lipgloss.Width(s); w > nameW {
-			nameW = w
-		}
-		if w := lipgloss.Width(slashDesc(s)); w > descW {
-			descW = w
-		}
+		nameW = max(nameW, lipgloss.Width(s))
+		descW = max(descW, lipgloss.Width(slashDesc(s)))
 	}
-	lineW := nameW + descW + 4
+	inner := max(nameW+descW+4, lipgloss.Width(hint)+lipgloss.Width(counter)+2)
+	if m.width > 0 {
+		inner = min(inner, m.width-5) // border (2) + padding (2) + left margin (1)
+	}
+	descCol := max(inner-nameW-4, 1)
 
-	var b strings.Builder
-	for i, s := range m.slashSuggestions {
-		text := fmt.Sprintf(" %-*s  %s", nameW, s, slashDesc(s))
-		st := rowStyle
+	var lines []string
+	for i := win.start; i < win.end; i++ {
+		s := m.slashSuggestions[i]
+		desc := slashDesc(s)
 		if i == m.slashSelected {
-			st = selStyle
+			text := fmt.Sprintf("› %-*s  %s", nameW, s, desc)
+			lines = append(lines, selStyle.Width(inner).Render(truncatePlain(text, inner)))
+			continue
 		}
-		b.WriteString(st.Width(lineW).Render(text))
-		b.WriteString("\n")
+		lines = append(lines,
+			"  "+nameStyle.Render(fmt.Sprintf("%-*s", nameW, s))+"  "+descStyle.Render(truncatePlain(desc, descCol)))
 	}
-	b.WriteString(hintStyle.Render(" tab/shift+tab to cycle · enter to select "))
-	return b.String()
+
+	// A rule and a caption row close the box: hint left, position right.
+	lines = append(lines, borderStyle.Render(strings.Repeat("─", inner)))
+	gap := max(inner-lipgloss.Width(hint)-lipgloss.Width(counter), 1)
+	lines = append(lines, hintStyle.Render(hint)+strings.Repeat(" ", gap)+mutedStyle.Render(counter))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c).
+		Padding(0, 1).
+		MarginLeft(1).
+		Width(inner + 4).
+		Render(strings.Join(lines, "\n"))
 }
 
 // inputPrefix renders the label that sits left of the input band. layout()
@@ -311,11 +389,30 @@ func (m *Model) inputView() string {
 		input,
 	)
 
-	suggestions := m.slashSuggestionsView()
-	if status := m.narrowStatusLine(); status != "" {
-		return suggestions + "\n" + status + "\n" + bottomBar
+	// Join only the bands that have content — an empty suggestion menu used to
+	// contribute a blank row, leaving a dead gap above the input.
+	var bands []string
+	if s := m.slashSuggestionsView(); s != "" {
+		bands = append(bands, s)
 	}
-	return suggestions + "\n" + bottomBar
+	if status := m.narrowStatusLine(); status != "" {
+		bands = append(bands, status)
+	}
+	return strings.Join(append(bands, bottomBar), "\n")
+}
+
+// emptyState is the quiet stand-in for the welcome panel when it's switched
+// off: enough to orient a fresh session without filling the screen.
+func (m *Model) emptyState() string {
+	rows := []string{
+		"",
+		mutedStyle.Render("Ask for a change, or start with a command."),
+		"",
+		hintStyle.Render("/help      ") + mutedStyle.Render("all commands"),
+		hintStyle.Render("shift+tab  ") + mutedStyle.Render("switch mode"),
+		hintStyle.Render("@file      ") + mutedStyle.Render("pull a file into the message"),
+	}
+	return "  " + strings.Join(rows, "\n  ") + "\n"
 }
 
 func (m *Model) welcomePanel() string {

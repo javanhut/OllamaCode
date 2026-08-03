@@ -150,6 +150,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		batchCalls := m.pending.calls
 		m.history = append(m.history, m.pending.results...)
 		m.pending = nil
+		m.markToolsDone()
 
 		// No-progress nudge: the model is alternating between the same two
 		// actions. Tell it once, rather than letting it spin.

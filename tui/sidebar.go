@@ -123,8 +123,24 @@ func (m *Model) dreamSidebar(inner int) string {
 	return b.String()
 }
 
+// sidebarKeys renders the pinned key legend as an aligned two-column list. It
+// used to be two prose lines, and "shift+tab mode · ctrl+t tools" is one column
+// wider than the panel — the terminal wrapped it and left "tools" orphaned.
 func (m *Model) sidebarKeys() string {
-	return mutedStyle.Render("shift+tab mode · ctrl+t tools") + "\n" + mutedStyle.Render("/help · enter send")
+	rows := [][2]string{
+		{"shift+tab", "mode"},
+		{"ctrl+t", "tools"},
+		{"enter", "send"},
+		{"/help", "commands"},
+	}
+	var b strings.Builder
+	for i, r := range rows {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(hintStyle.Render(padCell(r[0], 10)) + mutedStyle.Render(r[1]))
+	}
+	return b.String()
 }
 
 // sidebarView renders the always-on right panel to exactly `height` rows.
@@ -138,15 +154,14 @@ func (m *Model) sidebarView(height int) string {
 	if m.showNotes {
 		body += "\n\n" + m.sidebarHeading("Notes") + "\n" + m.notesViewport.View()
 	}
-	keys := m.sidebarKeys()
+	// A rule above the pinned legend makes the empty space between the sections
+	// and the bottom of the panel read as layout instead of a gap.
+	keys := borderStyle.Render(strings.Repeat("─", inner)) + "\n" + m.sidebarKeys()
 
-	// ponytail: the notes viewport is sized in layout(), so a task list that grows
-	// mid-turn can push past the box — MaxHeight clips instead of breaking the
-	// row. Re-layout on todo change if the clipping ever bites.
-	//
-	// Width/Height count the border, so the rows we can fill are height-2.
-	// gap blank lines push the key hints to the bottom of the box.
-	gap := max(1, height-2-lipgloss.Height(body)-lipgloss.Height(keys))
+	// Width/Height count the border, so the rows we can fill are height-2. Fit
+	// the content to that budget ourselves: overflowing it used to leave the box
+	// unclosed at the bottom, because MaxHeight clipped the border row away.
+	rows := fitSidebar(strings.Split(body, "\n"), strings.Split(keys, "\n"), height-2)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -155,7 +170,28 @@ func (m *Model) sidebarView(height int) string {
 		Width(w).
 		Height(height).
 		MaxHeight(height).
-		Render(body + strings.Repeat("\n", gap+1) + keys)
+		Render(strings.Join(rows, "\n"))
+}
+
+// fitSidebar lays body and keys into exactly budget rows: keys pinned to the
+// bottom with blank rows between, body clipped when it doesn't fit, and the
+// keys themselves dropped when even that isn't enough.
+func fitSidebar(body, keys []string, budget int) []string {
+	if budget <= 0 {
+		return nil
+	}
+	if len(body)+1+len(keys) > budget {
+		if budget > len(keys)+1 {
+			body = body[:budget-len(keys)-1]
+		} else {
+			return body[:min(len(body), budget)]
+		}
+	}
+	out := body
+	for len(out)+len(keys) < budget {
+		out = append(out, "")
+	}
+	return append(out, keys...)
 }
 
 // sidebarNotesHeight is the room left for the notes viewport once the fixed

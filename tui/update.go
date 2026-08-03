@@ -223,9 +223,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		if msg.String() == "esc" && m.slashVisible {
-			m.slashVisible = false
-			m.slashSuggestions = nil
-			m.slashSelected = 0
+			m.dismissSlash()
 			return m, nil
 		}
 		// Not at a permission prompt: there, esc means "deny this call" and is
@@ -270,9 +268,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			return m, nil
 		}
-		// Tab: cycle the slash-command menu forwards when it's open.
+		// Tab completes to the highlighted entry — not the next one. ↑/↓ move the
+		// highlight (see the stateChat branch below).
 		if msg.String() == "tab" && m.slashVisible && len(m.slashSuggestions) > 0 {
-			m.slashSelected = (m.slashSelected + 1) % len(m.slashSuggestions)
+			m.input.SetValue(m.slashSuggestions[m.slashSelected])
+			m.input.CursorEnd()
+			m.dismissSlash()
+			m.layout()
 			return m, nil
 		}
 		switch m.state {
@@ -309,14 +311,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.diffViewport, cmd = m.diffViewport.Update(msg)
 			return m, cmd
 		case stateChat:
+			// ↑/↓ move the highlight while the menu is open, ahead of history recall.
+			if m.slashVisible && len(m.slashSuggestions) > 0 {
+				n := len(m.slashSuggestions)
+				switch msg.String() {
+				case "down":
+					m.slashSelected = (m.slashSelected + 1) % n
+					return m, nil
+				case "up":
+					m.slashSelected = (m.slashSelected - 1 + n) % n
+					return m, nil
+				}
+			}
 			// Enter accepts the highlighted slash command into the input (so args
-			// can be added); a second Enter then runs it.
-			if msg.String() == "enter" && m.slashVisible && len(m.slashSuggestions) > 0 {
+			// can be added); a second Enter then runs it. A fully-typed command wins
+			// over the menu — "/model" runs /model, not the suggested "/models".
+			if msg.String() == "enter" && m.slashVisible && len(m.slashSuggestions) > 0 &&
+				!isSlashCommand(strings.TrimSpace(m.input.Value())) {
 				m.input.SetValue(m.slashSuggestions[m.slashSelected])
 				m.input.CursorEnd()
-				m.slashVisible = false
-				m.slashSuggestions = nil
-				m.slashSelected = 0
+				m.dismissSlash()
 				m.layout()
 				return m, nil
 			}
@@ -494,6 +508,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			started: make([]bool, len(calls)),
 			gen:     m.turnGen,
 		}
+		m.markToolsStart(len(calls))
 		m.busySince = time.Now()
 		cmd := m.processPendingTools()
 		m.refreshTranscript()
@@ -587,6 +602,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				started: make([]bool, len(parsed)),
 				gen:     m.turnGen,
 			}
+			m.markToolsStart(len(parsed))
 			m.busySince = time.Now()
 			if cmd := m.processPendingTools(); cmd != nil {
 				cmds = append(cmds, cmd)
@@ -652,6 +668,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		idx := min(msg.index, len(m.history))
 		m.archiveSummary = msg.summary
 		m.history = append([]api.Message(nil), m.history[idx:]...)
+		m.rebaseTurnTimes(idx)
 		m.refreshTranscript()
 
 	case ragLoadedMsg:
@@ -698,6 +715,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stream = nil
 		m.compacting = false
 		m.busySince = time.Time{}
+		m.finishTurnClock()
 		m.finalizeCheckpoint(m.lastUserMessage())
 		m.refreshTranscript()
 		m.viewport.GotoBottom()

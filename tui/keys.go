@@ -390,6 +390,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pending = nil
 			m.queue = nil
 			m.history = nil
+			m.turnTimes = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
 			m.refreshTranscript()
@@ -610,6 +611,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.history = append([]api.Message(nil), s.Messages...)
+			m.turnTimes = nil // timings belong to the session we just left
 			m.notes.set(s.Notes)
 			m.modelName = s.Model
 			if s.Mode != "" {

@@ -28,6 +28,7 @@ func maxStepsFromConfig(c config) int {
 // resetTurnGuards clears the per-turn loop-safety state. Call at the start of
 // every new user turn (fresh submit or a dequeued message).
 func (m *Model) resetTurnGuards() {
+	m.startTurnClock()
 	m.stepCount = 0
 	m.streamRetries = 0
 	m.recentCalls = m.recentCalls[:0]

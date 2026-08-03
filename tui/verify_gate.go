@@ -96,6 +96,7 @@ func (m *Model) verifyRunCmd(command, label string) tea.Cmd {
 // move on while the build is still broken).
 func (m *Model) endTurnTail() []tea.Cmd {
 	var cmds []tea.Cmd
+	m.finishTurnClock()
 	m.lastActivity = time.Now()
 	if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
 		if c := m.compactContext(); c != nil {

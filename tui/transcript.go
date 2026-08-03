@@ -10,13 +10,19 @@ import (
 
 func (m *Model) refreshTranscript() {
 	var b strings.Builder
-	if len(m.history) == 0 && !m.streaming && m.lastError == "" && m.welcomeOn() {
-		b.WriteString(m.welcomePanel())
+	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
+		// With the welcome panel off, an empty session rendered as a blank void.
+		if m.welcomeOn() {
+			b.WriteString(m.welcomePanel())
+		} else {
+			b.WriteString(m.emptyState())
+		}
 	} else {
 		// Non-empty history (or welcome suppressed → the loop below is a no-op).
 		// Group consecutive assistant + tool messages into a single Layla
 		// turn so the user sees one block per response, not one per tool call.
 		i := 0
+		userIdx := -1 // the command each turn is answering, for its timing footer
 		var openTurn *assistantTurn
 		flushTurn := func() {
 			if openTurn != nil {
@@ -29,6 +35,7 @@ func (m *Model) refreshTranscript() {
 			switch msg.Role {
 			case "user":
 				flushTurn()
+				userIdx = i
 				b.WriteString(userStyle.Render("You"))
 				b.WriteString("\n")
 				// Strip escapes/CR/control chars so pasted content can't
@@ -38,6 +45,7 @@ func (m *Model) refreshTranscript() {
 				i++
 			case "assistant", "tool":
 				turn, next := m.collectAssistantTurn(i)
+				turn.userIdx = userIdx
 				openTurn = &turn
 				i = next
 			default:
@@ -53,7 +61,7 @@ func (m *Model) refreshTranscript() {
 		switch {
 		case m.streaming:
 			if openTurn == nil {
-				openTurn = &assistantTurn{}
+				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
 			if m.streamBuf.Len() > 0 {
@@ -64,7 +72,7 @@ func (m *Model) refreshTranscript() {
 			// run with m.streaming false; open a turn anyway so the phase
 			// spinner renders instead of the transcript looking frozen.
 			if openTurn == nil {
-				openTurn = &assistantTurn{}
+				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
 		}
@@ -102,6 +110,7 @@ type turnSegment struct {
 type assistantTurn struct {
 	segments  []turnSegment
 	streaming bool
+	userIdx   int // history index of the user message this turn answers; -1 if none
 }
 
 type toolCallEntry struct {
@@ -269,6 +278,14 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(" verifying…" + m.elapsedSuffix()))
 		b.WriteString("\n")
+	}
+	// What this command cost, once it's done. Live turns already show a ticking
+	// elapsed counter in the phase line above.
+	if !t.streaming {
+		if footer := m.timingFooter(t.userIdx); footer != "" {
+			b.WriteString(footer)
+			b.WriteString("\n")
+		}
 	}
 	b.WriteString("\n")
 }

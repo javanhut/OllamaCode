@@ -57,6 +57,11 @@ func (m *Model) modalWidth() int {
 	return w
 }
 
+// modalInner is the text width inside a modalStyle box: the box width minus its
+// border (2) and horizontal padding (4). Getting this wrong by even a column
+// wraps every header, so the title and its "esc" hint land on separate lines.
+func (m *Model) modalInner() int { return m.modalWidth() - 6 }
+
 func (m *Model) modalHeader(title, hint string, innerW int) string {
 	t := modalTitleStyle.Render(title)
 	h := modalHintStyle.Render(hint)
@@ -66,7 +71,7 @@ func (m *Model) modalHeader(title, hint string, innerW int) string {
 
 func (m *Model) settingsModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	m.urlInput.SetWidth(innerW - 6)
 	m.keyInput.SetWidth(innerW - 6)
 	var b strings.Builder
@@ -103,7 +108,7 @@ func (m *Model) settingsModal() string {
 
 func (m *Model) pickerModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Select model", "esc", innerW))
 	b.WriteString("\n\n")
@@ -251,16 +256,22 @@ func renderProgressBar(completed, total int64, width int) string {
 
 func (m *Model) helpModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	header := m.modalHeader("Help", "esc", innerW)
-	hint := modalMutedStyle.Render("  ↑/↓ scroll · esc close")
-	return modalStyle.Width(w).Render(header + hint + "\n\n" + m.helpViewport.View())
+	scroll := ""
+	if !(m.helpViewport.AtTop() && m.helpViewport.AtBottom()) {
+		scroll = fmt.Sprintf(" · %d%%", int(m.helpViewport.ScrollPercent()*100))
+	}
+	hint := modalMutedStyle.Render("↑/↓ · pgup/pgdn scroll · esc close" + scroll)
+	return modalStyle.Width(w).Render(header + "\n" + hint + "\n\n" + m.helpViewport.View())
 }
 
 // helpContent renders the help rows into the given width. Kept separate from
 // helpModal so the /help entry point can load it into the scroll viewport.
+type helpRow struct{ key, desc string }
+
 func (m *Model) helpContent(innerW int) string {
-	rows := []struct{ key, desc string }{
+	rows := []helpRow{
 		{"", "Modes"},
 		{"explore", "read-only — model can only inspect"},
 		{"plan", "read + update session notes"},
@@ -269,20 +280,13 @@ func (m *Model) helpContent(innerW int) string {
 		{"shift+tab", "cycle modes"},
 		{"", ""},
 		{"", "Slash commands"},
-		{"/help", "show this screen"},
-		{"/settings", "change Ollama URL"},
-		{"/model", "show/set current model (use, ctx, temp)"},
-		{"/models", "list, switch, or pull models"},
-		{"/notes", "view session notes"},
-		{"/clear", "reset the conversation"},
-		{"/copy", "copy last response to system clipboard"},
-		{"/companion", "toggle GUI popup (speech in <-> input, replies -> TTS)"},
-		{"/save", "save current conversation to named session"},
-		{"/load", "load a saved session"},
-		{"/sessions", "list saved sessions"},
-		{"/auto", "switch to autonomous mode"},
-		{"/mode", "switch mode (explore, plan, write, auto)"},
-		{"/quit", "exit"},
+	}
+	// Generated from the completion menu's list so the two can't drift — the help
+	// screen used to hardcode half of them.
+	for _, c := range slashCommands {
+		rows = append(rows, helpRow{c.name, c.desc})
+	}
+	rows = append(rows, []helpRow{
 		{"", ""},
 		{"", "Keys"},
 		{"enter", "send message"},
@@ -304,7 +308,7 @@ func (m *Model) helpContent(innerW int) string {
 		{"click+drag", "select lines (auto-scrolls at edges)"},
 		{"release", "copy selection to clipboard"},
 		{"wheel", "scroll viewport"},
-	}
+	}...)
 
 	var b strings.Builder
 	keyW := 14
@@ -328,7 +332,7 @@ func (m *Model) helpContent(innerW int) string {
 
 func (m *Model) notesModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Session notes", "esc", innerW))
 	b.WriteString("\n\n")
@@ -379,7 +383,7 @@ func styleDiffLine(line string, w int) string {
 
 func (m *Model) permissionModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 
 	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
 	maxLines := max(m.height-4,

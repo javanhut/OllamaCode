@@ -102,6 +102,7 @@ func (m *Model) interruptTurn() tea.Cmd {
 	m.stream = nil
 	m.pending = nil
 	m.busySince = time.Time{}
+	m.finishTurnClock() // bank what the cancelled turn cost before the reset
 	m.resetTurnGuards()
 	m.streamBuf.Reset()
 	if m.state == statePermission {

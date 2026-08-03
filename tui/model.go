@@ -305,6 +305,23 @@ type Model struct {
 	busySince       time.Time
 	faceFrame       int
 	faceLastKey     time.Time
+
+	// Per-turn timing, keyed by the index of the user message that started the
+	// turn, so each answer can report how long it took.
+	turnTimes     map[int]turnTiming
+	turnAnchor    int
+	turnStart     time.Time
+	turnToolStart time.Time
+	turnToolTime  time.Duration
+	turnToolCalls int
+}
+
+// turnTiming is what one user command cost: wall clock end to end, and the
+// slice of it spent running tools (the rest is model time).
+type turnTiming struct {
+	total time.Duration
+	tools time.Duration
+	calls int
 }
 
 type liveEmbedder struct{ m *Model }
@@ -478,7 +495,8 @@ func (m *Model) layout() {
 	notesVH := m.sidebarNotesHeight(vpH)
 
 	// Diff viewer fills most of the screen (modal-width box, minus border/header).
-	diffVW := max(m.modalWidth()-2, 20)
+	// Its box is border (2) + Padding(0,1) (2), so the text width is w-4.
+	diffVW := max(m.modalWidth()-4, 20)
 	diffVH := max(m.height-6, 4)
 
 	// Help viewer: modal box minus border (2) + padding (4) horizontally, and
