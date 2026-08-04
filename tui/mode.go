@@ -191,6 +191,9 @@ func (m *Model) applyModeTransition(target Mode, reason string) bool {
 
 	oldMode := m.mode
 	m.mode = target
+	if target == PlanMode {
+		m.planNotesMark = strings.TrimSpace(m.notes.get())
+	}
 	m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
 	if strings.TrimSpace(reason) != "" {
 		m.toast = fmt.Sprintf("mode: %s — %s", m.mode, strings.TrimSpace(reason))
@@ -208,9 +211,39 @@ func (m *Model) applyModeTransition(target Mode, reason string) bool {
 				Role:    "system",
 				Content: "Plan Summary from Session Notes:\n\n" + notes,
 			})
+		} else {
+			// The model is blocked from switching without a plan; a person who
+			// forces it past the gate is making their own call, but should know
+			// nothing was handed off.
+			m.toast = "write mode — no plan in notes, nothing was handed off"
 		}
 	}
 	return true
+}
+
+// planGateBlocks reports whether a mode switch must be refused because the plan
+// hasn't been written to notes yet. Only plan → write is gated: retreating to
+// explore hands nothing off, so there is nothing to lose.
+func (m *Model) planGateBlocks(target Mode) bool {
+	return m.mode == PlanMode && target == WriteMode && !m.planRecorded()
+}
+
+// planGateMessage is what the model is told when the gate refuses it: an
+// instruction it can act on, not just a rejection.
+func (m *Model) planGateMessage() string {
+	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks — then call switch_mode("write", ...) again.`
+	if next := m.modelForMode(WriteMode); next != "" && !m.routeIsLoaded(next) {
+		msg += fmt.Sprintf(" Write mode runs on %s, a different model that will see your notes but not this conversation.", next)
+	}
+	return msg
+}
+
+// planRecorded reports whether a plan has been written to notes since plan mode
+// was entered. Emptiness alone is not enough: notes left over from an earlier
+// task would pass the check while describing the wrong work.
+func (m *Model) planRecorded() bool {
+	notes := strings.TrimSpace(m.notes.get())
+	return notes != "" && notes != m.planNotesMark
 }
 
 func (m *Model) switchModeTool() tools.Tool {

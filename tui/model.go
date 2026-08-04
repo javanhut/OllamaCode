@@ -355,6 +355,11 @@ type Model struct {
 	routeAsk      string
 	routeReasons  []string
 	routeDeclines int
+
+	// Session notes as they stood when plan mode was entered, so leaving for
+	// write mode can tell a plan that was actually written from one left over
+	// from an earlier task.
+	planNotesMark string
 }
 
 // turnRecord is what one user command produced: wall clock end to end, the

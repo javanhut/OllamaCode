@@ -439,3 +439,63 @@ func TestSettingsKeyHintNamesTheOverride(t *testing.T) {
 		t.Errorf("hint = %q, want it to say where an unprotected key is stored", got)
 	}
 }
+
+// The plan is the only thing that survives into write mode, so the model must
+// not be able to leave plan mode without recording one.
+func TestPlanGate(t *testing.T) {
+	t.Run("empty notes are blocked", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		if !m.planGateBlocks(WriteMode) {
+			t.Error("switch to write allowed with no plan")
+		}
+	})
+
+	t.Run("notes left from an earlier task are blocked", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.notes.set("plan for some unrelated task from before")
+		m.applyModeTransition(PlanMode, "") // marks the pre-existing notes
+		if !m.planGateBlocks(WriteMode) {
+			t.Error("stale notes satisfied the gate")
+		}
+	})
+
+	t.Run("a plan written this session passes", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		m.notes.set("1. edit tui/route.go\n2. add a test")
+		if m.planGateBlocks(WriteMode) {
+			t.Fatal("a freshly written plan was blocked")
+		}
+
+		m.applyModeTransition(WriteMode, "plan approved")
+		last := m.history[len(m.history)-1].Content
+		if !strings.Contains(last, "Plan Summary from Session Notes") {
+			t.Errorf("plan was not handed off; last message = %q", last)
+		}
+	})
+
+	t.Run("only plan to write is gated", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		if m.planGateBlocks(ExploreMode) {
+			t.Error("retreating to explore was blocked; it hands nothing off")
+		}
+		m.applyModeTransition(ExploreMode, "")
+		if m.planGateBlocks(WriteMode) {
+			t.Error("gated a switch that did not start in plan mode")
+		}
+	})
+
+	t.Run("message names the model that will execute", func(t *testing.T) {
+		m := routedModel(map[string]string{"plan": "big", "write": "small"}, "small")
+		m.applyModeTransition(PlanMode, "")
+		msg := m.planGateMessage()
+		if !strings.Contains(msg, "update_session_notes") {
+			t.Errorf("message = %q, want the action to take", msg)
+		}
+		if !strings.Contains(msg, "small") {
+			t.Errorf("message = %q, want the executing model named", msg)
+		}
+	})
+}

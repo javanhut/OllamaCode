@@ -298,6 +298,20 @@ func (m *Model) processPendingTools() tea.Cmd {
 				m.pending.started[i] = true
 				m.pending.done++
 				continue
+			case m.planGateBlocks(req.target):
+				// The plan is the handoff. Write mode may run on a different,
+				// smaller model, and even when it doesn't, notes are re-injected
+				// every turn while chat history gets truncated away. Deliberately
+				// not counted as a failed call: the model is meant to write the
+				// notes and retry this exact call.
+				m.pending.results[i] = api.Message{
+					Role:     "tool",
+					ToolName: call.Function.Name,
+					Content:  m.planGateMessage(),
+				}
+				m.pending.started[i] = true
+				m.pending.done++
+				continue
 			case req.target == m.mode:
 				// Redundant switch: succeed as a no-op rather than erroring, so a
 				// confused model doesn't spin retrying the same switch.
