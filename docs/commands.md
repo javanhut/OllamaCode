@@ -35,7 +35,7 @@ Type `/` in the input to get an autocomplete menu of every command.
 |---|---|
 | `Tab` / `Shift+Tab` | Next / previous field |
 | `↑` / `↓` | Switch endpoint (default host, each provider, + new provider) |
-| `Space` / `←` / `→` | Cycle the wire format on the Wire row |
+| `Space` / `←` / `→` | Cycle the wire format on the Wire row; toggle the Trust row |
 | `Enter` | Save and test the selected endpoint |
 | `Ctrl+D` | Delete the selected provider |
 | `Esc` | Cancel |

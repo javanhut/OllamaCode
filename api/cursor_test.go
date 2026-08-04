@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,33 +32,42 @@ func cursorHost(bin string) OllamaHost {
 }
 
 func TestCursorStreamsAssistantText(t *testing.T) {
+	// Verbatim shapes from a real `agent -p --output-format stream-json
+	// --stream-partial-output` run: thinking deltas, assistant deltas carrying
+	// timestamp_ms, then the SAME assistant message repeated without one.
 	bin, argvLog := fakeCursorAgent(t, `
 cat <<'EOF'
-{"type":"system","subtype":"init"}
-{"type":"assistant","message":{"content":[{"text":"Plan: "}]}}
-{"type":"assistant","message":{"content":[{"text":"edit route.go"}]}}
-{"type":"tool_call","subtype":"completed"}
-{"type":"result","result":"Plan: edit route.go","duration_ms":12}
+{"type":"system","subtype":"init","apiKeySource":"login","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"plan it"}]}}
+{"type":"thinking","subtype":"delta","text":"weighing it","timestamp_ms":1}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Plan: "}]},"timestamp_ms":2}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"edit route.go"}]},"timestamp_ms":3}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Plan: edit route.go"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Plan: edit route.go","duration_ms":12}
 EOF`)
 
 	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
-		Model:    "claude-sonnet-4",
+		Model:    "claude-opus-5-thinking-high",
 		Messages: []Message{{Role: "user", Content: "plan it"}},
 	})
-	var content string
+	var content, thinking string
 	var done bool
 	for c := range resp {
 		content += c.Message.Content
+		thinking += c.Message.Thinking
 		done = done || c.Done
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("stream error: %v", err)
 	}
 
-	// The result event repeats the full answer; emitting it after the deltas
-	// would duplicate the whole plan.
+	// The un-timestamped assistant event and the result event both repeat the
+	// whole answer. Counting either doubles or triples it.
 	if content != "Plan: edit route.go" {
-		t.Errorf("content = %q, want the deltas once", content)
+		t.Errorf("content = %q, want the deltas exactly once", content)
+	}
+	if thinking != "weighing it" {
+		t.Errorf("thinking = %q, want the reasoning delta", thinking)
 	}
 	if !done {
 		t.Error("no terminal chunk — the turn would never end")
@@ -68,24 +78,96 @@ EOF`)
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
-	joined := strings.Join(args, " ")
-	for _, want := range []string{"-p", "--output-format", "stream-json", "-m", "claude-sonnet-4"} {
-		if !strings.Contains(joined, want) {
+
+	// Flags verified against `agent --help`. --model has no short form: -m is
+	// rejected outright. --trust is opt-in per provider and absent here.
+	for _, want := range []string{"-p", "--plan", "--output-format", "stream-json", "--model", "claude-opus-5-thinking-high"} {
+		if !slices.Contains(args, want) {
 			t.Errorf("argv %v is missing %q", args, want)
 		}
 	}
-	// The safety property this whole provider rests on: without --force the CLI
-	// proposes edits instead of applying them, so a routed planning model cannot
-	// write to the repo behind OllamaCode's approval prompts and /undo.
+	if slices.Contains(args, "-m") {
+		t.Error("argv uses -m, which the CLI rejects")
+	}
+	// The safety property. Print mode alone is NOT read-only — the CLI's help
+	// says -p "Has access to all tools, including write and shell." --plan is
+	// what bars edits, and --force/--yolo would undo it.
 	for _, forbidden := range []string{"--force", "-f", "--yolo"} {
-		for _, a := range args {
-			if a == forbidden {
-				t.Fatalf("argv contains %q — the agent could write files unchecked", forbidden)
-			}
+		if slices.Contains(args, forbidden) {
+			t.Fatalf("argv contains %q — the agent could write files unchecked", forbidden)
 		}
 	}
 	if last := args[len(args)-1]; !strings.Contains(last, "plan it") {
 		t.Errorf("last arg = %q, want the flattened prompt", last)
+	}
+}
+
+// --trust is opt-in: it marks the working directory trusted in Cursor without
+// asking, so it must never be passed unless the provider enabled it.
+func TestCursorTrustIsOptIn(t *testing.T) {
+	run := func(t *testing.T, trust bool) []string {
+		t.Helper()
+		bin, argvLog := fakeCursorAgent(t, `echo '{"type":"result","result":"ok"}'`)
+		h := cursorHost(bin)
+		h.SetTrustWorkspace(trust)
+		resp, errs := h.ContinuousChat(context.Background(), ChatRequest{
+			Messages: []Message{{Role: "user", Content: "x"}},
+		})
+		for range resp {
+		}
+		if err := <-errs; err != nil {
+			t.Fatalf("stream error: %v", err)
+		}
+		argv, err := os.ReadFile(argvLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(string(argv)), "\n")
+	}
+
+	if args := run(t, false); slices.Contains(args, "--trust") {
+		t.Errorf("argv %v passed --trust without the provider opting in", args)
+	}
+	if args := run(t, true); !slices.Contains(args, "--trust") {
+		t.Errorf("argv %v is missing --trust after opting in", args)
+	}
+	// --plan is not opt-in; it is the read-only boundary and always applies.
+	for _, trust := range []bool{false, true} {
+		if args := run(t, trust); !slices.Contains(args, "--plan") {
+			t.Errorf("argv %v dropped --plan (trust=%v)", args, trust)
+		}
+	}
+}
+
+// The workspace-trust abort has to say how to fix it. The CLI's own advice is to
+// pass --yolo or -f, which would also grant write and shell access.
+func TestCursorTrustAbortIsActionable(t *testing.T) {
+	bin, _ := fakeCursorAgent(t, `printf '\n  Workspace Trust Required\n  Do you trust this directory?\n' >&2; exit 1`)
+	_, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "x"}},
+	})
+	err := <-errs
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "Trust") || !strings.Contains(got, "/provider") {
+		t.Errorf("error = %q, want it to point at the Trust setting", got)
+	}
+	if !strings.Contains(got, "yolo") {
+		t.Errorf("error = %q, want it to warn against the CLI's --yolo suggestion", got)
+	}
+}
+
+// An error result must surface as an error, not as an empty successful turn.
+func TestCursorResultErrorSurfaces(t *testing.T) {
+	bin, _ := fakeCursorAgent(t, `echo '{"type":"result","subtype":"error","is_error":true,"result":"rate limited"}'`)
+	_, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "x"}},
+	})
+	err := <-errs
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("error = %v, want the CLI's failure reason", err)
 	}
 }
 
@@ -143,12 +225,17 @@ func TestCursorReportsFailures(t *testing.T) {
 }
 
 func TestCursorListsModels(t *testing.T) {
+	// Verbatim `agent --list-models` output: a header, a blank line, then
+	// "<id> - <Description>". Every model line contains spaces, which an earlier
+	// parser used as the reason to skip it — so nothing was ever found.
 	bin, _ := fakeCursorAgent(t, `
 cat <<'EOF'
-Available models:
-  - claude-sonnet-4
-  - gpt-5
-  composer-1
+Available models
+
+auto - Auto (default)
+gpt-5.3-codex-high - Codex 5.3 High
+claude-opus-5-thinking-high - Opus 5 1M Thinking
+composer-2.5 - Composer 2.5
 EOF`)
 	list, err := cursorHost(bin).GetModelList()
 	if err != nil {
@@ -158,9 +245,9 @@ EOF`)
 	for _, mo := range list.Models {
 		got = append(got, mo.Name)
 	}
-	want := []string{"claude-sonnet-4", "gpt-5", "composer-1"}
+	want := []string{"auto", "gpt-5.3-codex-high", "claude-opus-5-thinking-high", "composer-2.5"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("models = %v, want %v (header and bullets stripped)", got, want)
+		t.Errorf("models = %v, want %v", got, want)
 	}
 }
 
@@ -209,55 +296,50 @@ func TestCursorPromptLabelsRoles(t *testing.T) {
 
 // The Cursor CLI installs as `cursor-agent` on some setups and plain `agent` on
 // others, so whichever is present has to work without configuration.
-func TestCursorCommandResolvesEitherName(t *testing.T) {
-	stub := func(t *testing.T, names ...string) string {
-		t.Helper()
-		dir := t.TempDir()
-		for _, n := range names {
-			if err := os.WriteFile(filepath.Join(dir, n), []byte("#!/bin/sh\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return dir
-	}
+func TestCursorResolvesEitherName(t *testing.T) {
 	var h OllamaHost
 	h.SetProvider(ProviderCursor)
 
-	t.Run("plain agent", func(t *testing.T) {
-		t.Setenv("PATH", stub(t, "agent"))
-		if got := h.cursorCommand(); got != "agent" {
-			t.Errorf("cursorCommand = %q, want agent", got)
+	t.Run("both names are tried", func(t *testing.T) {
+		if got := h.cursorCommands(); !slices.Contains(got, "agent") || !slices.Contains(got, "cursor-agent") {
+			t.Errorf("candidates = %v, want both install names", got)
 		}
 	})
 
-	t.Run("cursor-agent", func(t *testing.T) {
-		t.Setenv("PATH", stub(t, "cursor-agent"))
-		if got := h.cursorCommand(); got != "cursor-agent" {
-			t.Errorf("cursorCommand = %q, want cursor-agent", got)
-		}
-	})
-
-	t.Run("both present prefers the unambiguous name", func(t *testing.T) {
-		t.Setenv("PATH", stub(t, "agent", "cursor-agent"))
-		if got := h.cursorCommand(); got != "cursor-agent" {
-			t.Errorf("cursorCommand = %q, want cursor-agent", got)
-		}
-	})
-
-	t.Run("neither present still names something concrete", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		if got := h.cursorCommand(); got == "" {
-			t.Error("returned an empty command; the error would name nothing")
-		}
-	})
-
-	t.Run("explicit path wins over PATH", func(t *testing.T) {
-		t.Setenv("PATH", stub(t, "cursor-agent"))
+	t.Run("explicit path is the only candidate", func(t *testing.T) {
 		var explicit OllamaHost
 		explicit.SetProvider(ProviderCursor)
 		explicit.SetURI("/opt/custom/agent")
-		if got := explicit.cursorCommand(); got != "/opt/custom/agent" {
-			t.Errorf("cursorCommand = %q, want the configured path", got)
+		if got := explicit.cursorCommands(); len(got) != 1 || got[0] != "/opt/custom/agent" {
+			t.Errorf("candidates = %v, want just the configured path", got)
+		}
+	})
+
+	// The real fallback: the first name doesn't exist, the second does, and the
+	// run has to succeed rather than error on the first.
+	t.Run("falls through to the name that works", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, cursorCommandCandidates[len(cursorCommandCandidates)-1])
+		script := "#!/bin/sh\necho '{\"type\":\"result\",\"result\":\"fallback ok\"}'\n"
+		if err := os.WriteFile(real, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir) // only the second candidate exists
+
+		var host OllamaHost
+		host.SetProvider(ProviderCursor)
+		resp, errs := host.ContinuousChat(context.Background(), ChatRequest{
+			Messages: []Message{{Role: "user", Content: "x"}},
+		})
+		var content string
+		for c := range resp {
+			content += c.Message.Content
+		}
+		if err := <-errs; err != nil {
+			t.Fatalf("did not fall through to the working binary: %v", err)
+		}
+		if content != "fallback ok" {
+			t.Errorf("content = %q, want the second candidate's output", content)
 		}
 	})
 }

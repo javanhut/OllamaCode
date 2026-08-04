@@ -115,6 +115,18 @@ func (m *Model) settingsModal() string {
 					modalMutedStyle.Render("space")
 			}
 			b.WriteString(row + "\n")
+
+		case settingsFocusTrust:
+			state := "off — headless runs abort on Cursor's trust prompt"
+			if m.settingsTrust {
+				state = "on — passes --trust"
+			}
+			row := modalMutedStyle.Render("Trust ") + modalBodyStyle.Render("‹ "+state+" ›")
+			if m.settingsFocus == settingsFocusTrust {
+				row = modalMutedStyle.Render("Trust ") + modalAccentStyle.Render("‹ "+state+" › ") +
+					modalMutedStyle.Render("space")
+			}
+			b.WriteString(row + "\n")
 		}
 	}
 
@@ -144,6 +156,9 @@ func (m *Model) settingsModal() string {
 // generic key advice would be actively misleading there.
 func (m *Model) settingsFieldHint(target string) string {
 	if m.settingsKind == api.ProviderCursor {
+		if !m.settingsTrust {
+			return "Trust off: runs here will fail until you accept Cursor's trust prompt yourself"
+		}
 		if strings.TrimSpace(os.Getenv("CURSOR_API_KEY")) != "" {
 			return "URL is the agent binary path (blank = find it on PATH) · CURSOR_API_KEY is set"
 		}

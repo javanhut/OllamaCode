@@ -123,6 +123,23 @@ compacted history rides along in the volatile tail.
 - Keys are not accepted on the command line, where they would appear on screen
   and in input history
 
+## The Cursor agent is read-only
+
+When plan mode is routed to the Cursor CLI, `--plan` is always passed and
+`--force`/`--yolo` never are. That is the whole boundary: the CLI's `-p` print
+mode has full write and shell access on its own, so the absence of `--force` is
+*not* sufficient — `--plan` is.
+
+`--trust` — which suppresses Cursor's workspace-trust prompt so a headless run
+doesn't abort — is **opt-in per provider and off by default**. It grants no
+write ability by itself, but it does mark the directory trusted in Cursor
+without asking, so it is the user's call rather than an inherited default.
+Enable it on the **Trust** row in the provider modal.
+
+With it off, the run fails and says how to fix it. The failure deliberately
+warns against the CLI's own advice to pass `--yolo`/`-f`, which would also grant
+write and shell access.
+
 ## Unattended spend
 
 Dream mode — idle background reflection — refuses to run on a routed provider.

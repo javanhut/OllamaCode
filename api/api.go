@@ -211,7 +211,15 @@ type OllamaHost struct {
 	uri      string
 	apiKey   string
 	provider string
+	// trustWorkspace opts into passing --trust to the Cursor agent. Off by
+	// default: it marks the working directory as trusted in Cursor without
+	// asking, which is the user's call to make, not a default to inherit.
+	trustWorkspace bool
 }
+
+// SetTrustWorkspace opts a Cursor provider into --trust, without which a
+// headless run aborts on the workspace-trust prompt. Ignored by other providers.
+func (o *OllamaHost) SetTrustWorkspace(t bool) { o.trustWorkspace = t }
 
 // SetProvider selects the wire format. Anything other than ProviderOpenAI means
 // native Ollama.

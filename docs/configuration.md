@@ -94,7 +94,8 @@ missing `routes` object disables routing entirely.
   },
   "cursor": {
     "kind": "cursor",
-    "api_key_env": "CURSOR_API_KEY"
+    "api_key_env": "CURSOR_API_KEY",
+    "trust": true
   },
   "workstation": {
     "base_url": "http://192.168.1.50:11434",
@@ -109,6 +110,7 @@ missing `routes` object disables routing entirely.
 | `api_key` | Stored key. Written by the modal's Key field |
 | `api_key_env` | Environment variable holding the key. Wins over `api_key` |
 | `kind` | `openai` (default), `ollama`, or `cursor` |
+| `trust` | cursor only: pass `--trust`, suppressing Cursor's workspace-trust prompt. Off by default; without it headless runs abort |
 
 Provider names cannot contain `:` or spaces — the colon separates provider from
 model in a route spec.

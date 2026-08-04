@@ -117,6 +117,7 @@ const (
 	settingsFocusKey
 	settingsFocusEnv
 	settingsFocusNative
+	settingsFocusTrust
 )
 
 type config struct {
@@ -150,6 +151,10 @@ type providerConfig struct {
 	APIKey    string `json:"api_key,omitempty"`
 	APIKeyEnv string `json:"api_key_env,omitempty"` // env var holding the key; preferred over APIKey
 	Kind      string `json:"kind,omitempty"`        // api.Provider*; blank = openai
+	// Trust passes --trust to the Cursor agent, marking the working directory
+	// trusted in Cursor without prompting. Off by default; without it a headless
+	// run aborts, which is the honest failure.
+	Trust bool `json:"trust,omitempty"`
 }
 
 // providerKinds are the wire formats a provider can speak, in the order the
@@ -229,6 +234,7 @@ type Model struct {
 	settingsFocus  settingsField
 	settingsTarget int    // index into settingsTargets(); 0 = default host, last = new provider
 	settingsKind   string // wire format of the provider being edited
+	settingsTrust  bool   // cursor providers only: pass --trust
 	models         []string
 	picker         int
 	modelName      string

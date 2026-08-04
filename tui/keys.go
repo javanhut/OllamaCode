@@ -42,6 +42,10 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusErr = false
 		return m, nil
 	case " ", "left", "right":
+		if m.settingsFocus == settingsFocusTrust {
+			m.settingsTrust = !m.settingsTrust
+			return m, nil
+		}
 		if m.settingsFocus == settingsFocusNative {
 			step := 1
 			if msg.String() == "left" {
@@ -52,6 +56,11 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				i = 0
 			}
 			m.settingsKind = providerKinds[(i+step+len(providerKinds))%len(providerKinds)]
+			// The Trust row only exists for the cursor kind; cycling away from it
+			// would otherwise strand focus on a row that is no longer rendered.
+			if !slices.Contains(m.settingsFields(), m.settingsFocus) {
+				m.focusSettingsField(m.settingsFields()[0])
+			}
 			return m, nil
 		}
 	case "ctrl+d":

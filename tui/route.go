@@ -82,6 +82,7 @@ func (m *Model) providerHost(name string) api.OllamaHost {
 		kind = api.ProviderOpenAI
 	}
 	h.SetProvider(kind)
+	h.SetTrustWorkspace(p.Trust)
 	return h
 }
 
@@ -143,26 +144,33 @@ func (m *Model) settingsFields() []settingsField {
 	if !m.settingsIsProvider() {
 		return []settingsField{settingsFocusURL, settingsFocusKey}
 	}
-	return []settingsField{settingsFocusName, settingsFocusURL, settingsFocusKey, settingsFocusEnv, settingsFocusNative}
+	fields := []settingsField{settingsFocusName, settingsFocusURL, settingsFocusKey, settingsFocusEnv, settingsFocusNative}
+	// Trust only means anything for the Cursor agent; the HTTP kinds have no
+	// workspace to trust.
+	if m.settingsKind == api.ProviderCursor {
+		fields = append(fields, settingsFocusTrust)
+	}
+	return fields
 }
 
 // loadSettingsInputs fills the modal's fields from the selected endpoint.
 func (m *Model) loadSettingsInputs() {
-	set := func(name, url, key, env, kind string) {
+	set := func(name, url, key, env, kind string, trust bool) {
 		m.nameInput.SetValue(name)
 		m.urlInput.SetValue(url)
 		m.keyInput.SetValue(key)
 		m.envInput.SetValue(env)
 		m.settingsKind = kind
+		m.settingsTrust = trust
 	}
 	switch {
 	case m.settingsIsNew():
-		set("", "", "", "", api.ProviderOpenAI)
+		set("", "", "", "", api.ProviderOpenAI, false)
 	case m.settingsTargetName() != "":
 		p := m.cfg.Providers[m.settingsTargetName()]
-		set(m.settingsTargetName(), p.BaseURL, p.APIKey, p.APIKeyEnv, p.Kind)
+		set(m.settingsTargetName(), p.BaseURL, p.APIKey, p.APIKeyEnv, p.Kind, p.Trust)
 	default:
-		set("", m.cfg.Host, m.cfg.APIKey, "", api.ProviderOpenAI)
+		set("", m.cfg.Host, m.cfg.APIKey, "", api.ProviderOpenAI, false)
 	}
 	m.focusSettingsField(m.settingsFields()[0])
 }
@@ -248,6 +256,7 @@ func (m *Model) saveSettingsInputs() (api.OllamaHost, error) {
 		APIKey:    key,
 		APIKeyEnv: strings.TrimSpace(m.envInput.Value()),
 		Kind:      m.settingsKind,
+		Trust:     m.settingsTrust,
 	}
 	saveConfig(m.cfg)
 

@@ -740,3 +740,46 @@ func TestRequireReadBeforeEdit(t *testing.T) {
 		}
 	})
 }
+
+// Trust is per-provider and only exists for the Cursor kind — the HTTP kinds
+// have no workspace to trust.
+func TestSettingsTrustRow(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.openSettings(newProviderTarget)
+
+	m.settingsKind = api.ProviderOpenAI
+	if slices.Contains(m.settingsFields(), settingsFocusTrust) {
+		t.Error("Trust row shown for an HTTP provider")
+	}
+	m.settingsKind = api.ProviderCursor
+	if !slices.Contains(m.settingsFields(), settingsFocusTrust) {
+		t.Fatal("Trust row missing for a cursor provider")
+	}
+
+	m.nameInput.SetValue("cursor")
+	m.settingsTrust = true
+	if _, err := m.saveSettingsInputs(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	if !m.cfg.Providers["cursor"].Trust {
+		t.Error("Trust was not persisted")
+	}
+	if !m.providerHost("cursor").IsCursor() {
+		t.Error("provider host lost its kind")
+	}
+
+	// Reloading must bring the flag back, not silently default it off.
+	m.openSettings("cursor")
+	if !m.settingsTrust {
+		t.Error("Trust did not round-trip through the modal")
+	}
+
+	// Default is off: a new provider must not inherit trust.
+	m.openSettings(newProviderTarget)
+	if m.settingsTrust {
+		t.Error("a new provider defaulted to trusted")
+	}
+}

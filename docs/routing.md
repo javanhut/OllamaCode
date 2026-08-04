@@ -107,25 +107,38 @@ talks to a subprocess. No proxy, no tunnel, nothing to install but the CLI.
 ```
 
 `enter` in the modal runs `--list-models` against it and shows what your account
-can use.
+can use — ids like `auto`, `composer-2.5`, `gpt-5.3-codex-high`,
+`claude-opus-5-thinking-high`.
 
-The CLI installs under two different names depending on how you got it —
-`cursor-agent` on some setups, plain `agent` on others. Leave **URL** blank and
-whichever is on your PATH is used (`cursor-agent` wins if both are). Set it only
-if the binary lives somewhere off PATH.
+The CLI installs under two names depending on how you got it — `cursor-agent` on
+some setups, plain `agent` on others. Leave **URL** blank and both are tried, in
+that order, using whichever actually starts. Set it only if the binary lives
+somewhere off PATH.
 
 Per turn it runs:
 
 ```
-<agent> -p --output-format stream-json --stream-partial-output \
-        -m <model> --workspace <cwd> "<prompt>"
+<agent> -p --plan --trust \
+        --output-format stream-json --stream-partial-output \
+        --model <model> --workspace <cwd> "<prompt>"
 ```
 
-**It never passes `--force`.** Without that flag the CLI *proposes* file changes
-instead of applying them, so the planner can read your whole repo but cannot
-write to it. Every actual edit is made by the local model, through the approval
-prompt, and is undoable. A test fails if `--force`, `-f` or `--yolo` ever
-appears in the argv.
+**`--plan` is what makes this read-only**, and it is not optional. Print mode
+alone is *not* safe — the CLI's own help says `-p` "Has access to all tools,
+including write and shell." `--plan` is documented as "read-only/planning
+(analyze, propose plans, no edits)". `--force` and `--yolo` are never passed; a
+test fails if either ever appears in the argv.
+
+A headless run also aborts on Cursor's workspace-trust prompt ("Do you trust
+the contents of this directory?") unless `--trust` is passed — and that is
+**opt-in per provider**, off by default. Turn on the **Trust** row in the
+provider modal (it only appears for the cursor kind) to enable it.
+
+Left off, the run fails with an actionable error rather than silently trusting
+your repo on your behalf. The alternative is to run `agent` once interactively
+in the directory and accept there. Note that the CLI's own suggestion is to pass
+`--yolo` or `-f` — do not: those also grant write and shell access and would
+undo `--plan`.
 
 The API key goes through the environment, never `--api-key`, so it stays out of
 the process list.

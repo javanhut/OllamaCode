@@ -57,10 +57,20 @@ failing loudly:
 ### The cursor transport
 
 The Cursor agent is a local binary, so this "provider" spawns a subprocess and
-parses `--output-format stream-json`. It never passes `--force`, which is what
-makes it read-only against your repo. It is an agent rather than a model, so its
-profile sets `SupportsTools: false` and it receives a short planning prompt
-instead of the full tool-protocol one.
+parses `--output-format stream-json`. It is an agent rather than a model, so its
+profile sets `SupportsTools: false` and it gets a short planning prompt instead
+of the full tool-protocol one.
+
+Flags are verified against `agent --help`, not documentation — the docs were
+wrong on all three points that matter. `--plan` is what makes it read-only (`-p`
+alone has full write and shell access); `--trust` is required or a headless run
+aborts on the workspace-trust prompt; and `--model` has no short form, `-m` is
+rejected outright.
+
+Two parsing hazards, both covered by tests against captured real output:
+assistant events arrive as deltas carrying `timestamp_ms` and are then repeated
+once *without* one, so counting both doubles every answer; and `--list-models`
+emits `<id> - <Description>`, so splitting on `" - "` is the whole parse.
 
 ## The turn lifecycle
 
