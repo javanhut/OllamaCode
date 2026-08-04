@@ -27,6 +27,17 @@ func routedModel(routes map[string]string, dflt string) *Model {
 	return m
 }
 
+// settingsModel is a fixture with the connection modal's inputs constructed.
+func settingsModel(t *testing.T) *Model {
+	t.Helper()
+	m := routedModel(nil, "small")
+	m.urlInput = textinput.New()
+	m.keyInput = textinput.New()
+	m.nameInput = textinput.New()
+	m.envInput = textinput.New()
+	return m
+}
+
 func TestModelForMode(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -263,33 +274,31 @@ func TestProviderKeyPrefersEnv(t *testing.T) {
 
 // The connection modal edits whichever endpoint is selected; saving must land in
 // that endpoint's config, not always the default host.
-func TestSettingsTargetRoundTrip(t *testing.T) {
+func TestSettingsEditsSelectedEndpoint(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 
-	m := routedModel(nil, "small")
-	m.cfg.Providers = map[string]providerConfig{
-		"openrouter": {BaseURL: "https://openrouter.ai/api/v1"},
-	}
-	m.urlInput = textinput.New()
-	m.keyInput = textinput.New()
+	m := settingsModel(t)
+	m.cfg.Providers = map[string]providerConfig{"openrouter": {BaseURL: "https://openrouter.ai/api/v1"}}
 
-	// Index 0 is always the default host, then providers alphabetically.
-	if got := m.settingsTargets(); len(got) != 2 || got[0] != "" || got[1] != "openrouter" {
-		t.Fatalf("targets = %q, want [default, openrouter]", got)
+	// Default host first, providers alphabetically, new-provider slot last.
+	if got := m.settingsTargets(); len(got) != 3 {
+		t.Fatalf("targets = %d, want default + openrouter + new", len(got))
 	}
 
 	m.openSettings("openrouter")
 	if m.state != stateSettings {
 		t.Fatal("openSettings did not show the modal")
 	}
-	if m.urlInput.Value() != "https://openrouter.ai/api/v1" {
-		t.Errorf("url field = %q, want the provider's base url", m.urlInput.Value())
+	if m.urlInput.Value() != "https://openrouter.ai/api/v1" || m.nameInput.Value() != "openrouter" {
+		t.Errorf("fields not loaded: name=%q url=%q", m.nameInput.Value(), m.urlInput.Value())
 	}
 
 	m.keyInput.SetValue("sk-or-new")
-	host := m.saveSettingsInputs()
-
+	host, err := m.saveSettingsInputs()
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
 	if got := m.cfg.Providers["openrouter"].APIKey; got != "sk-or-new" {
 		t.Errorf("provider key = %q, want sk-or-new", got)
 	}
@@ -300,7 +309,6 @@ func TestSettingsTargetRoundTrip(t *testing.T) {
 		t.Errorf("probe host = %q, want the endpoint just edited", host.URL())
 	}
 
-	// Unknown provider: no modal, no crash.
 	m.state = stateChat
 	m.openSettings("nope")
 	if m.state == stateSettings {
@@ -308,10 +316,112 @@ func TestSettingsTargetRoundTrip(t *testing.T) {
 	}
 }
 
+// Creating a provider from the blank slot, including the wire-format toggle.
+func TestSettingsCreatesProvider(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.openSettings(newProviderTarget)
+	if !m.settingsIsNew() {
+		t.Fatal("did not land on the new-provider slot")
+	}
+	if len(m.settingsFields()) != 5 {
+		t.Errorf("got %d fields, want name/url/key/env/wire", len(m.settingsFields()))
+	}
+
+	m.nameInput.SetValue("lmstudio")
+	m.urlInput.SetValue("http://localhost:1234/v1")
+	m.envInput.SetValue("LMS_KEY")
+	m.settingsNative = true
+
+	host, err := m.saveSettingsInputs()
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	p, ok := m.cfg.Providers["lmstudio"]
+	if !ok {
+		t.Fatal("provider was not created")
+	}
+	if p.BaseURL != "http://localhost:1234/v1" || p.APIKeyEnv != "LMS_KEY" || !p.NativeOllama {
+		t.Errorf("saved %+v, want the edited values including the wire toggle", p)
+	}
+	if host.IsOpenAI() {
+		t.Error("native toggle did not reach the built client")
+	}
+	// The cursor must follow the row that was just created, not stay on "new".
+	if m.settingsTargetName() != "lmstudio" {
+		t.Errorf("cursor on %q, want lmstudio", m.settingsTargetName())
+	}
+}
+
+func TestSettingsRejectsBadProviderNames(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.cfg.Providers = map[string]providerConfig{"taken": {BaseURL: "u"}}
+
+	tests := []struct{ label, name, url string }{
+		{"empty", "", "http://x/v1"},
+		{"colon breaks the route separator", "a:b", "http://x/v1"},
+		{"space breaks route parsing", "a b", "http://x/v1"},
+		{"duplicate", "taken", "http://x/v1"},
+		{"no url", "fine", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			m.openSettings(newProviderTarget)
+			m.nameInput.SetValue(tt.name)
+			m.urlInput.SetValue(tt.url)
+			if _, err := m.saveSettingsInputs(); err == nil {
+				t.Error("expected an error")
+			}
+		})
+	}
+	if len(m.cfg.Providers) != 1 {
+		t.Errorf("rejected input still created providers: %v", m.cfg.Providers)
+	}
+}
+
+// A rename that leaves routes pointing at the old name strands them: the spec
+// parses as a plain model and silently runs on the default host.
+func TestRenameAndDeleteRepointRoutes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.cfg.Providers = map[string]providerConfig{"old": {BaseURL: "http://x/v1"}}
+	m.cfg.Routes = map[string]string{"plan": "old:big-model", "write": "small"}
+
+	m.openSettings("old")
+	m.nameInput.SetValue("new")
+	if _, err := m.saveSettingsInputs(); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if _, gone := m.cfg.Providers["old"]; gone {
+		t.Error("old provider name survived the rename")
+	}
+	if got := m.cfg.Routes["plan"]; got != "new:big-model" {
+		t.Errorf("route = %q, want it repointed to new:big-model", got)
+	}
+	if got := m.cfg.Routes["write"]; got != "small" {
+		t.Errorf("unrelated route was rewritten to %q", got)
+	}
+
+	m.deleteSettingsProvider()
+	if _, still := m.cfg.Routes["plan"]; still {
+		t.Error("route bound to a deleted provider was left dangling")
+	}
+	if got := m.cfg.Routes["write"]; got != "small" {
+		t.Errorf("unrelated route dropped on delete: %q", got)
+	}
+}
+
 // A key typed into a field that an env var silently overrides is the confusing
 // failure this hint exists to prevent.
 func TestSettingsKeyHintNamesTheOverride(t *testing.T) {
-	m := routedModel(nil, "small")
+	m := settingsModel(t)
 	m.cfg.Providers = map[string]providerConfig{
 		"withenv": {BaseURL: "u", APIKeyEnv: "PROVIDER_KEY"},
 		"plain":   {BaseURL: "u"},

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -73,44 +74,69 @@ func (m *Model) modalHeader(title, hint string, innerW int) string {
 func (m *Model) settingsModal() string {
 	w := m.modalWidth()
 	innerW := m.modalInner()
-	m.urlInput.SetWidth(innerW - 6)
-	m.keyInput.SetWidth(innerW - 6)
-	target := m.settingsTargetName()
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Connection", "esc", innerW))
-	b.WriteString("\n\n")
-	if targets := m.settingsTargets(); len(targets) > 1 {
-		label := "default host"
-		if target != "" {
-			label = target
-		}
-		b.WriteString(modalMutedStyle.Render("Endpoint") + modalBodyStyle.Render("  ") +
-			modalAccentStyle.Render("‹ "+truncatePlain(label, innerW-16)+" ›") +
-			modalMutedStyle.Render(fmt.Sprintf("  ↑↓ %d/%d", m.settingsTarget+1, len(targets))))
-		b.WriteString("\n\n")
+	for _, in := range []*textinput.Model{&m.urlInput, &m.keyInput, &m.nameInput, &m.envInput} {
+		in.SetWidth(innerW - 6)
 	}
-	b.WriteString(modalMutedStyle.Render("URL"))
-	b.WriteString("\n")
-	b.WriteString(m.urlInput.View())
+
+	targets := m.settingsTargets()
+	target := m.settingsTargetName()
+	label := "default host"
+	switch {
+	case m.settingsIsNew():
+		label = "+ new provider"
+	case target != "":
+		label = target
+	}
+
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Endpoints", "esc", innerW))
 	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("API key"))
-	b.WriteString("\n")
-	b.WriteString(m.keyInput.View())
-	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("↑↓ ") +
+		modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-18, 8))+" ›") +
+		modalMutedStyle.Render(fmt.Sprintf("  %d/%d", m.settingsTarget+1, len(targets))))
+	b.WriteString("\n\n")
+
+	for _, f := range m.settingsFields() {
+		switch f {
+		case settingsFocusName:
+			b.WriteString(m.nameInput.View() + "\n")
+		case settingsFocusURL:
+			b.WriteString(m.urlInput.View() + "\n")
+		case settingsFocusKey:
+			b.WriteString(m.keyInput.View() + "\n")
+		case settingsFocusEnv:
+			b.WriteString(m.envInput.View() + "\n")
+		case settingsFocusNative:
+			wire := "openai (/v1/chat/completions)"
+			if m.settingsNative {
+				wire = "ollama (/api/chat)"
+			}
+			row := modalMutedStyle.Render("Wire  ") + modalBodyStyle.Render("‹ "+wire+" ›")
+			if m.settingsFocus == settingsFocusNative {
+				row = modalMutedStyle.Render("Wire  ") + modalAccentStyle.Render("‹ "+wire+" › ") +
+					modalMutedStyle.Render("space")
+			}
+			b.WriteString(row + "\n")
+		}
+	}
+
 	b.WriteString(modalMutedStyle.Render(truncatePlain(m.settingsKeyHint(target), innerW)))
 	b.WriteString("\n\n")
 	if m.statusMsg != "" {
+		style := modalMutedStyle
 		if m.statusErr {
-			b.WriteString(modalErrorStyle.Render(truncatePlain(m.statusMsg, innerW)))
-		} else {
-			b.WriteString(modalMutedStyle.Render(truncatePlain(m.statusMsg, innerW)))
+			style = modalErrorStyle
 		}
+		b.WriteString(style.Render(truncatePlain(m.statusMsg, innerW)))
 		b.WriteString("\n\n")
 	}
+
 	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("field") +
 		modalMutedStyle.Render("   ↑↓ ") + modalBodyStyle.Render("endpoint") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("save & test") +
-		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("save & test")
+	if target != "" {
+		hint += modalMutedStyle.Render("   ctrl+d ") + modalBodyStyle.Render("delete")
+	}
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
 }
@@ -128,7 +154,7 @@ func (m *Model) settingsKeyHint(target string) string {
 	p := m.cfg.Providers[target]
 	switch {
 	case p.APIKeyEnv == "":
-		return "stored in config.json — $VAR is safer: /provider add " + target + " <url> env:VAR"
+		return "key is stored in config.json — naming an env var above keeps it out"
 	case strings.TrimSpace(os.Getenv(p.APIKeyEnv)) != "":
 		return "$" + p.APIKeyEnv + " is set — it overrides this field"
 	default:

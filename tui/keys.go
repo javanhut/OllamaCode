@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +22,16 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.state = stateChat
 		m.input.Focus()
 		return m, nil
-	case "tab", "shift+tab":
-		m.toggleSettingsFocus()
+	case "tab":
+		m.cycleSettingsFocus(1)
+		return m, nil
+	case "shift+tab":
+		m.cycleSettingsFocus(-1)
 		return m, nil
 	case "up", "down":
-		// Neither textinput binds up/down, so they're free to switch which
-		// endpoint is being edited. Unsaved edits to the current one are dropped.
+		// No textinput binds up/down, so they're free to switch which endpoint is
+		// being edited. Unsaved edits to the current one are dropped.
 		targets := m.settingsTargets()
-		if len(targets) < 2 {
-			return m, nil
-		}
 		step := 1
 		if msg.String() == "up" {
 			step = -1
@@ -40,43 +41,88 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		m.statusErr = false
 		return m, nil
+	case " ", "left", "right":
+		if m.settingsFocus == settingsFocusNative {
+			m.settingsNative = !m.settingsNative
+			return m, nil
+		}
+	case "ctrl+d":
+		return m, m.deleteSettingsProvider()
 	case "enter":
-		host := m.saveSettingsInputs()
+		host, err := m.saveSettingsInputs()
+		if err != nil {
+			m.statusMsg = err.Error()
+			m.statusErr = true
+			return m, nil
+		}
 		m.statusMsg = "connecting…"
 		m.statusErr = false
 		// Probe the endpoint just edited, not the active one — the point of
 		// typing a key is finding out whether it works.
 		return m, m.fetchModelsFrom(host)
 	}
+
 	var cmd tea.Cmd
-	if m.settingsFocus == settingsFocusKey {
+	switch m.settingsFocus {
+	case settingsFocusName:
+		m.nameInput, cmd = m.nameInput.Update(msg)
+	case settingsFocusKey:
 		m.keyInput, cmd = m.keyInput.Update(msg)
-	} else {
+	case settingsFocusEnv:
+		m.envInput, cmd = m.envInput.Update(msg)
+	case settingsFocusNative: // toggle row: nothing to type into
+	default:
 		m.urlInput, cmd = m.urlInput.Update(msg)
 	}
 	return m, cmd
 }
 
-// toggleSettingsFocus moves focus between the URL and API-key fields in the
-// connection modal.
-func (m *Model) toggleSettingsFocus() {
-	if m.settingsFocus == settingsFocusURL {
-		m.settingsFocus = settingsFocusKey
-		m.urlInput.Blur()
-		m.keyInput.Focus()
-	} else {
-		m.settingsFocus = settingsFocusURL
-		m.keyInput.Blur()
+// deleteSettingsProvider removes the provider under the cursor along with any
+// routes bound to it. The default host and the blank new-provider slot are not
+// deletable, so ctrl+d is a no-op there.
+func (m *Model) deleteSettingsProvider() tea.Cmd {
+	name := m.settingsTargetName()
+	if name == "" {
+		return nil
+	}
+	delete(m.cfg.Providers, name)
+	m.clearRoutesFor(name)
+	saveConfig(m.cfg)
+	m.reloadActiveHost()
+	m.settingsTarget = 0
+	m.loadSettingsInputs()
+	m.statusMsg = "removed " + name
+	m.statusErr = false
+	return nil
+}
+
+// focusSettingsField moves focus to one row, blurring the rest.
+func (m *Model) focusSettingsField(f settingsField) {
+	m.settingsFocus = f
+	m.nameInput.Blur()
+	m.urlInput.Blur()
+	m.keyInput.Blur()
+	m.envInput.Blur()
+	switch f {
+	case settingsFocusName:
+		m.nameInput.Focus()
+	case settingsFocusURL:
 		m.urlInput.Focus()
+	case settingsFocusKey:
+		m.keyInput.Focus()
+	case settingsFocusEnv:
+		m.envInput.Focus()
 	}
 }
 
-// focusSettings (re)focuses the URL field when the connection modal opens so
-// both inputs start in a known state.
-func (m *Model) focusSettings() {
-	m.settingsFocus = settingsFocusURL
-	m.keyInput.Blur()
-	m.urlInput.Focus()
+// cycleSettingsFocus walks the rows the selected endpoint actually has.
+func (m *Model) cycleSettingsFocus(step int) {
+	fields := m.settingsFields()
+	i := slices.Index(fields, m.settingsFocus)
+	if i < 0 {
+		i = 0
+	}
+	m.focusSettingsField(fields[(i+step+len(fields))%len(fields)])
 }
 
 func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

@@ -105,64 +105,167 @@ func (m *Model) reloadActiveHost() {
 	m.host, _ = m.hostForSpec(spec)
 }
 
-// settingsTargets lists what the connection modal can edit: the default host
-// first (named by the empty string), then each provider alphabetically.
+// settingsTargets lists the endpoints the connection modal can edit: the default
+// host first, each provider alphabetically, then a trailing slot for a new one.
+// Both the default host and the new slot have an empty name, so they are told
+// apart by position — first and last, never the same entry.
 func (m *Model) settingsTargets() []string {
-	return append([]string{""}, slices.Sorted(maps.Keys(m.cfg.Providers))...)
+	out := append([]string{""}, slices.Sorted(maps.Keys(m.cfg.Providers))...)
+	return append(out, "")
 }
 
-// settingsTargetName is the provider being edited, or "" for the default host.
+// settingsIsNew reports whether the modal is on the "add a provider" slot.
+func (m *Model) settingsIsNew() bool {
+	return m.settingsTarget == len(m.settingsTargets())-1
+}
+
+// settingsTargetName is the provider being edited, or "" for the default host
+// and for a provider not created yet.
 func (m *Model) settingsTargetName() string {
 	targets := m.settingsTargets()
-	if m.settingsTarget < 0 || m.settingsTarget >= len(targets) {
+	if m.settingsIsNew() || m.settingsTarget < 0 || m.settingsTarget >= len(targets) {
 		return ""
 	}
 	return targets[m.settingsTarget]
 }
 
-// loadSettingsInputs fills the modal's fields from the selected endpoint.
-func (m *Model) loadSettingsInputs() {
-	if name := m.settingsTargetName(); name != "" {
-		p := m.cfg.Providers[name]
-		m.urlInput.SetValue(p.BaseURL)
-		m.keyInput.SetValue(p.APIKey)
-		return
-	}
-	m.urlInput.SetValue(m.cfg.Host)
-	m.keyInput.SetValue(m.cfg.APIKey)
+// settingsIsProvider reports whether the selected endpoint is a provider —
+// existing or about to be created — rather than the default host.
+func (m *Model) settingsIsProvider() bool {
+	return m.settingsIsNew() || m.settingsTargetName() != ""
 }
 
-// saveSettingsInputs persists the edited endpoint and returns a client for it,
-// so the caller can verify the key actually works against the one just changed.
-func (m *Model) saveSettingsInputs() api.OllamaHost {
+// settingsFields lists the focusable rows for the selected endpoint. The default
+// host has no name, env var, or wire format to set.
+func (m *Model) settingsFields() []settingsField {
+	if !m.settingsIsProvider() {
+		return []settingsField{settingsFocusURL, settingsFocusKey}
+	}
+	return []settingsField{settingsFocusName, settingsFocusURL, settingsFocusKey, settingsFocusEnv, settingsFocusNative}
+}
+
+// loadSettingsInputs fills the modal's fields from the selected endpoint.
+func (m *Model) loadSettingsInputs() {
+	set := func(name, url, key, env string, native bool) {
+		m.nameInput.SetValue(name)
+		m.urlInput.SetValue(url)
+		m.keyInput.SetValue(key)
+		m.envInput.SetValue(env)
+		m.settingsNative = native
+	}
+	switch {
+	case m.settingsIsNew():
+		set("", "", "", "", false)
+	case m.settingsTargetName() != "":
+		p := m.cfg.Providers[m.settingsTargetName()]
+		set(m.settingsTargetName(), p.BaseURL, p.APIKey, p.APIKeyEnv, p.NativeOllama)
+	default:
+		set("", m.cfg.Host, m.cfg.APIKey, "", false)
+	}
+	m.focusSettingsField(m.settingsFields()[0])
+}
+
+// validProviderName rejects names that would break route specs: the colon
+// separates provider from model, and /route splits its arguments on whitespace.
+func validProviderName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("name is required")
+	case strings.ContainsAny(name, ": \t"):
+		return fmt.Errorf("name cannot contain ':' or spaces")
+	}
+	return nil
+}
+
+// renameProvider moves a provider and repoints any routes at it. Without the
+// route fixup a rename strands specs like "old:model", which then parse as a
+// plain model name and silently run on the default host.
+func (m *Model) renameProvider(old, updated string) {
+	if old == "" || old == updated {
+		return
+	}
+	m.cfg.Providers[updated] = m.cfg.Providers[old]
+	delete(m.cfg.Providers, old)
+	for mode, spec := range m.cfg.Routes {
+		if prov, model, ok := strings.Cut(spec, ":"); ok && prov == old {
+			m.cfg.Routes[mode] = updated + ":" + model
+		}
+	}
+}
+
+// clearRoutesFor drops any route bound to a provider that no longer exists, so a
+// deleted endpoint fails loudly at bind time instead of silently falling through
+// to the default host.
+func (m *Model) clearRoutesFor(provider string) {
+	for mode, spec := range m.cfg.Routes {
+		if prov, _, ok := strings.Cut(spec, ":"); ok && prov == provider {
+			delete(m.cfg.Routes, mode)
+		}
+	}
+}
+
+// saveSettingsInputs persists the edited endpoint and returns a client for it, so
+// the caller can verify the key actually works against the one just changed.
+func (m *Model) saveSettingsInputs() (api.OllamaHost, error) {
 	uri := strings.TrimSpace(m.urlInput.Value())
 	key := strings.TrimSpace(m.keyInput.Value())
 
-	if name := m.settingsTargetName(); name != "" {
-		p := m.cfg.Providers[name]
-		p.BaseURL = uri
-		p.APIKey = key
-		m.cfg.Providers[name] = p
+	if !m.settingsIsProvider() {
+		if uri == "" {
+			uri = DefaultHost
+		}
+		m.cfg.Host = uri
+		m.cfg.APIKey = key
 		saveConfig(m.cfg)
 		m.reloadActiveHost()
-		return m.providerHost(name)
+		return m.defaultHost(), nil
 	}
 
-	if uri == "" {
-		uri = DefaultHost
+	name := strings.TrimSpace(m.nameInput.Value())
+	if err := validProviderName(name); err != nil {
+		return api.OllamaHost{}, err
 	}
-	m.cfg.Host = uri
-	m.cfg.APIKey = key
+	if uri == "" {
+		return api.OllamaHost{}, fmt.Errorf("base URL is required")
+	}
+	old := m.settingsTargetName()
+	if name != old {
+		if _, taken := m.cfg.Providers[name]; taken {
+			return api.OllamaHost{}, fmt.Errorf("provider %q already exists", name)
+		}
+	}
+
+	if m.cfg.Providers == nil {
+		m.cfg.Providers = map[string]providerConfig{}
+	}
+	m.renameProvider(old, name)
+	m.cfg.Providers[name] = providerConfig{
+		BaseURL:      uri,
+		APIKey:       key,
+		APIKeyEnv:    strings.TrimSpace(m.envInput.Value()),
+		NativeOllama: m.settingsNative,
+	}
 	saveConfig(m.cfg)
+
+	// The list just changed shape; keep the cursor on what was edited.
+	if i := slices.Index(m.settingsTargets(), name); i >= 0 {
+		m.settingsTarget = i
+	}
 	m.reloadActiveHost()
-	return m.defaultHost()
+	return m.providerHost(name), nil
 }
 
-// openSettings shows the connection modal, targeting a provider by name when
-// given (empty selects the default host).
+// openSettings shows the connection modal. An empty name selects the default
+// host; newProviderTarget starts a blank provider.
+const newProviderTarget = "new"
+
 func (m *Model) openSettings(name string) {
-	m.settingsTarget = 0
-	if name != "" {
+	switch {
+	case name == "":
+		m.settingsTarget = 0
+	case name == newProviderTarget:
+		m.settingsTarget = len(m.settingsTargets()) - 1
+	default:
 		i := slices.Index(m.settingsTargets(), name)
 		if i < 0 {
 			m.toast = "no such provider: " + name + " — /provider to list them"
@@ -174,7 +277,6 @@ func (m *Model) openSettings(name string) {
 	m.statusMsg = ""
 	m.statusErr = false
 	m.loadSettingsInputs()
-	m.focusSettings()
 }
 
 // routeIsLoaded reports whether a spec resolves to what is already running.
@@ -423,10 +525,11 @@ func (m *Model) showRoutes() {
 	m.viewport.GotoBottom()
 }
 
-const providerUsage = "usage: /provider add <name> <base_url> [env:VAR] [native] · /provider key <name> · /provider remove <name> — no args lists them"
+const providerUsage = "usage: /provider new · /provider <name> to edit · /provider remove <name> — no args lists them"
 
-// providerCommand implements /provider: register the OpenAI-compatible (or
-// second Ollama) endpoints that route specs can point at.
+// providerCommand implements /provider. Adding and editing happen in the
+// connection modal, not on this line: an API key typed here would be visible on
+// screen and recallable from input history.
 func (m *Model) providerCommand(args string) {
 	fields := strings.Fields(args)
 	if len(fields) == 0 {
@@ -435,13 +538,14 @@ func (m *Model) providerCommand(args string) {
 	}
 
 	switch fields[0] {
+	case "new", "add":
+		m.openSettings(newProviderTarget)
+
 	case "key", "edit":
 		if len(fields) != 2 {
 			m.toast = providerUsage
 			return
 		}
-		// Keys go through the masked field in the connection modal, never the
-		// command line — the input line is visible and recallable.
 		m.openSettings(fields[1])
 
 	case "remove", "rm", "delete":
@@ -454,44 +558,19 @@ func (m *Model) providerCommand(args string) {
 			return
 		}
 		delete(m.cfg.Providers, fields[1])
+		// Drop routes bound to it too, so a deleted endpoint fails at bind time
+		// instead of silently falling through to the default host.
+		m.clearRoutesFor(fields[1])
 		saveConfig(m.cfg)
+		m.reloadActiveHost()
 		m.toast = "removed provider " + fields[1]
-		// Routes pointing at it now resolve as plain model names on the default
-		// host, which is the safe direction to fail.
-		m.applyRoute(m.mode)
-
-	case "add", "set":
-		if len(fields) < 3 {
-			m.toast = providerUsage
-			return
-		}
-		name, base := fields[1], fields[2]
-		if strings.Contains(name, ":") {
-			m.toast = "provider name cannot contain ':' — it separates provider from model"
-			return
-		}
-		p := providerConfig{BaseURL: base}
-		for _, opt := range fields[3:] {
-			switch {
-			case opt == "native":
-				p.NativeOllama = true
-			case strings.HasPrefix(opt, "env:"):
-				p.APIKeyEnv = strings.TrimPrefix(opt, "env:")
-			default:
-				p.APIKey = opt
-			}
-		}
-		if m.cfg.Providers == nil {
-			m.cfg.Providers = map[string]providerConfig{}
-		}
-		m.cfg.Providers[name] = p
-		saveConfig(m.cfg)
-		m.toast = fmt.Sprintf("provider %s → %s — bind with /route plan %s:<model>", name, base, name)
-		if !p.NativeOllama && providerKey(p) == "" {
-			m.toast = fmt.Sprintf("provider %s added, but no API key resolved", name)
-		}
 
 	default:
+		// A bare name is shorthand for editing that provider.
+		if len(fields) == 1 {
+			m.openSettings(fields[0])
+			return
+		}
 		m.toast = providerUsage
 	}
 }
@@ -522,9 +601,8 @@ func (m *Model) showProviders() {
 		b.WriteString("\n")
 	}
 	b.WriteString(providerUsage + "\n")
-	b.WriteString("Set or change a key with /provider key <name> — it opens the masked field in /settings.\n")
-	b.WriteString("Prefer env: over a stored key — it keeps the secret out of config.json.\n")
-	b.WriteString("Example: /provider add openrouter https://openrouter.ai/api/v1 env:OPENROUTER_API_KEY")
+	b.WriteString("Everything is edited in one modal: name, URL, masked API key, env var, and wire format.\n")
+	b.WriteString("Naming an env var there keeps the key out of config.json entirely.")
 	m.history = append(m.history, api.Message{Role: "system", Content: b.String()})
 	m.refreshTranscript()
 	m.viewport.GotoBottom()

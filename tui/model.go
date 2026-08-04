@@ -112,8 +112,11 @@ const (
 type settingsField int
 
 const (
-	settingsFocusURL settingsField = iota
+	settingsFocusName settingsField = iota
+	settingsFocusURL
 	settingsFocusKey
+	settingsFocusEnv
+	settingsFocusNative
 )
 
 type config struct {
@@ -203,8 +206,11 @@ type Model struct {
 	state          state
 	urlInput       textinput.Model
 	keyInput       textinput.Model
+	nameInput      textinput.Model // provider name; the default host has none
+	envInput       textinput.Model // env var holding the provider's key
 	settingsFocus  settingsField
-	settingsTarget int // which endpoint the connection modal edits; 0 = default host
+	settingsTarget int  // index into settingsTargets(); 0 = default host, last = new provider
+	settingsNative bool // edited provider speaks Ollama's API rather than /v1
 	models         []string
 	picker         int
 	modelName      string
@@ -385,19 +391,29 @@ func New() *Model {
 	mem, _ := memory.New(memoryPath)
 
 	ti := textinput.New()
-	ti.Prompt = "URL  "
+	ti.Prompt = "URL   "
 	ti.Placeholder = DefaultHost
 	ti.SetValue(cfg.Host)
 	ti.Focus()
 	ti.SetWidth(60)
 
 	ki := textinput.New()
-	ki.Prompt = "Key  "
+	ki.Prompt = "Key   "
 	ki.Placeholder = "ollama.com api key (leave blank for local)"
 	ki.SetValue(cfg.APIKey)
 	ki.EchoMode = textinput.EchoPassword
 	ki.EchoCharacter = '•'
 	ki.SetWidth(60)
+
+	ni := textinput.New()
+	ni.Prompt = "Name  "
+	ni.Placeholder = "openrouter"
+	ni.SetWidth(60)
+
+	ei := textinput.New()
+	ei.Prompt = "Env   "
+	ei.Placeholder = "OPENROUTER_API_KEY — keeps the key out of config.json"
+	ei.SetWidth(60)
 
 	pi := textinput.New()
 	pi.Prompt = "Pull  "
@@ -459,6 +475,8 @@ func New() *Model {
 		state:        stateChat,
 		urlInput:     ti,
 		keyInput:     ki,
+		nameInput:    ni,
+		envInput:     ei,
 		pullInput:    pi,
 		input:        ta,
 		modelName:    cfg.Model,
@@ -521,6 +539,8 @@ func (m *Model) layout() {
 	}
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	m.keyInput.SetWidth(min(m.width-6, 80))
+	m.nameInput.SetWidth(min(m.width-6, 80))
+	m.envInput.SetWidth(min(m.width-6, 80))
 	m.pullInput.SetWidth(min(m.width-6, 80))
 
 	// Size the textarea BEFORE measuring the band: inputView() renders the
