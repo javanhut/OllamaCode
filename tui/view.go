@@ -17,9 +17,11 @@ var slashCommands = []struct {
 }{
 	{"/quit", "exit the application"},
 	{"/exit", "exit the application"},
-	{"/settings", "change Ollama URL"},
+	{"/settings", "edit endpoint URLs and API keys"},
 	{"/model", "show/set current model (use, ctx, temp)"},
 	{"/models", "list, switch, or pull models"},
+	{"/route", "bind a model to a mode (big for plan, small for write)"},
+	{"/provider", "add/edit an OpenAI-compatible endpoint and its key"},
 	{"/clear", "reset the conversation"},
 	{"/help", "show help screen"},
 	{"/?", "show help screen"},
@@ -117,6 +119,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.notesModal()))
 	case statePermission:
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
+	case stateRouteConfirm:
+		v.SetContent(m.overlayModal(base, m.routeConfirmModal()))
 	case stateDiff:
 		v.SetContent(m.overlayModal(base, m.diffModal()))
 	case stateStats:

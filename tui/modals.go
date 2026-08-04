@@ -75,9 +75,20 @@ func (m *Model) settingsModal() string {
 	innerW := m.modalInner()
 	m.urlInput.SetWidth(innerW - 6)
 	m.keyInput.SetWidth(innerW - 6)
+	target := m.settingsTargetName()
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Connection", "esc", innerW))
 	b.WriteString("\n\n")
+	if targets := m.settingsTargets(); len(targets) > 1 {
+		label := "default host"
+		if target != "" {
+			label = target
+		}
+		b.WriteString(modalMutedStyle.Render("Endpoint") + modalBodyStyle.Render("  ") +
+			modalAccentStyle.Render("‹ "+truncatePlain(label, innerW-16)+" ›") +
+			modalMutedStyle.Render(fmt.Sprintf("  ↑↓ %d/%d", m.settingsTarget+1, len(targets))))
+		b.WriteString("\n\n")
+	}
 	b.WriteString(modalMutedStyle.Render("URL"))
 	b.WriteString("\n")
 	b.WriteString(m.urlInput.View())
@@ -86,11 +97,7 @@ func (m *Model) settingsModal() string {
 	b.WriteString("\n")
 	b.WriteString(m.keyInput.View())
 	b.WriteString("\n")
-	if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("using OLLAMA_API_KEY from environment", innerW)))
-	} else {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("blank for local · set for ollama.com cloud models", innerW)))
-	}
+	b.WriteString(modalMutedStyle.Render(truncatePlain(m.settingsKeyHint(target), innerW)))
 	b.WriteString("\n\n")
 	if m.statusMsg != "" {
 		if m.statusErr {
@@ -100,11 +107,33 @@ func (m *Model) settingsModal() string {
 		}
 		b.WriteString("\n\n")
 	}
-	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("switch") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("connect") +
+	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("field") +
+		modalMutedStyle.Render("   ↑↓ ") + modalBodyStyle.Render("endpoint") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("save & test") +
 		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
+}
+
+// settingsKeyHint explains what the key field actually controls for the selected
+// endpoint. An environment variable silently outranks the stored key, so a user
+// typing into a field that is being overridden has to be told.
+func (m *Model) settingsKeyHint(target string) string {
+	if target == "" {
+		if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
+			return "OLLAMA_API_KEY is set — it overrides this field"
+		}
+		return "blank for local · set for ollama.com cloud models"
+	}
+	p := m.cfg.Providers[target]
+	switch {
+	case p.APIKeyEnv == "":
+		return "stored in config.json — $VAR is safer: /provider add " + target + " <url> env:VAR"
+	case strings.TrimSpace(os.Getenv(p.APIKeyEnv)) != "":
+		return "$" + p.APIKeyEnv + " is set — it overrides this field"
+	default:
+		return "$" + p.APIKeyEnv + " is unset — this field is the fallback"
+	}
 }
 
 func (m *Model) pickerModal() string {
@@ -430,6 +459,31 @@ func styleDiffLine(line string, w int) string {
 	default:
 		return modalMutedStyle.Render(line)
 	}
+}
+
+// routeConfirmModal offers the plan-mode model for a request that scored as
+// planning work. Declining is the default: it costs nothing and stays local.
+func (m *Model) routeConfirmModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	target := m.modelForMode(PlanMode)
+
+	var lines []string
+	lines = append(lines,
+		m.modalHeader("This looks like planning work", "n=stay local", innerW),
+		"",
+		modalBodyStyle.Render("Run it in plan mode on")+" "+modalAccentStyle.Render(target)+modalBodyStyle.Render("?"),
+		modalMutedStyle.Render("staying local keeps "+m.modelName+" in "+m.mode.String()+" mode"),
+	)
+	if len(m.routeReasons) > 0 {
+		lines = append(lines, "",
+			modalMutedStyle.Render("matched: "+truncatePlain(strings.Join(m.routeReasons, ", "), innerW-9)))
+	}
+	lines = append(lines, "",
+		modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("switch to plan   ")+
+			modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("stay local"))
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
 }
 
 func (m *Model) permissionModal() string {

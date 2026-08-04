@@ -67,6 +67,12 @@ func (m *Model) maybeDream() tea.Cmd {
 	if time.Since(m.lastActivity) < dreamIdleThreshold {
 		return nil
 	}
+	// Dreaming is unprompted and fires while the user is away. Never run it on a
+	// routed provider — that spends a metered API with nobody watching. The
+	// default host is the one they already opted into.
+	if m.host.URL() != m.cfg.Host {
+		return nil
+	}
 	m.asleep = true
 	if m.dreamCount >= maxDreamsPerSleep {
 		return nil

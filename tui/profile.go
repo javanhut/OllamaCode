@@ -16,6 +16,21 @@ func (m *Model) resolveProfile() {
 	if name == "" {
 		return
 	}
+
+	// An OpenAI-compatible endpoint has no /api/show, so context length and
+	// capabilities aren't discoverable — probing would be a guaranteed-failing
+	// round trip on every mode switch. Assume a large, tool-capable model, which
+	// is what gets routed to one, and let /model ctx override. ParamsB stays 0,
+	// so it is treated as a big model (full prompt, full toolset).
+	if m.host.IsOpenAI() {
+		p := ModelProfile{NumCtx: maxContextBudget, SupportsTools: true}
+		if cached, ok := m.cfg.Profiles[name]; ok && cached.NumCtx > 0 {
+			p = cached
+		}
+		m.applyProfile(p)
+		return
+	}
+
 	if m.cfg.Profiles != nil {
 		// ParamsB == 0 also re-probes profiles cached before tier detection
 		// existed; one /api/show per model switch is cheap and self-heals.

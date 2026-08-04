@@ -66,6 +66,18 @@ func (m *Model) submit() tea.Cmd {
 			cmds = append(cmds, c)
 		}
 	}
+	// Cold-start router: the model can escalate itself with switch_mode once it's
+	// running, but it isn't running yet. Offer the plan-mode model before a small
+	// local one burns a turn on work it can't do, and hold the message until the
+	// user answers.
+	if offer, reasons := m.shouldOfferEscalation(value); offer {
+		m.routeAsk, m.routeReasons = value, reasons
+		m.state = stateRouteConfirm
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return tea.Batch(cmds...)
+	}
+
 	// Auto-RAG: when the index is ready, embed the query and inject relevant
 	// code before streaming (the model call fires on ragRetrievedMsg). When it
 	// isn't ready yet, stream immediately and build the index in the background.

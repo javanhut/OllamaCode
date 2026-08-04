@@ -105,6 +105,7 @@ const (
 	stateNotes
 	stateDiff
 	stateStats
+	stateRouteConfirm
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -123,15 +124,27 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps   int                     `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
-	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
-	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
-	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
-	Face       *bool                   `json:"face,omitempty"`        // nil/true = mascot overlay shown
-	Welcome    *bool                   `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
-	Verify     *bool                   `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
-	VerifyCmd  string                  `json:"verify_cmd,omitempty"`  // override the auto-detected check
-	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
+	MaxSteps   int                       `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
+	EmbedModel string                    `json:"embed_model,omitempty"` // model for auto-RAG embeddings
+	AutoRAG    *bool                     `json:"auto_rag,omitempty"`    // nil/true = enabled
+	Dream      *bool                     `json:"dream,omitempty"`       // nil/true = dream mode enabled
+	Face       *bool                     `json:"face,omitempty"`        // nil/true = mascot overlay shown
+	Welcome    *bool                     `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
+	Verify     *bool                     `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
+	VerifyCmd  string                    `json:"verify_cmd,omitempty"`  // override the auto-detected check
+	Profiles   map[string]ModelProfile   `json:"profiles,omitempty"`    // per-model, keyed by model name
+	Routes     map[string]string         `json:"routes,omitempty"`      // mode name -> model spec; empty disables routing
+	Providers  map[string]providerConfig `json:"providers,omitempty"`   // extra endpoints, referenced as "<name>:<model>"
+}
+
+// providerConfig is one additional LLM endpoint beyond the default host. The
+// default is an OpenAI-compatible /v1 server (OpenRouter, LM Studio, vLLM,
+// Together, Groq); set NativeOllama for a second Ollama daemon instead.
+type providerConfig struct {
+	BaseURL      string `json:"base_url"`
+	APIKey       string `json:"api_key,omitempty"`
+	APIKeyEnv    string `json:"api_key_env,omitempty"` // env var holding the key; preferred over APIKey
+	NativeOllama bool   `json:"native_ollama,omitempty"`
 }
 
 // ModelProfile holds per-model settings discovered from /api/show (and cached)
@@ -181,19 +194,20 @@ var (
 )
 
 type Model struct {
-	cfg           config
-	host          api.OllamaHost
-	tools         *tools.Registry
-	notes         *sessionNotes
-	todos         *todoList
-	mode          Mode
-	state         state
-	urlInput      textinput.Model
-	keyInput      textinput.Model
-	settingsFocus settingsField
-	models        []string
-	picker        int
-	modelName     string
+	cfg            config
+	host           api.OllamaHost
+	tools          *tools.Registry
+	notes          *sessionNotes
+	todos          *todoList
+	mode           Mode
+	state          state
+	urlInput       textinput.Model
+	keyInput       textinput.Model
+	settingsFocus  settingsField
+	settingsTarget int // which endpoint the connection modal edits; 0 = default host
+	models         []string
+	picker         int
+	modelName      string
 
 	// Model pulling (from the model picker). pullInput captures the name to
 	// pull; pullStream/progress fields drive the live download UI.
@@ -328,6 +342,13 @@ type Model struct {
 	toastAt       time.Time // when the current toast text first appeared
 	toastSeen     string    // text toastAt refers to
 	diffSource    string    // raw diff behind the /diff viewer, so a resize can re-wrap it
+
+	// Cold-start routing offer: the user message held back pending the y/N, the
+	// signals that triggered it, and how many times the user has said no (after
+	// which we stop asking for the session).
+	routeAsk      string
+	routeReasons  []string
+	routeDeclines int
 }
 
 // turnRecord is what one user command produced: wall clock end to end, the
@@ -342,8 +363,12 @@ type turnRecord struct {
 
 type liveEmbedder struct{ m *Model }
 
+// Embed always runs on the default Ollama host, never the routed one: an
+// OpenAI-compatible provider has no /api/embed, and the embed model is local
+// anyway. Built per call so a /settings host change is picked up immediately.
 func (e liveEmbedder) Embed(model string, inputs []string) ([][]float32, error) {
-	return e.m.host.Embed(model, inputs)
+	h := e.m.defaultHost()
+	return h.Embed(model, inputs)
 }
 
 func New() *Model {
@@ -464,6 +489,7 @@ func New() *Model {
 	registry.Register(tools.CodeIndexTool(liveEmbedder{m}))
 	registry.Register(tools.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
+	m.applyRoute(m.mode) // start on the model bound to the opening mode
 	if m.modelName != "" {
 		m.resolveProfile()
 	}

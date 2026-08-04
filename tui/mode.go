@@ -196,6 +196,12 @@ func (m *Model) applyModeTransition(target Mode, reason string) bool {
 		m.toast = fmt.Sprintf("mode: %s — %s", m.mode, strings.TrimSpace(reason))
 	}
 
+	// Routing is bound to mode, so the model — and its context window — swaps
+	// here. Every real transition funnels through this function.
+	if m.applyRoute(target) {
+		m.toast += " · " + m.modelName
+	}
+
 	if oldMode == PlanMode && m.mode == WriteMode {
 		if notes := m.notes.get(); notes != "" {
 			m.history = append(m.history, api.Message{

@@ -195,10 +195,31 @@ var ollamaCalls map[string]Endpoint = map[string]Endpoint{
 	},
 }
 
+// Provider selects the wire format a host speaks. The zero value is Ollama's
+// native /api/* endpoints; ProviderOpenAI routes chat through the
+// /v1/chat/completions translation in openai.go.
+const (
+	ProviderOllama = "ollama"
+	ProviderOpenAI = "openai"
+)
+
+// OllamaHost is one LLM endpoint. Despite the name it fronts both wire formats
+// — a rename would churn every call site for no behavioral gain — so a session
+// can hold a local Ollama daemon and an OpenAI-compatible provider at once.
 type OllamaHost struct {
-	uri    string
-	apiKey string
+	uri      string
+	apiKey   string
+	provider string
 }
+
+// SetProvider selects the wire format. Anything other than ProviderOpenAI means
+// native Ollama.
+func (o *OllamaHost) SetProvider(p string) {
+	o.provider = strings.ToLower(strings.TrimSpace(p))
+}
+
+// IsOpenAI reports whether this host speaks the OpenAI-compatible API.
+func (o OllamaHost) IsOpenAI() bool { return o.provider == ProviderOpenAI }
 
 func generatePath(call string, host OllamaHost) string {
 	callPath := ollamaCalls[call].Path
@@ -267,6 +288,11 @@ func (o OllamaHost) GetOllamaVersion() (string, error) {
 }
 
 func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
+	if o.IsOpenAI() {
+		// No /v1 equivalent: capabilities and context length are not
+		// discoverable. Callers fall back to defaults.
+		return nil, fmt.Errorf("model introspection is not available on an OpenAI-compatible host")
+	}
 	urlPath := generatePath("showModelDetails", o)
 	jsonData, err := json.Marshal(ShowModelRequest{Model: model})
 	if err != nil {
@@ -288,6 +314,9 @@ func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
 }
 
 func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
+	if o.IsOpenAI() {
+		return o.modelsOpenAI()
+	}
 	urlPath := generatePath("getModels", o)
 	resp, err := o.get(urlPath)
 	if err != nil {
@@ -304,6 +333,9 @@ func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
 }
 
 func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, error) {
+	if o.IsOpenAI() {
+		return o.generateOpenAI(req)
+	}
 	req.Stream = false
 
 	urlPath := generatePath("generateResponse", o)
@@ -327,6 +359,9 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 }
 
 func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
+	if o.IsOpenAI() {
+		return o.chatOpenAI(ctx, req)
+	}
 	req.Stream = true
 
 	respChan := make(chan ChatResponse)
@@ -408,6 +443,9 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 // constrained-decoding escalation (req.Format set to a JSON schema) where we
 // need one complete, schema-valid object rather than a token stream.
 func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	if o.IsOpenAI() {
+		return o.chatOnceOpenAI(ctx, req)
+	}
 	req.Stream = false
 	urlPath := generatePath("chatResponse", o)
 	jsonData, err := json.Marshal(req)
@@ -462,6 +500,10 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 		defer close(progCh)
 		defer close(errCh)
 
+		if o.IsOpenAI() {
+			errCh <- fmt.Errorf("pulling is not available on an OpenAI-compatible host; models there are served remotely")
+			return
+		}
 		urlPath := generatePath("pullModel", o)
 		jsonData, err := json.Marshal(pullRequest{Model: model, Stream: true})
 		if err != nil {
@@ -521,6 +563,9 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 }
 
 func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
+	if o.IsOpenAI() {
+		return nil, fmt.Errorf("embeddings are not available on an OpenAI-compatible host; point the embed model at a local Ollama daemon")
+	}
 	urlPath := generatePath("getInputEmbedings", o)
 	req := EmbedRequest{Model: model, Input: inputs}
 	jsonData, err := json.Marshal(req)

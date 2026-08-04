@@ -330,6 +330,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case statePermission:
 			return m.updatePermission(msg)
+		case stateRouteConfirm:
+			return m.updateRouteConfirm(msg)
 		case stateDiff:
 			switch msg.String() {
 			case "esc", "q", "enter":
@@ -889,8 +891,11 @@ func (m *Model) waitForPull() tea.Cmd {
 	}
 }
 
-func (m *Model) fetchModels() tea.Cmd {
-	host := m.host
+func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.host) }
+
+// fetchModelsFrom lists models from a specific endpoint, so the settings modal
+// can verify the endpoint it just saved rather than whichever one is routed.
+func (m *Model) fetchModelsFrom(host api.OllamaHost) tea.Cmd {
 	return func() tea.Msg {
 		list, err := host.GetModelList()
 		if err != nil {

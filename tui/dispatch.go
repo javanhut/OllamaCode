@@ -336,6 +336,13 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if m.shouldPromptPermission(call) && !exploreReadOnly {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
+			// Name the model the switch would route to, so y/N is a decision
+			// about which model runs next, not just which mode.
+			if call.Function.Name == "switch_mode" {
+				if req, err := parseModeSwitchArgs(call.Function.Arguments); err == nil {
+					m.pending.preview += m.routeNote(req.target)
+				}
+			}
 			m.state = statePermission
 			m.refreshTranscript()
 			break

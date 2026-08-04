@@ -24,19 +24,29 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "tab", "shift+tab":
 		m.toggleSettingsFocus()
 		return m, nil
-	case "enter":
-		uri := strings.TrimSpace(m.urlInput.Value())
-		if uri == "" {
-			uri = DefaultHost
+	case "up", "down":
+		// Neither textinput binds up/down, so they're free to switch which
+		// endpoint is being edited. Unsaved edits to the current one are dropped.
+		targets := m.settingsTargets()
+		if len(targets) < 2 {
+			return m, nil
 		}
-		m.cfg.Host = uri
-		m.cfg.APIKey = strings.TrimSpace(m.keyInput.Value())
-		m.host.SetURI(uri)
-		m.host.SetAPIKey(resolveAPIKey(m.cfg))
-		saveConfig(m.cfg)
+		step := 1
+		if msg.String() == "up" {
+			step = -1
+		}
+		m.settingsTarget = (m.settingsTarget + step + len(targets)) % len(targets)
+		m.loadSettingsInputs()
+		m.statusMsg = ""
+		m.statusErr = false
+		return m, nil
+	case "enter":
+		host := m.saveSettingsInputs()
 		m.statusMsg = "connecting…"
 		m.statusErr = false
-		return m, m.fetchModels()
+		// Probe the endpoint just edited, not the active one — the point of
+		// typing a key is finding out whether it works.
+		return m, m.fetchModelsFrom(host)
 	}
 	var cmd tea.Cmd
 	if m.settingsFocus == settingsFocusKey {
@@ -207,6 +217,11 @@ func (m *Model) modelInfoCommand(args string) {
 	saveConfig(m.cfg)
 	m.resolveProfile()
 	m.toast = "default model set to " + name
+	// A route for the current mode outranks this on the next mode switch; say so
+	// now rather than letting the model appear to change back on its own.
+	if bound := strings.TrimSpace(m.cfg.Routes[m.mode.String()]); bound != "" && bound != name {
+		m.toast += fmt.Sprintf(" — %s mode is routed to %s and will switch back", m.mode, bound)
+	}
 }
 
 // saveProfile persists a profile override for the current model and applies it.
@@ -245,6 +260,9 @@ func (m *Model) showModelInfo() {
 	}
 	if p.NumPredict != nil {
 		fmt.Fprintf(&b, "- num_predict: %d\n", *p.NumPredict)
+	}
+	if len(m.cfg.Routes) > 0 {
+		fmt.Fprintf(&b, "- routed: this is the model bound to %s mode (/route to see the table)\n", m.mode)
 	}
 	b.WriteString("Change with: /model use <name> · /model ctx <tokens> · /model temp <value> — or /models to list, switch, and pull.")
 	m.history = append(m.history, api.Message{Role: "system", Content: b.String()})
@@ -356,6 +374,21 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.modelInfoCommand(strings.TrimSpace(strings.TrimPrefix(val, "/model")))
 			return m, nil
 		}
+		if val == "/route" || strings.HasPrefix(val, "/route ") {
+			m.input.Reset()
+			m.routeCommand(strings.TrimSpace(strings.TrimPrefix(val, "/route")))
+			return m, nil
+		}
+		if val == "/settings" || strings.HasPrefix(val, "/settings ") {
+			m.input.Reset()
+			m.openSettings(strings.TrimSpace(strings.TrimPrefix(val, "/settings")))
+			return m, nil
+		}
+		if val == "/provider" || strings.HasPrefix(val, "/provider ") {
+			m.input.Reset()
+			m.providerCommand(strings.TrimSpace(strings.TrimPrefix(val, "/provider")))
+			return m, nil
+		}
 		switch val {
 		case "/auto":
 			m.input.Reset()
@@ -365,13 +398,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "/quit", "/exit":
 			return m, tea.Quit
-		case "/settings":
-			m.input.Reset()
-			m.state = stateSettings
-			m.urlInput.SetValue(m.cfg.Host)
-			m.keyInput.SetValue(m.cfg.APIKey)
-			m.focusSettings()
-			return m, nil
+
 		case "/models":
 			m.input.Reset()
 			m.statusMsg = "refreshing…"
@@ -393,6 +420,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.turnRecords = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
+			m.routeDeclines = 0 // new conversation: the routing offer is worth making again
 			m.refreshTranscript()
 			m.viewport.GotoTop()
 			return m, nil
@@ -644,6 +672,9 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.cfg.Model = m.modelName
 			saveConfig(m.cfg)
+			// Save the session's model as the default first: routing may re-point
+			// the active model for the restored mode, and that must not persist.
+			m.applyRoute(m.mode)
 			m.resolveProfile()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
