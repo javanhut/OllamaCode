@@ -11,7 +11,7 @@ For people changing the code.
 | `tui/` | Everything else — the Bubble Tea model, modes, routing, transcript, modals |
 | `internal/agent/` | Headless bounded agent loop, shared by `spawn_subagent` and the eval harness |
 | `internal/semantic/` | Embedding index for auto-RAG |
-| `internal/memory/`, `internal/storage/` | Cross-session memory, KV archive |
+| `internal/memory/`, `internal/storage/` | Per-workspace long-term memory, KV archive |
 | `internal/safeshell/` | Read-only shell allowlist, VCS bypass interception |
 | `internal/session/` | Save and restore |
 | `companion/`, `internal/companion/` | Voice popup: STT in, TTS out |

@@ -420,10 +420,12 @@ func New() *Model {
 	host.SetAPIKey(resolveAPIKey(cfg))
 
 	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
-	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
 
 	kv, _ := storage.NewKVStore(archivePath)
-	mem, _ := memory.New(memoryPath)
+	// Memory is per workspace: it is injected into every prompt, so one global
+	// store put every project's facts into every other project's context.
+	memPath := memoryPath(workspaceRoot())
+	mem, _ := memory.New(memPath)
 
 	ti := textinput.New()
 	ti.Prompt = "URL   "
@@ -534,6 +536,7 @@ func New() *Model {
 	}
 
 	m.lastActivity = time.Now()
+	m.toast = legacyMemoryNotice(memPath)
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())

@@ -234,17 +234,19 @@ func (m *Model) handOffOffloadedPlan(answer string) bool {
 	if m.mode != PlanMode || m.profile.SupportsTools || answer == "" {
 		return false
 	}
-	m.notes.set(answer)
 	planner := m.modelName
 
-	// A text that names no file is not a plan — it is a question, a refusal, or
-	// an error. Stay in plan mode so the user's reply goes back to the planner
-	// rather than handing nothing to a model that will improvise from it.
+	// Check BEFORE writing anything. A text that names no file is not a plan —
+	// it is a question, a refusal, or progress narration. Writing it to the notes
+	// anyway destroys the plan of record, and because the plan gate reads the
+	// notes as evidence that a plan exists, it would then let the model into
+	// write mode carrying garbage.
 	check := checkPlan(answer)
 	if !check.actionable() {
-		m.toast = planner + " did not return an actionable plan — still in plan mode"
+		m.toast = planner + " did not return an actionable plan — notes left alone"
 		return false
 	}
+	m.notes.set(answer)
 
 	if !m.applyModeTransition(WriteMode, "executing plan from "+planner) {
 		return false

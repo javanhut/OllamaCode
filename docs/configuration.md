@@ -119,9 +119,35 @@ model in a route spec.
 
 | Path | Contents |
 |---|---|
+| `~/.ollama_code/memory/<workspace>.json` | Long-term memory from `remember`, **scoped per workspace** |
 | `~/.ollama_code/archive.json` | KV archive of compacted conversation history |
-| `~/.ollama_code/user_memory.json` | Long- and short-term memory from `remember` |
 | session saves | Written by `/save`, listed by `/sessions` |
+
+### Memory scoping
+
+Long-term memory is injected into every prompt, so a single shared store meant
+every project's facts turned up in every other project's context. Each workspace
+gets its own file instead.
+
+The workspace is the **enclosing repository** — the nearest parent holding
+`.ivaldi` or `.git` — so launching from a subdirectory uses the same store as
+the repo root. Outside a repository it's the working directory.
+
+The filename is the directory name plus a hash of the full path, so two
+checkouts sharing a basename don't share memory:
+
+```
+~/.ollama_code/memory/OllamaCode-9586baa4.json
+```
+
+Short-term memory stays in-process and never touches disk.
+
+**Pre-scoping memory is not migrated.** The old shared store stays at
+`~/.ollama_code/user_memory.json`, untouched — importing it would spread one
+project's accumulated notes into whichever workspace opened first, which is the
+noise this removes. A workspace with no memory of its own says where the old
+file is, once, until it remembers something. To adopt the old entries in a
+specific repo, copy the file to that workspace's path above.
 
 ## Editing while running
 

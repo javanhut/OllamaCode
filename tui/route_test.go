@@ -897,3 +897,44 @@ func TestProviderPrefixedDefaultResolvesOnLoad(t *testing.T) {
 		t.Error("host did not follow the stored provider prefix")
 	}
 }
+
+// A non-plan must not touch the session notes. They are the plan of record, and
+// the plan gate reads them as evidence a plan exists — so clobbering them with
+// narration both destroys the plan and opens the gate on garbage.
+func TestNonPlanLeavesNotesAlone(t *testing.T) {
+	const realPlan = "1. edit tui/route.go\n2. add a test"
+
+	for _, answer := range []string{
+		"Verifying the codebase and drafting a concrete improvement plan.",
+		"Which framework are you using?",
+		"I cannot help with that request.",
+	} {
+		m := routedModel(nil, "small")
+		m.notes.set(realPlan)
+		m.applyModeTransition(PlanMode, "")
+		m.profile = ModelProfile{SupportsTools: false}
+
+		if m.handOffOffloadedPlan(answer) {
+			t.Errorf("handed off a non-plan: %q", answer)
+		}
+		if got := m.notes.get(); got != realPlan {
+			t.Errorf("notes clobbered by %q\n got: %q\nwant: %q", answer, got, realPlan)
+		}
+		if m.mode != PlanMode {
+			t.Errorf("mode = %s, want plan", m.mode)
+		}
+	}
+}
+
+// The same failure seen from the gate's side: narration must not satisfy it.
+func TestNonPlanDoesNotOpenThePlanGate(t *testing.T) {
+	m := routedModel(nil, "small")
+	m.applyModeTransition(PlanMode, "")
+	m.profile = ModelProfile{SupportsTools: false}
+
+	m.handOffOffloadedPlan("Verifying the codebase and drafting a plan.")
+
+	if !m.planGateBlocks(WriteMode) {
+		t.Error("narration satisfied the plan gate — write mode would run on it")
+	}
+}
