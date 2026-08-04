@@ -97,6 +97,42 @@ func providerKey(p providerConfig) string {
 	return strings.TrimSpace(p.APIKey)
 }
 
+// activeProvider names the provider the live host belongs to, or "" for the
+// default Ollama daemon.
+func (m *Model) activeProvider() string {
+	spec := m.modelForMode(m.mode)
+	if spec == "" {
+		spec = m.cfg.Model
+	}
+	p, _ := m.splitRouteSpec(spec)
+	return p
+}
+
+// activeModelLabel is what the header shows: the model, prefixed with its
+// provider when it is not the default host, so a routed turn visibly names the
+// endpoint it is running against.
+func (m *Model) activeModelLabel() string {
+	if p := m.activeProvider(); p != "" && m.modelName != "" {
+		return p + ":" + m.modelName
+	}
+	return m.modelName
+}
+
+// selectModel makes a picked model the default, keeping the provider it was
+// listed from. Storing it bare is what made every unbound mode ask the local
+// daemon for a model only the provider has, and 404.
+func (m *Model) selectModel(name, from string) {
+	spec := name
+	if from != "" {
+		spec = from + ":" + name
+	}
+	m.cfg.Model = spec
+	saveConfig(m.cfg)
+	m.host, m.modelName = m.hostForSpec(spec)
+	m.applyRoute(m.mode) // a bound mode still outranks the default
+	m.resolveProfile()
+}
+
 // reloadActiveHost rebuilds the live client from config without changing which
 // model is loaded. Needed after an endpoint's URL or key is edited: applyRoute
 // would see the same model on the same URL and skip, leaving the old key in use.

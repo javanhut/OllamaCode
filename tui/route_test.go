@@ -783,3 +783,59 @@ func TestSettingsTrustRow(t *testing.T) {
 		t.Error("a new provider defaulted to trusted")
 	}
 }
+
+// Selecting a provider's model must remember which provider listed it. Storing
+// it bare made every unbound mode ask the LOCAL daemon for a model only the
+// provider has — a 404 on the next turn.
+func TestSelectModelKeepsProvider(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := routedModel(nil, "small")
+	m.cfg.Providers = map[string]providerConfig{"cursor": {Kind: api.ProviderCursor}}
+
+	m.selectModel("claude-opus-5-thinking-high", "cursor")
+
+	if m.cfg.Model != "cursor:claude-opus-5-thinking-high" {
+		t.Errorf("cfg.Model = %q, want the provider-prefixed spec", m.cfg.Model)
+	}
+	if m.modelName != "claude-opus-5-thinking-high" {
+		t.Errorf("modelName = %q, want the bare name sent on the wire", m.modelName)
+	}
+	if !m.host.IsCursor() {
+		t.Error("host stayed on the local daemon — this is the 404")
+	}
+	if got := m.activeModelLabel(); got != "cursor:claude-opus-5-thinking-high" {
+		t.Errorf("header label = %q, want it to name the provider", got)
+	}
+
+	// And a plain local pick must not acquire a prefix.
+	m.selectModel("qwen3-coder:30b", "")
+	if m.cfg.Model != "qwen3-coder:30b" {
+		t.Errorf("cfg.Model = %q, want the bare name", m.cfg.Model)
+	}
+	if m.host.IsCursor() {
+		t.Error("host stayed on the provider after picking a local model")
+	}
+	if got := m.activeModelLabel(); got != "qwen3-coder:30b" {
+		t.Errorf("header label = %q, want no provider prefix", got)
+	}
+}
+
+// A provider-prefixed cfg.Model has to resolve at startup too, or the first turn
+// of a new session repeats the 404.
+func TestProviderPrefixedDefaultResolvesOnLoad(t *testing.T) {
+	m := routedModel(nil, "small")
+	m.cfg.Providers = map[string]providerConfig{"cursor": {Kind: api.ProviderCursor}}
+	m.cfg.Model = "cursor:auto"
+
+	// Mirrors what New() does after loading config.
+	m.host, m.modelName = m.hostForSpec(m.cfg.Model)
+
+	if m.modelName != "auto" {
+		t.Errorf("modelName = %q, want the prefix stripped before it goes on the wire", m.modelName)
+	}
+	if !m.host.IsCursor() {
+		t.Error("host did not follow the stored provider prefix")
+	}
+}

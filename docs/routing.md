@@ -41,6 +41,31 @@ model. Because it re-points `m.modelName` itself rather than just the chat call,
 sub-agents, `parallel_edit`, format repair and history compaction all follow the
 routed model for free.
 
+## Model specs
+
+A model is named the same way everywhere — in `/route`, in `/model use`, and in
+the stored default — as either:
+
+```
+qwen3-coder:30b                        on the default host
+cursor:claude-opus-5-thinking-high     on a configured provider
+```
+
+The prefix is part of the identity, not decoration. **A model name stored
+without its provider resolves against the default host**, which is how you get a
+404 from your local daemon for a model only the provider has.
+
+That means the model picker records where a list came from. Open `/models` while
+plan mode is routed to Cursor, pick one, and the default becomes
+`cursor:<model>` — not the bare name. `/model use` accepts either form:
+
+```
+/model use qwen3-coder:30b
+/model use cursor:auto
+```
+
+On the wire only the bare name is sent; the prefix selects the endpoint.
+
 ## Providers
 
 A route spec is `<model>` on the default host, or `<provider>:<model>` for a
@@ -173,6 +198,34 @@ you: "refactor the auth layer across all the handlers"
      every write behind an approval prompt
 ```
 
+### What you see when it's working
+
+The header names the live endpoint, so it changes visibly on every mode switch:
+
+```
+explore   ollama code   Layla · qwen3-coder:30b
+plan      ollama code   Layla · cursor:claude-opus-5-thinking-high
+write     ollama code   Layla · qwen3-coder:30b
+```
+
+A bare name means the default host; a prefixed one means that provider. The
+mode-switch toast names the model too.
+
+The handoff itself is written into the transcript, naming both models and what
+the plan claimed:
+
+```
+[PLAN HANDOFF] claude-opus-5-thinking-high planned this; qwen3-coder:30b is
+executing it. The planner cannot see this conversation or the outcome, so treat
+the plan as a proposal to verify, not an instruction to follow. Files the plan
+names: tui/route.go, tui/mode.go. Read each file you are about to change before
+changing it.
+```
+
+If you never see that line, the offload didn't happen — check `/route` to
+confirm plan is actually bound, and that the header changes when you
+`shift+tab` into plan mode.
+
 ### The cold-start heuristic
 
 The model escalates itself with `switch_mode` once it's running — but on the
@@ -240,6 +293,10 @@ wrong path." That is the failure this catches best: a plan naming
 **`/model use X` while a mode is routed** sets the default, but the route wins
 on the next mode switch. The toast says so rather than letting the model appear
 to change back on its own.
+
+**A provider's model list is only valid for that provider.** Picking one from
+`/models` stores it prefixed; nothing lets a Cursor or OpenRouter model become
+the bare default that unbound modes would send to your local daemon.
 
 **Embeddings always run on the default Ollama host**, never a routed provider —
 a `/v1` endpoint has no `/api/embed`, and the embed model is local anyway.

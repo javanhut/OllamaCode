@@ -146,6 +146,25 @@ unconfigured install behaves exactly as it did before the feature existed. The
 consequence is that removing the *last* route needs `restoreDefaultModel`, or
 the model stays stranded on the route just deleted.
 
+### The one invariant to preserve
+
+A model is identified two different ways, and mixing them up is a live bug:
+
+| | |
+|---|---|
+| **stored** (`cfg.Model`, `cfg.Routes`) | `provider:model`, or bare for the default host |
+| **on the wire** (`m.modelName`) | always bare — the prefix selects the endpoint, it is not part of the name |
+
+Anything that writes a model name into config must resolve it through
+`hostForSpec`, which returns the host *and* the bare name together. `selectModel`
+is the one place that does this for user-driven picks; `New()` does it for the
+stored default at startup.
+
+Getting it wrong is not a visible failure — it is a 404 from the local daemon on
+the next turn, for a model only a provider has. That shipped once: the picker
+wrote whatever name it listed straight into `cfg.Model`, with no record of which
+endpoint produced the list.
+
 ## Adding things
 
 **A tool**: write a `tools.Tool` with its schema and handler, register it in

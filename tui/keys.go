@@ -76,7 +76,7 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusErr = false
 		// Probe the endpoint just edited, not the active one — the point of
 		// typing a key is finding out whether it works.
-		return m, m.fetchModelsFrom(host)
+		return m, m.fetchModelsFrom(host, m.settingsTargetName())
 	}
 
 	var cmd tea.Cmd
@@ -201,10 +201,7 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.models) == 0 {
 			return m, nil
 		}
-		m.modelName = m.models[m.picker]
-		m.cfg.Model = m.modelName
-		saveConfig(m.cfg)
-		m.resolveProfile()
+		m.selectModel(m.models[m.picker], m.modelsFrom)
 		m.state = stateChat
 		m.input.Focus()
 		m.layout()
@@ -275,10 +272,10 @@ func (m *Model) modelInfoCommand(args string) {
 			return
 		}
 	}
-	m.modelName = name
-	m.cfg.Model = name
-	saveConfig(m.cfg)
-	m.resolveProfile()
+	// A bare name goes to the default host; "provider:model" is honored too, so
+	// /model use can target a provider without going through the picker.
+	provider, bare := m.splitRouteSpec(name)
+	m.selectModel(bare, provider)
 	m.toast = "default model set to " + name
 	// A route for the current mode outranks this on the next mode switch; say so
 	// now rather than letting the model appear to change back on its own.

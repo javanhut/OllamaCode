@@ -213,7 +213,7 @@ func (m *Model) headerView() string {
 	left := brand
 	if room := roomFor(right); room > lipgloss.Width(who) {
 		label := bodyStyle.Background(surfaceColor).Bold(true).Render(who)
-		if name := strings.TrimSpace(m.modelName); name != "" {
+		if name := strings.TrimSpace(m.activeModelLabel()); name != "" {
 			// Below ~10 columns a truncated model name is noise; drop it instead.
 			if avail := room - lipgloss.Width(who) - 3; avail >= 10 {
 				label += mutedStyle.Background(surfaceColor).Render(" · " + truncatePlain(name, avail))

@@ -58,7 +58,7 @@ Type `/` in the input to get an autocomplete menu of every command.
 |---|---|
 | `/models` | Interactive list — switch or pull |
 | `/model` | Show the active model's settings |
-| `/model use <name>` | Set the default model |
+| `/model use <name>` | Set the default model. Accepts `provider:model` |
 | `/model ctx <tokens>` | Override this model's context window |
 | `/model temp <0.0–2.0>` | Override sampling temperature |
 | `/route` | Show the mode→model table |

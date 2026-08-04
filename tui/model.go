@@ -236,6 +236,7 @@ type Model struct {
 	settingsKind   string // wire format of the provider being edited
 	settingsTrust  bool   // cursor providers only: pass --trust
 	models         []string
+	modelsFrom     string // provider the model list came from; "" = default host
 	picker         int
 	modelName      string
 
@@ -541,7 +542,11 @@ func New() *Model {
 	registry.Register(tools.CodeIndexTool(liveEmbedder{m}))
 	registry.Register(tools.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
-	m.applyRoute(m.mode) // start on the model bound to the opening mode
+	// cfg.Model may carry a provider prefix ("cursor:opus-5"), so resolve it the
+	// same way a route spec is, rather than using it as a bare model name against
+	// the default host.
+	m.host, m.modelName = m.hostForSpec(cfg.Model)
+	m.applyRoute(m.mode) // then let the opening mode's binding win
 	if m.modelName != "" {
 		m.resolveProfile()
 	}

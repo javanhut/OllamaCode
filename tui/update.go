@@ -53,6 +53,10 @@ type compactDoneMsg struct {
 
 type modelsLoadedMsg struct {
 	models []string
+	// from names the provider the list came from ("" = default host). Selecting
+	// a model has to remember this or the name is stored bare and every unbound
+	// mode then asks the LOCAL daemon for a model only that provider has.
+	from string
 }
 
 // modelsAutoMsg carries the model list fetched at startup so the first available
@@ -397,12 +401,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelsLoadedMsg:
 		m.models = msg.models
+		m.modelsFrom = msg.from
 		m.statusMsg = ""
 		m.statusErr = false
 		m.picker = 0
 		// Land the cursor on the just-pulled model if we have one, otherwise on
 		// the currently selected model.
-		cursorTo := m.cfg.Model
+		_, cursorTo := m.splitRouteSpec(m.cfg.Model)
 		if m.pullSelect != "" {
 			cursorTo = m.pullSelect
 			m.pullSelect = ""
@@ -910,11 +915,12 @@ func (m *Model) waitForPull() tea.Cmd {
 	}
 }
 
-func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.host) }
+func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.host, m.activeProvider()) }
 
 // fetchModelsFrom lists models from a specific endpoint, so the settings modal
 // can verify the endpoint it just saved rather than whichever one is routed.
-func (m *Model) fetchModelsFrom(host api.OllamaHost) tea.Cmd {
+// from is carried through to the picker so a selection keeps its provider.
+func (m *Model) fetchModelsFrom(host api.OllamaHost, from string) tea.Cmd {
 	return func() tea.Msg {
 		list, err := host.GetModelList()
 		if err != nil {
@@ -924,7 +930,7 @@ func (m *Model) fetchModelsFrom(host api.OllamaHost) tea.Cmd {
 		for _, mod := range list.Models {
 			names = append(names, mod.Name)
 		}
-		return modelsLoadedMsg{models: names}
+		return modelsLoadedMsg{models: names, from: from}
 	}
 }
 
