@@ -638,7 +638,7 @@ func workspace(t *testing.T, files ...string) {
 }
 
 func TestCheckPlanFindsPaths(t *testing.T) {
-	workspace(t, "tui/route.go")
+	workspace(t, "tui/route.go", "internal/agent/agent.go")
 
 	plan := "1. Edit `tui/route.go` to add a field\n2. Update tui/nope_not_real.go\n3. See https://example.com/a/b for context"
 	c := checkPlan(plan)
@@ -663,6 +663,64 @@ func TestCheckPlanFindsPaths(t *testing.T) {
 	// An absolute or escaping path in a plan must never be stat'd or handed on.
 	for _, p := range checkPlan("edit /etc/passwd and ../../outside.go").named {
 		t.Errorf("path outside the workspace accepted: %q", p)
+	}
+}
+
+// Real plans wrap paths in line-number decorations and use slashes in prose.
+// Both were mis-parsed: fence headers came through as their own "file", and
+// phrases like "local/default" were counted as missing files.
+func TestPlanPathTokenTightening(t *testing.T) {
+	workspace(t, "tui/route.go", "internal/agent/agent.go")
+
+	tests := []struct {
+		name, tok, want string
+	}{
+		{"code fence header", "544:546:tui/route.go", "tui/route.go"},
+		{"trailing line ref", "tui/route.go:544", "tui/route.go"},
+		{"trailing line range", "tui/route.go:544:546", "tui/route.go"},
+		{"plain path", "tui/route.go", "tui/route.go"},
+		{"new file keeps its extension", "tui/brand_new.go", "tui/brand_new.go"},
+		{"existing extensionless dir", "internal/agent", "internal/agent"},
+
+		{"prose slash", "local/default", ""},
+		{"prose slash 2", "env/config", ""},
+		{"prose slash 3", "read/write", ""},
+		{"url", "https://example.com/a/b", ""},
+		{"absolute", "/etc/passwd", ""},
+		{"escaping", "../outside.go", ""},
+		{"bare word", "refactor", ""},
+		{"model tag", "qwen3-coder:30b", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := planPathToken(tt.tok); got != tt.want {
+				t.Errorf("planPathToken(%q) = %q, want %q", tt.tok, got, tt.want)
+			}
+		})
+	}
+}
+
+// The shape a real Cursor plan arrives in, verbatim from a captured run.
+func TestCheckPlanOnRealCursorOutput(t *testing.T) {
+	workspace(t, "tui/route.go", "tui/route_test.go")
+
+	plan := "# One-line change to tui/route.go\n\n" +
+		"**File:** [`tui/route.go`](tui/route.go)\n\n" +
+		"**Change (line 544):** Replace the `-cloud` key check.\n\n" +
+		"## Current line\n\n" +
+		"```544:546:tui/route.go\n" +
+		"\tif strings.HasSuffix(name, \"-cloud\") {\n" +
+		"```\n\n" +
+		"`name` can be `gpt-oss:120b-cloud` — local/default — or come from env/config.\n" +
+		"Add a case in tui/route_test.go.\n"
+
+	c := checkPlan(plan)
+	want := []string{"tui/route.go", "tui/route_test.go"}
+	if strings.Join(c.named, ",") != strings.Join(want, ",") {
+		t.Errorf("named = %v, want exactly %v", c.named, want)
+	}
+	if len(c.missing) != 0 {
+		t.Errorf("missing = %v, want none — every path in this plan exists", c.missing)
 	}
 }
 

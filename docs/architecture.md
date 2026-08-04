@@ -67,10 +67,18 @@ alone has full write and shell access); `--trust` is required or a headless run
 aborts on the workspace-trust prompt; and `--model` has no short form, `-m` is
 rejected outright.
 
-Two parsing hazards, both covered by tests against captured real output:
-assistant events arrive as deltas carrying `timestamp_ms` and are then repeated
-once *without* one, so counting both doubles every answer; and `--list-models`
-emits `<id> - <Description>`, so splitting on `" - "` is the whole parse.
+Three parsing hazards, all covered by tests against captured real output:
+
+- **The plan is not in the `assistant`/`result` stream.** Those carry progress
+  narration; the plan arrives as an `interaction_query` with
+  `query_type: createPlanRequestQuery`. Narration is routed to `Message.Thinking`
+  so the transcript holds the plan alone.
+- **`--stream-partial-output` duplicates everything.** Each message is sent as
+  fragments and then repeated whole, with a timestamp on both, so there is no
+  discriminator. The flag is not passed.
+- **`--list-models` emits `<id> - <Description>`**, so splitting on `" - "` is
+  the whole parse. An earlier version skipped every line containing a space and
+  therefore found nothing.
 
 ## The turn lifecycle
 

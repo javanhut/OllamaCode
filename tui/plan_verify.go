@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -59,18 +60,25 @@ func checkPlan(plan string) planCheck {
 	return c
 }
 
+// planLineRefs strip the line-number decorations that wrap a path in plan prose:
+// a code-fence header ("544:546:tui/route.go") and a trailing reference
+// ("tui/route.go:544"). Both name a real file and should be kept, not discarded.
+var (
+	planFencePrefix = regexp.MustCompile(`^\d+(:\d+)*:`)
+	planLineSuffix  = regexp.MustCompile(`:\d+(:\d+)*$`)
+)
+
 // planPathToken normalizes one whitespace-separated token into a repo-relative
 // path, or "" when it isn't one.
 func planPathToken(tok string) string {
 	tok = strings.Trim(tok, ".,;:!?*_#")
+	tok = planFencePrefix.ReplaceAllString(tok, "")
+	tok = planLineSuffix.ReplaceAllString(tok, "")
 	if tok == "" || strings.HasPrefix(tok, "-") {
 		return ""
 	}
 	// A URL is not a workspace path.
 	if strings.Contains(tok, "://") {
-		return ""
-	}
-	if !strings.Contains(tok, "/") && !planSourceExts[strings.ToLower(filepath.Ext(tok))] {
 		return ""
 	}
 	// Stay inside the workspace: an absolute or escaping path in a plan is not
@@ -79,7 +87,22 @@ func planPathToken(tok string) string {
 	if tok == "" || filepath.IsAbs(tok) || strings.HasPrefix(tok, "../") {
 		return ""
 	}
-	return filepath.Clean(tok)
+	tok = filepath.Clean(tok)
+
+	// A known source extension makes it a path whether or not it exists — the
+	// plan may be proposing to create it.
+	if planSourceExts[strings.ToLower(filepath.Ext(tok))] {
+		return tok
+	}
+	// A slash alone is not enough. "local/default", "read/write" and "env/config"
+	// are prose, and counting them as files made every plan look like it named
+	// things that were missing. Extensionless paths have to actually be there.
+	if strings.Contains(tok, "/") {
+		if _, err := os.Stat(tok); err == nil {
+			return tok
+		}
+	}
+	return ""
 }
 
 // findings renders the check as the note appended to the handoff, naming exactly

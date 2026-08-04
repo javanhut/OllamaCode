@@ -81,13 +81,20 @@ func cursorPrompt(msgs []Message) string {
 	return strings.TrimSpace(b.String())
 }
 
-// cursorEvent is the subset of --output-format stream-json we consume, matching
-// what the CLI actually emits:
+// cursorEvent is the subset of --output-format stream-json we consume.
 //
-//	{"type":"thinking","subtype":"delta","text":"…","timestamp_ms":…}
-//	{"type":"assistant","message":{"content":[{"text":"…"}]},"timestamp_ms":…}
-//	{"type":"assistant","message":{"content":[{"text":"…"}]}}   ← whole answer, repeated
+// The shapes below are captured from real runs, not documentation. The
+// important one is the last: in --plan mode the assistant/result stream carries
+// only PROGRESS NARRATION ("Exploring tui/route.go…"). The actual plan is
+// delivered as an interaction_query, and reading the wrong one is why a plan
+// that named files looked like prose that named none.
+//
+//	{"type":"thinking","subtype":"delta","text":"…"}
+//	{"type":"assistant","message":{"content":[{"text":"…"}]}}
 //	{"type":"result","subtype":"success","result":"…","is_error":false}
+//	{"type":"interaction_query","subtype":"request",
+//	 "query_type":"createPlanRequestQuery",
+//	 "query":{"createPlanRequestQuery":{"args":{"plan":"# …"}}}}
 type cursorEvent struct {
 	Type    string `json:"type"`
 	Subtype string `json:"subtype"`
@@ -97,12 +104,21 @@ type cursorEvent struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
-	Result  string `json:"result"`
-	IsError bool   `json:"is_error"`
-	// TimestampMS is present on streaming deltas and absent on the consolidated
-	// repeat. It is the only thing distinguishing them, and taking both would
-	// double every answer.
-	TimestampMS int64 `json:"timestamp_ms"`
+	Result    string `json:"result"`
+	IsError   bool   `json:"is_error"`
+	QueryType string `json:"query_type"`
+	Query     struct {
+		CreatePlan struct {
+			Args struct {
+				Plan string `json:"plan"`
+			} `json:"args"`
+		} `json:"createPlanRequestQuery"`
+		AskQuestion struct {
+			Args struct {
+				Title string `json:"title"`
+			} `json:"args"`
+		} `json:"askQuestionInteractionQuery"`
+	} `json:"query"`
 }
 
 func (e cursorEvent) text() string {
@@ -146,13 +162,12 @@ func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan Cha
 
 		// --plan keeps it read-only. --force / --yolo are never passed: those are
 		// what would let it edit and run commands.
-		args := []string{
-			"-p", "--plan",
-			"--output-format", "stream-json", "--stream-partial-output",
-		}
-		// --trust is opt-in per provider: it marks the working directory trusted
-		// in Cursor without asking. Without it a headless run aborts, which is
-		// the honest default — see cursorTrustError.
+		//
+		// --stream-partial-output is deliberately NOT passed. With it, each
+		// message arrives as fragments and is then repeated whole — and the repeat
+		// carries a timestamp just like the fragments, so there is no reliable way
+		// to tell them apart. Every answer came out doubled.
+		args := []string{"-p", "--plan", "--output-format", "stream-json"}
 		if o.trustWorkspace {
 			args = append(args, "--trust")
 		}
@@ -179,8 +194,7 @@ func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan Cha
 			}
 		}
 
-		var answered strings.Builder
-		var sawDelta bool
+		var plan, question, narration strings.Builder
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
@@ -192,29 +206,28 @@ func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan Cha
 
 			switch ev.Type {
 			case "thinking":
-				if ev.Text == "" {
-					continue
-				}
-				if !emit(ChatResponse{Message: Message{Role: "assistant", Thinking: ev.Text}}) {
+				if ev.Text != "" && !emit(ChatResponse{Message: Message{Role: "assistant", Thinking: ev.Text}}) {
 					return
 				}
 
 			case "assistant":
-				text := ev.text()
-				if text == "" {
-					continue
-				}
-				// Deltas carry timestamp_ms; the CLI then repeats the whole
-				// message once without it. Take the deltas, or the repeat only
-				// when no deltas arrived at all.
-				if ev.TimestampMS != 0 {
-					sawDelta = true
-				} else if sawDelta {
-					continue
-				}
-				answered.WriteString(text)
-				if !emit(ChatResponse{Message: Message{Role: "assistant", Content: text}}) {
+				// Narration, not the answer — route it to the reasoning ticker so
+				// the transcript is left holding the plan alone.
+				if t := ev.text(); t != "" && !emit(ChatResponse{Message: Message{Role: "assistant", Thinking: t}}) {
 					return
+				}
+
+			case "interaction_query":
+				if ev.Subtype != "request" {
+					continue
+				}
+				switch ev.QueryType {
+				case "createPlanRequestQuery":
+					plan.WriteString(ev.Query.CreatePlan.Args.Plan)
+				case "askQuestionInteractionQuery":
+					// Headless runs auto-skip these, so the question is otherwise
+					// lost and the turn looks like it produced nothing.
+					question.WriteString(ev.Query.AskQuestion.Args.Title)
 				}
 
 			case "result":
@@ -222,14 +235,7 @@ func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan Cha
 					errChan <- fmt.Errorf("cursor agent failed: %s", cursorStderr(firstNonEmpty(ev.Result, stderr.String())))
 					return
 				}
-				// Only useful when nothing streamed — otherwise it repeats the
-				// answer already delivered.
-				if answered.Len() == 0 && ev.Result != "" {
-					answered.WriteString(ev.Result)
-					if !emit(ChatResponse{Message: Message{Role: "assistant", Content: ev.Result}}) {
-						return
-					}
-				}
+				narration.WriteString(ev.Result)
 			}
 		}
 
@@ -239,21 +245,42 @@ func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan Cha
 				return
 			default:
 			}
-			if answered.Len() == 0 {
-				if e := cursorTrustError(stderr.String()); e != nil {
-					errChan <- e
-					return
-				}
-				errChan <- fmt.Errorf("cursor agent failed: %v: %s", err, cursorStderr(stderr.String()))
+			if e := cursorTrustError(stderr.String()); e != nil {
+				errChan <- e
 				return
 			}
-			// Partial output already reached the user; end the turn with it.
+			errChan <- fmt.Errorf("cursor agent failed: %v: %s", err, cursorStderr(stderr.String()))
+			return
 		}
 
+		if answer := cursorAnswer(plan.String(), question.String(), narration.String()); answer != "" {
+			if !emit(ChatResponse{Message: Message{Role: "assistant", Content: answer}}) {
+				return
+			}
+		}
 		emit(ChatResponse{Done: true, Message: Message{Role: "assistant"}})
 	}()
 
 	return respChan, errChan
+}
+
+// cursorAnswer picks what the turn actually produced. The plan is the answer
+// when there is one; a clarifying question the headless run auto-skipped is the
+// next most useful thing to report; narration is the last resort.
+func cursorAnswer(plan, question, narration string) string {
+	if p := strings.TrimSpace(plan); p != "" {
+		return p
+	}
+	q := strings.TrimSpace(question)
+	n := strings.TrimSpace(narration)
+	if q == "" {
+		return n
+	}
+	answer := "No plan was produced — the planner asked for more information first: " + q
+	if n != "" {
+		answer += "\n\n" + n
+	}
+	return answer
 }
 
 func firstNonEmpty(vals ...string) string {

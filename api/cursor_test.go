@@ -31,23 +31,22 @@ func cursorHost(bin string) OllamaHost {
 	return h
 }
 
-func TestCursorStreamsAssistantText(t *testing.T) {
-	// Verbatim shapes from a real `agent -p --output-format stream-json
-	// --stream-partial-output` run: thinking deltas, assistant deltas carrying
-	// timestamp_ms, then the SAME assistant message repeated without one.
+// In --plan mode the assistant/result stream is only progress narration; the
+// plan itself arrives as a createPlanRequestQuery. Reading the wrong one is what
+// made a plan naming files look like prose naming none.
+func TestCursorTakesThePlanNotTheNarration(t *testing.T) {
 	bin, argvLog := fakeCursorAgent(t, `
 cat <<'EOF'
-{"type":"system","subtype":"init","apiKeySource":"login","permissionMode":"default"}
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"plan it"}]}}
+{"type":"system","subtype":"init","apiKeySource":"login"}
 {"type":"thinking","subtype":"delta","text":"weighing it","timestamp_ms":1}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Plan: "}]},"timestamp_ms":2}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"edit route.go"}]},"timestamp_ms":3}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Plan: edit route.go"}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"Plan: edit route.go","duration_ms":12}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Exploring tui/route.go."}]},"timestamp_ms":2}
+{"type":"interaction_query","subtype":"request","query_type":"createPlanRequestQuery","query":{"id":1,"createPlanRequestQuery":{"args":{"plan":"# Plan\n\n**File:** tui/route.go\n\nChange line 544."}}}}
+{"type":"interaction_query","subtype":"response","query_type":"createPlanRequestQuery","response":{"id":1}}
+{"type":"result","subtype":"success","is_error":false,"result":"Exploring tui/route.go."}
 EOF`)
 
 	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
-		Model:    "claude-opus-5-thinking-high",
+		Model:    "auto",
 		Messages: []Message{{Role: "user", Content: "plan it"}},
 	})
 	var content, thinking string
@@ -61,13 +60,16 @@ EOF`)
 		t.Fatalf("stream error: %v", err)
 	}
 
-	// The un-timestamped assistant event and the result event both repeat the
-	// whole answer. Counting either doubles or triples it.
-	if content != "Plan: edit route.go" {
-		t.Errorf("content = %q, want the deltas exactly once", content)
+	if !strings.Contains(content, "tui/route.go") || !strings.Contains(content, "line 544") {
+		t.Errorf("content = %q, want the plan from createPlanRequestQuery", content)
 	}
-	if thinking != "weighing it" {
-		t.Errorf("thinking = %q, want the reasoning delta", thinking)
+	// Narration must not land in the transcript, or checkPlan sees prose with no
+	// file paths and refuses the handoff.
+	if strings.Contains(content, "Exploring") {
+		t.Errorf("content = %q, want narration kept out of it", content)
+	}
+	if !strings.Contains(thinking, "Exploring") || !strings.Contains(thinking, "weighing it") {
+		t.Errorf("thinking = %q, want narration and reasoning on the ticker", thinking)
 	}
 	if !done {
 		t.Error("no terminal chunk — the turn would never end")
@@ -78,27 +80,49 @@ EOF`)
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argv)), "\n")
-
-	// Flags verified against `agent --help`. --model has no short form: -m is
-	// rejected outright. --trust is opt-in per provider and absent here.
-	for _, want := range []string{"-p", "--plan", "--output-format", "stream-json", "--model", "claude-opus-5-thinking-high"} {
+	for _, want := range []string{"-p", "--plan", "--output-format", "stream-json", "--model", "auto"} {
 		if !slices.Contains(args, want) {
 			t.Errorf("argv %v is missing %q", args, want)
 		}
 	}
+	// With --stream-partial-output every message is sent as fragments AND then
+	// repeated whole, with a timestamp on both, so answers came out doubled.
+	if slices.Contains(args, "--stream-partial-output") {
+		t.Error("argv passes --stream-partial-output, which duplicates every answer")
+	}
 	if slices.Contains(args, "-m") {
 		t.Error("argv uses -m, which the CLI rejects")
 	}
-	// The safety property. Print mode alone is NOT read-only — the CLI's help
-	// says -p "Has access to all tools, including write and shell." --plan is
-	// what bars edits, and --force/--yolo would undo it.
 	for _, forbidden := range []string{"--force", "-f", "--yolo"} {
 		if slices.Contains(args, forbidden) {
 			t.Fatalf("argv contains %q — the agent could write files unchecked", forbidden)
 		}
 	}
-	if last := args[len(args)-1]; !strings.Contains(last, "plan it") {
-		t.Errorf("last arg = %q, want the flattened prompt", last)
+}
+
+// A clarifying question is auto-skipped headlessly, so without surfacing it the
+// turn looks like it silently produced nothing.
+func TestCursorSurfacesSkippedQuestion(t *testing.T) {
+	bin, _ := fakeCursorAgent(t, `
+cat <<'EOF'
+{"type":"interaction_query","subtype":"request","query_type":"askQuestionInteractionQuery","query":{"id":0,"askQuestionInteractionQuery":{"args":{"title":"Which one-line change?"}}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Looked around."}
+EOF`)
+	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "x"}},
+	})
+	var content string
+	for c := range resp {
+		content += c.Message.Content
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("stream error: %v", err)
+	}
+	if !strings.Contains(content, "Which one-line change?") {
+		t.Errorf("content = %q, want the skipped question reported", content)
+	}
+	if !strings.Contains(content, "Looked around.") {
+		t.Errorf("content = %q, want the narration kept as context", content)
 	}
 }
 
@@ -171,9 +195,9 @@ func TestCursorResultErrorSurfaces(t *testing.T) {
 	}
 }
 
-// A run that produces no deltas must still deliver the answer from the result
-// event rather than ending the turn empty.
-func TestCursorFallsBackToResultEvent(t *testing.T) {
+// A run with no plan and no question still has to deliver something rather than
+// ending the turn empty.
+func TestCursorFallsBackToNarration(t *testing.T) {
 	bin, _ := fakeCursorAgent(t, `echo '{"type":"result","result":"only here"}'`)
 	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "x"}},

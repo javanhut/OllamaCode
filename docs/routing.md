@@ -143,10 +143,15 @@ somewhere off PATH.
 Per turn it runs:
 
 ```
-<agent> -p --plan --trust \
-        --output-format stream-json --stream-partial-output \
+<agent> -p --plan [--trust] \
+        --output-format stream-json \
         --model <model> --workspace <cwd> "<prompt>"
 ```
+
+`--stream-partial-output` is deliberately absent. With it, each message is sent
+as fragments and then repeated whole — and the repeat carries a timestamp just
+like the fragments, so there is no way to tell them apart. Every answer came out
+doubled.
 
 **`--plan` is what makes this read-only**, and it is not optional. Print mode
 alone is *not* safe — the CLI's own help says `-p` "Has access to all tools,
@@ -167,6 +172,30 @@ undo `--plan`.
 
 The API key goes through the environment, never `--api-key`, so it stays out of
 the process list.
+
+### Where the plan actually comes from
+
+The `assistant` and `result` events are **progress narration** — "Exploring
+tui/route.go…", "Checking tests and notes…". They are not the answer. In
+`--plan` mode the plan is delivered separately:
+
+```json
+{"type":"interaction_query","subtype":"request",
+ "query_type":"createPlanRequestQuery",
+ "query":{"createPlanRequestQuery":{"args":{"plan":"# One-line change to …"}}}}
+```
+
+So narration goes to the reasoning ticker and the plan goes to the transcript.
+Reading the wrong one is why a plan that named files once looked like prose that
+named none — and therefore failed [plan verification](#plan-verification) and
+never handed off.
+
+If the agent asks a clarifying question instead of planning, a headless run
+auto-skips it, which would leave the turn looking like it produced nothing. The
+question is surfaced instead:
+
+> No plan was produced — the planner asked for more information first: Which
+> one-line change?
 
 ### It is an agent, not a model
 
@@ -272,6 +301,22 @@ cooperating:
 and stat'd. A text naming no file isn't a plan; it's a question, a refusal, or
 an error. Those never reach write mode — it stays in plan mode so your next
 message goes back to the planner.
+
+Extraction is deliberately conservative, because real plans are markdown prose:
+
+| Token | Read as |
+|---|---|
+| `544:546:tui/route.go` | `tui/route.go` — code-fence header, decoration stripped |
+| `tui/route.go:544` | `tui/route.go` — line reference, decoration stripped |
+| a markdown link wrapping a path | the path inside it |
+| `tui/brand_new.go` | a path — a known extension counts even if it doesn't exist yet |
+| `internal/agent` | a path — extensionless, but it's actually there |
+| `local/default`, `read/write`, `env/config` | prose, not paths |
+| `https://example.com/a/b`, `/etc/passwd`, `../out.go` | rejected outright |
+
+The rule for the last three rows: a slash alone isn't enough. Extensionless
+tokens have to exist on disk, or every plan would look like it named files that
+were missing.
 
 **During execution — read before edit.** The paths the plan named are armed, and
 an edit against one is refused until it has actually been read that turn:
