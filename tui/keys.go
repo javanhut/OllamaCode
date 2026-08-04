@@ -43,7 +43,15 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case " ", "left", "right":
 		if m.settingsFocus == settingsFocusNative {
-			m.settingsNative = !m.settingsNative
+			step := 1
+			if msg.String() == "left" {
+				step = -1
+			}
+			i := slices.Index(providerKinds, m.settingsKind)
+			if i < 0 {
+				i = 0
+			}
+			m.settingsKind = providerKinds[(i+step+len(providerKinds))%len(providerKinds)]
 			return m, nil
 		}
 	case "ctrl+d":

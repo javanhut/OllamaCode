@@ -77,9 +77,11 @@ func (m *Model) providerHost(name string) api.OllamaHost {
 	h := api.OllamaHost{}
 	h.SetURI(p.BaseURL)
 	h.SetAPIKey(providerKey(p))
-	if !p.NativeOllama {
-		h.SetProvider(api.ProviderOpenAI)
+	kind := p.Kind
+	if kind == "" {
+		kind = api.ProviderOpenAI
 	}
+	h.SetProvider(kind)
 	return h
 }
 
@@ -146,21 +148,21 @@ func (m *Model) settingsFields() []settingsField {
 
 // loadSettingsInputs fills the modal's fields from the selected endpoint.
 func (m *Model) loadSettingsInputs() {
-	set := func(name, url, key, env string, native bool) {
+	set := func(name, url, key, env, kind string) {
 		m.nameInput.SetValue(name)
 		m.urlInput.SetValue(url)
 		m.keyInput.SetValue(key)
 		m.envInput.SetValue(env)
-		m.settingsNative = native
+		m.settingsKind = kind
 	}
 	switch {
 	case m.settingsIsNew():
-		set("", "", "", "", false)
+		set("", "", "", "", api.ProviderOpenAI)
 	case m.settingsTargetName() != "":
 		p := m.cfg.Providers[m.settingsTargetName()]
-		set(m.settingsTargetName(), p.BaseURL, p.APIKey, p.APIKeyEnv, p.NativeOllama)
+		set(m.settingsTargetName(), p.BaseURL, p.APIKey, p.APIKeyEnv, p.Kind)
 	default:
-		set("", m.cfg.Host, m.cfg.APIKey, "", false)
+		set("", m.cfg.Host, m.cfg.APIKey, "", api.ProviderOpenAI)
 	}
 	m.focusSettingsField(m.settingsFields()[0])
 }
@@ -225,7 +227,9 @@ func (m *Model) saveSettingsInputs() (api.OllamaHost, error) {
 	if err := validProviderName(name); err != nil {
 		return api.OllamaHost{}, err
 	}
-	if uri == "" {
+	// A cursor provider has no URL to require: a blank command means "find
+	// cursor-agent on PATH", which is what almost everyone wants.
+	if uri == "" && m.settingsKind != api.ProviderCursor {
 		return api.OllamaHost{}, fmt.Errorf("base URL is required")
 	}
 	old := m.settingsTargetName()
@@ -240,10 +244,10 @@ func (m *Model) saveSettingsInputs() (api.OllamaHost, error) {
 	}
 	m.renameProvider(old, name)
 	m.cfg.Providers[name] = providerConfig{
-		BaseURL:      uri,
-		APIKey:       key,
-		APIKeyEnv:    strings.TrimSpace(m.envInput.Value()),
-		NativeOllama: m.settingsNative,
+		BaseURL:   uri,
+		APIKey:    key,
+		APIKeyEnv: strings.TrimSpace(m.envInput.Value()),
+		Kind:      m.settingsKind,
 	}
 	saveConfig(m.cfg)
 
@@ -583,10 +587,7 @@ func (m *Model) showProviders() {
 		b.WriteString("Providers:\n")
 		for _, name := range slices.Sorted(maps.Keys(m.cfg.Providers)) {
 			p := m.cfg.Providers[name]
-			kind := "openai"
-			if p.NativeOllama {
-				kind = "ollama"
-			}
+			kind := providerKindLabel(p.Kind)
 			key := "no key"
 			if p.APIKeyEnv != "" {
 				key = "$" + p.APIKeyEnv

@@ -677,6 +677,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 
+			// An offloaded planner speaks no tool protocol, so it can neither
+			// record its plan nor call switch_mode. Do both for it and hand
+			// straight over to the local model — otherwise the turn dead-ends in
+			// plan mode waiting for a shift+tab.
+			if m.handOffOffloadedPlan(finalAssistant) {
+				cmds = append(cmds, m.startStream())
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+				break
+			}
+
 			// Turn complete: bank any file changes as one undoable checkpoint.
 			m.finalizeCheckpoint(m.lastUserMessage())
 
@@ -807,10 +818,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch m.state {
 	case stateSettings:
+		// Every field, not just the two the modal started with: a bracketed paste
+		// arrives as tea.PasteMsg, which the type switch above doesn't match, so
+		// this tail is the only thing that delivers it. Each input ignores the
+		// message unless it holds focus.
 		var cmd tea.Cmd
 		m.urlInput, cmd = m.urlInput.Update(msg)
 		cmds = append(cmds, cmd)
 		m.keyInput, cmd = m.keyInput.Update(msg)
+		cmds = append(cmds, cmd)
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		cmds = append(cmds, cmd)
+		m.envInput, cmd = m.envInput.Update(msg)
 		cmds = append(cmds, cmd)
 	case stateModelPicker:
 		var cmd tea.Cmd

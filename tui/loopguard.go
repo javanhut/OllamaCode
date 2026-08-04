@@ -48,6 +48,8 @@ func (m *Model) resetTurnGuards() {
 	for k := range m.turnReads {
 		delete(m.turnReads, k)
 	}
+	m.planNeedsVerify = false
+	m.planPaths = nil
 	m.rereadEvents = 0
 	m.rereadStopAnnounced = false
 	m.lastPreamble = ""

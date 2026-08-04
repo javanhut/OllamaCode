@@ -17,6 +17,15 @@ func (m *Model) resolveProfile() {
 		return
 	}
 
+	// cursor-agent is an agent, not a model: it reads the workspace itself and
+	// speaks no tool protocol, so offering it OllamaCode's tools would only get
+	// fake tool JSON back inside its prose. SupportsTools false makes startStream
+	// send none.
+	if m.host.IsCursor() {
+		m.applyProfile(ModelProfile{NumCtx: maxContextBudget, SupportsTools: false})
+		return
+	}
+
 	// An OpenAI-compatible endpoint has no /api/show, so context length and
 	// capabilities aren't discoverable — probing would be a guaranteed-failing
 	// round trip on every mode switch. Assume a large, tool-capable model, which

@@ -330,6 +330,20 @@ func (m *Model) processPendingTools() tea.Cmd {
 			// prompts still gate destructive tools in write mode.
 		}
 
+		// Enforced half of plan verification: a file the plan named cannot be
+		// edited until it has been read this turn. The handoff message asks for
+		// this; a small local model may ignore a prompt, but not this.
+		if reason := m.requireReadBeforeEdit(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  reason,
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+			continue
+		}
+
 		// Short-circuit a call that has already failed identically: re-running
 		// it won't help and just burns a round-trip.
 		fp := tools.CallFingerprint(call)

@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/javanhut/ollama_code/api"
 )
 
 func (m *Model) overlayModal(base, modal string) string {
@@ -107,10 +108,7 @@ func (m *Model) settingsModal() string {
 		case settingsFocusEnv:
 			b.WriteString(m.envInput.View() + "\n")
 		case settingsFocusNative:
-			wire := "openai (/v1/chat/completions)"
-			if m.settingsNative {
-				wire = "ollama (/api/chat)"
-			}
+			wire := providerKindLabel(m.settingsKind)
 			row := modalMutedStyle.Render("Wire  ") + modalBodyStyle.Render("‹ "+wire+" ›")
 			if m.settingsFocus == settingsFocusNative {
 				row = modalMutedStyle.Render("Wire  ") + modalAccentStyle.Render("‹ "+wire+" › ") +
@@ -120,7 +118,7 @@ func (m *Model) settingsModal() string {
 		}
 	}
 
-	b.WriteString(modalMutedStyle.Render(truncatePlain(m.settingsKeyHint(target), innerW)))
+	b.WriteString(modalMutedStyle.Render(truncatePlain(m.settingsFieldHint(target), innerW)))
 	b.WriteString("\n\n")
 	if m.statusMsg != "" {
 		style := modalMutedStyle
@@ -139,6 +137,19 @@ func (m *Model) settingsModal() string {
 	}
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
+}
+
+// settingsFieldHint explains the fields for the selected wire format. A cursor
+// provider has no URL and needs no key when the CLI is already signed in, so the
+// generic key advice would be actively misleading there.
+func (m *Model) settingsFieldHint(target string) string {
+	if m.settingsKind == api.ProviderCursor {
+		if strings.TrimSpace(os.Getenv("CURSOR_API_KEY")) != "" {
+			return "URL is the cursor-agent path (blank = PATH) · CURSOR_API_KEY is set"
+		}
+		return "URL is the cursor-agent path (blank = PATH) · key optional if `cursor-agent login` was run"
+	}
+	return m.settingsKeyHint(target)
 }
 
 // settingsKeyHint explains what the key field actually controls for the selected

@@ -328,7 +328,10 @@ func (m *Model) startStream() tea.Cmd {
 // small models get a compact prompt that covers only workflow and tool rules.
 func (m *Model) activeSystemPrompt() string {
 	base := systemPrompt
-	if m.profile.smallModel() {
+	switch {
+	case m.host.IsCursor():
+		base = agentProviderPrompt
+	case m.profile.smallModel():
 		base = compactSystemPrompt
 	}
 	return base + environmentBlock()
@@ -382,6 +385,16 @@ WORK STYLE:
 - For multi-step tasks, call todo_write first with a short checklist; mark items completed as you go. Don't stop while items are open.
 - When the task is done, stop calling tools and give a short plain-text summary of what changed.
 - If you are blocked, say exactly what is blocking you. Never invent file contents or command output.`
+
+// agentProviderPrompt goes to a provider that is itself an agent (cursor-agent).
+// The full prompt is tool-protocol instruction it cannot use and would only
+// imitate, so it gets the job description instead: investigate and plan, don't
+// edit — execution happens afterwards on the local model.
+const agentProviderPrompt = `You are the planning half of a two-model workflow. You investigate the codebase and produce a plan; a separate, smaller local model then executes it using its own tools.
+
+Read whatever you need from the workspace. Do NOT edit files — your changes are not applied, and the executing model must make them so they pass through approval prompts and stay undoable.
+
+Answer with the plan and nothing else: the scope, each file to touch and the exact change in it, the order to do them in, and the risks. Be concrete — real paths, real symbol names, real code where it removes ambiguity. The executing model sees only your answer, never your reasoning or this conversation.`
 
 const systemPrompt = `You are Layla — a brilliant, high-agency coding partner with a dry wit and a sharp mind. You're not a stiff "assistant" and not a yes-machine; you're a real collaborator who genuinely likes the person you're working with and wants them to ship great code. You have opinions, taste, and a sense of humor — but you are always on the user's side, never their adversary. Confidence without contempt.
 

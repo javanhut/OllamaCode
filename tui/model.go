@@ -144,10 +144,28 @@ type config struct {
 // default is an OpenAI-compatible /v1 server (OpenRouter, LM Studio, vLLM,
 // Together, Groq); set NativeOllama for a second Ollama daemon instead.
 type providerConfig struct {
-	BaseURL      string `json:"base_url"`
-	APIKey       string `json:"api_key,omitempty"`
-	APIKeyEnv    string `json:"api_key_env,omitempty"` // env var holding the key; preferred over APIKey
-	NativeOllama bool   `json:"native_ollama,omitempty"`
+	// BaseURL is an http(s) endpoint for the openai/ollama kinds, and the path to
+	// the CLI binary for the cursor kind (blank = look it up on PATH).
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"` // env var holding the key; preferred over APIKey
+	Kind      string `json:"kind,omitempty"`        // api.Provider*; blank = openai
+}
+
+// providerKinds are the wire formats a provider can speak, in the order the
+// modal's Wire toggle cycles them.
+var providerKinds = []string{api.ProviderOpenAI, api.ProviderOllama, api.ProviderCursor}
+
+// providerKindLabel describes a wire format in the modal.
+func providerKindLabel(kind string) string {
+	switch kind {
+	case api.ProviderOllama:
+		return "ollama (/api/chat)"
+	case api.ProviderCursor:
+		return "cursor (local cursor-agent CLI)"
+	default:
+		return "openai (/v1/chat/completions)"
+	}
 }
 
 // ModelProfile holds per-model settings discovered from /api/show (and cached)
@@ -209,8 +227,8 @@ type Model struct {
 	nameInput      textinput.Model // provider name; the default host has none
 	envInput       textinput.Model // env var holding the provider's key
 	settingsFocus  settingsField
-	settingsTarget int  // index into settingsTargets(); 0 = default host, last = new provider
-	settingsNative bool // edited provider speaks Ollama's API rather than /v1
+	settingsTarget int    // index into settingsTargets(); 0 = default host, last = new provider
+	settingsKind   string // wire format of the provider being edited
 	models         []string
 	picker         int
 	modelName      string
@@ -360,6 +378,11 @@ type Model struct {
 	// write mode can tell a plan that was actually written from one left over
 	// from an earlier task.
 	planNotesMark string
+
+	// Set when a turn is executing a plan produced by an offloaded planner:
+	// the paths that plan named, gated so each is read before it is edited.
+	planNeedsVerify bool
+	planPaths       map[string]bool
 }
 
 // turnRecord is what one user command produced: wall clock end to end, the

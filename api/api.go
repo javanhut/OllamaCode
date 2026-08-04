@@ -201,6 +201,7 @@ var ollamaCalls map[string]Endpoint = map[string]Endpoint{
 const (
 	ProviderOllama = "ollama"
 	ProviderOpenAI = "openai"
+	// ProviderCursor is not an endpoint at all — see cursor.go.
 )
 
 // OllamaHost is one LLM endpoint. Despite the name it fronts both wire formats
@@ -288,10 +289,10 @@ func (o OllamaHost) GetOllamaVersion() (string, error) {
 }
 
 func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
-	if o.IsOpenAI() {
+	if o.IsCursor() || o.IsOpenAI() {
 		// No /v1 equivalent: capabilities and context length are not
 		// discoverable. Callers fall back to defaults.
-		return nil, fmt.Errorf("model introspection is not available on an OpenAI-compatible host")
+		return nil, fmt.Errorf("model introspection is not available on this provider")
 	}
 	urlPath := generatePath("showModelDetails", o)
 	jsonData, err := json.Marshal(ShowModelRequest{Model: model})
@@ -314,6 +315,9 @@ func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
 }
 
 func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
+	if o.IsCursor() {
+		return o.modelsCursor()
+	}
 	if o.IsOpenAI() {
 		return o.modelsOpenAI()
 	}
@@ -333,6 +337,13 @@ func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
 }
 
 func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, error) {
+	if o.IsCursor() {
+		res, err := o.chatOnceCursor(context.Background(), ChatRequest{Model: req.Model, Messages: []Message{{Role: "user", Content: req.Prompt}}})
+		if err != nil {
+			return nil, err
+		}
+		return &GenerateResponse{Model: req.Model, Response: res.Message.Content, Done: true}, nil
+	}
 	if o.IsOpenAI() {
 		return o.generateOpenAI(req)
 	}
@@ -359,6 +370,9 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 }
 
 func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
+	if o.IsCursor() {
+		return o.chatCursor(ctx, req)
+	}
 	if o.IsOpenAI() {
 		return o.chatOpenAI(ctx, req)
 	}
@@ -443,6 +457,9 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 // constrained-decoding escalation (req.Format set to a JSON schema) where we
 // need one complete, schema-valid object rather than a token stream.
 func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	if o.IsCursor() {
+		return o.chatOnceCursor(ctx, req)
+	}
 	if o.IsOpenAI() {
 		return o.chatOnceOpenAI(ctx, req)
 	}
@@ -500,8 +517,8 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 		defer close(progCh)
 		defer close(errCh)
 
-		if o.IsOpenAI() {
-			errCh <- fmt.Errorf("pulling is not available on an OpenAI-compatible host; models there are served remotely")
+		if o.IsCursor() || o.IsOpenAI() {
+			errCh <- fmt.Errorf("pulling is not available on this provider; models there are served remotely")
 			return
 		}
 		urlPath := generatePath("pullModel", o)
@@ -563,8 +580,8 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 }
 
 func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
-	if o.IsOpenAI() {
-		return nil, fmt.Errorf("embeddings are not available on an OpenAI-compatible host; point the embed model at a local Ollama daemon")
+	if o.IsCursor() || o.IsOpenAI() {
+		return nil, fmt.Errorf("embeddings are not available on this provider; point the embed model at a local Ollama daemon")
 	}
 	urlPath := generatePath("getInputEmbedings", o)
 	req := EmbedRequest{Model: model, Input: inputs}
