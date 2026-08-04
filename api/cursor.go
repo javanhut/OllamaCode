@@ -25,20 +25,28 @@ import (
 //     cursor-agent safe. --force is deliberately never passed.
 const ProviderCursor = "cursor"
 
-// DefaultCursorCommand is the binary looked up on PATH when a provider doesn't
-// name one.
-const DefaultCursorCommand = "cursor-agent"
+// cursorCommandCandidates are the names the Cursor CLI installs under —
+// installs have used both. Whichever is on PATH wins, preferring the
+// unambiguous one because "agent" is a name anything could take.
+var cursorCommandCandidates = []string{"cursor-agent", "agent"}
 
 // IsCursor reports whether this host drives the cursor-agent CLI.
 func (o OllamaHost) IsCursor() bool { return o.provider == ProviderCursor }
 
 // cursorCommand is the binary to run: the provider's configured URL field when
-// set (a path), else whatever is on PATH.
+// set (a path), else the first candidate found on PATH. When none is found it
+// returns the first candidate anyway, so the not-found error names something
+// concrete instead of an empty string.
 func (o OllamaHost) cursorCommand() string {
 	if c := strings.TrimSpace(o.uri); c != "" {
 		return c
 	}
-	return DefaultCursorCommand
+	for _, name := range cursorCommandCandidates {
+		if _, err := exec.LookPath(name); err == nil {
+			return name
+		}
+	}
+	return cursorCommandCandidates[0]
 }
 
 // cursorEnv passes the API key through the environment rather than --api-key, so
@@ -227,7 +235,8 @@ func cursorStartError(bin string, err error) error {
 	// ErrNotFound is a bare name missing from PATH; ErrNotExist is a configured
 	// path that doesn't exist. Same advice, two different wrapped errors.
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s is not on PATH — install the Cursor CLI (https://cursor.com/docs/cli) or set this provider's command to its full path", bin)
+		return fmt.Errorf("%s not found — the Cursor CLI installs as %s; install it (https://cursor.com/docs/cli) or set this provider's command to its full path",
+			bin, strings.Join(cursorCommandCandidates, " or "))
 	}
 	return fmt.Errorf("%s: %v", bin, err)
 }

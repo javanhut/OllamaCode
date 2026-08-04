@@ -145,9 +145,9 @@ func (m *Model) settingsModal() string {
 func (m *Model) settingsFieldHint(target string) string {
 	if m.settingsKind == api.ProviderCursor {
 		if strings.TrimSpace(os.Getenv("CURSOR_API_KEY")) != "" {
-			return "URL is the cursor-agent path (blank = PATH) · CURSOR_API_KEY is set"
+			return "URL is the agent binary path (blank = find it on PATH) · CURSOR_API_KEY is set"
 		}
-		return "URL is the cursor-agent path (blank = PATH) · key optional if `cursor-agent login` was run"
+		return "URL is the agent binary path (blank = find it on PATH) · key optional if you already logged in"
 	}
 	return m.settingsKeyHint(target)
 }

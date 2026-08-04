@@ -118,7 +118,7 @@ compacted history rides along in the volatile tail.
   variable outranks anything stored
 - The modal says which is winning, so a key typed into an overridden field is
   never silently ignored
-- `cursor-agent` receives its key through the environment, never argv, so it
+- the Cursor agent receives its key through the environment, never argv, so it
   doesn't appear in the process list
 - Keys are not accepted on the command line, where they would appear on screen
   and in input history

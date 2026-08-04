@@ -62,7 +62,7 @@ parallel, then applies them serially with conflict detection.
 **Model routing.** Bind a model per mode — a big one to plan, a small local one
 to write — and the endpoint, context window and toolset swap with it. Providers
 can be any OpenAI-compatible server, a second Ollama daemon, or the local
-`cursor-agent` CLI. See [routing](docs/routing.md).
+Cursor agent CLI. See [routing](docs/routing.md).
 
 **Auto-RAG.** Relevant code is embedded and retrieved each turn without a tool
 call; the index refreshes incrementally as files change.

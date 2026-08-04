@@ -93,10 +93,10 @@ vLLM, Together, Groq. URL is the base including `/v1`; a URL with no path gets
 
 **`ollama`** — a second Ollama daemon, e.g. a beefier machine on your LAN.
 
-**`cursor`** — the local `cursor-agent` CLI. Not an HTTP endpoint at all; see
+**`cursor`** — the local Cursor agent CLI. Not an HTTP endpoint at all; see
 below. URL is the path to the binary, or blank to find it on PATH.
 
-## Offloading planning to cursor-agent
+## Offloading planning to the Cursor agent
 
 Cursor publishes no inference API, but it ships a local CLI, so this provider
 talks to a subprocess. No proxy, no tunnel, nothing to install but the CLI.
@@ -106,14 +106,19 @@ talks to a subprocess. No proxy, no tunnel, nothing to install but the CLI.
 /route plan cursor:claude-sonnet-4
 ```
 
-`enter` in the modal runs `cursor-agent --list-models` and shows what your
-account can use.
+`enter` in the modal runs `--list-models` against it and shows what your account
+can use.
+
+The CLI installs under two different names depending on how you got it —
+`cursor-agent` on some setups, plain `agent` on others. Leave **URL** blank and
+whichever is on your PATH is used (`cursor-agent` wins if both are). Set it only
+if the binary lives somewhere off PATH.
 
 Per turn it runs:
 
 ```
-cursor-agent -p --output-format stream-json --stream-partial-output \
-             -m <model> --workspace <cwd> "<prompt>"
+<agent> -p --output-format stream-json --stream-partial-output \
+        -m <model> --workspace <cwd> "<prompt>"
 ```
 
 **It never passes `--force`.** Without that flag the CLI *proposes* file changes
@@ -127,7 +132,7 @@ the process list.
 
 ### It is an agent, not a model
 
-`cursor-agent` reads and searches the workspace itself and speaks no tool
+The Cursor agent reads and searches the workspace itself and speaks no tool
 protocol, so three things differ:
 
 - **No tools are sent to it.** Offering them produces fake tool JSON inside its
@@ -145,7 +150,7 @@ you: "refactor the auth layer across all the handlers"
   ├─ cold-start router scores the message ──▶ "This looks like planning work" (y/N)
   │
   ├─ plan mode, on the routed model
-  │     cursor-agent reads the repo, returns a plan
+  │     the Cursor agent reads the repo, returns a plan
   │
   ├─ plan verified ──▶ does it name real files?
   │     no  → stays in plan mode; your reply goes back to the planner

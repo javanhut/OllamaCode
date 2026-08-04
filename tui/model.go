@@ -162,7 +162,7 @@ func providerKindLabel(kind string) string {
 	case api.ProviderOllama:
 		return "ollama (/api/chat)"
 	case api.ProviderCursor:
-		return "cursor (local cursor-agent CLI)"
+		return "cursor (local Cursor agent CLI)"
 	default:
 		return "openai (/v1/chat/completions)"
 	}

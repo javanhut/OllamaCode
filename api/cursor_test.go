@@ -118,8 +118,12 @@ func TestCursorReportsFailures(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error")
 		}
-		if !strings.Contains(err.Error(), "PATH") {
-			t.Errorf("error = %q, want it to point at installing the CLI", err)
+		// Both install names, so the message is actionable whichever one the
+		// user's setup provides.
+		for _, want := range []string{"cursor-agent", "agent", "cursor.com/docs/cli"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, missing %q", err, want)
+			}
 		}
 	})
 
@@ -201,4 +205,59 @@ func TestCursorPromptLabelsRoles(t *testing.T) {
 	if strings.Count(got, "[you, earlier]") != 1 {
 		t.Error("an empty assistant message was included")
 	}
+}
+
+// The Cursor CLI installs as `cursor-agent` on some setups and plain `agent` on
+// others, so whichever is present has to work without configuration.
+func TestCursorCommandResolvesEitherName(t *testing.T) {
+	stub := func(t *testing.T, names ...string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	var h OllamaHost
+	h.SetProvider(ProviderCursor)
+
+	t.Run("plain agent", func(t *testing.T) {
+		t.Setenv("PATH", stub(t, "agent"))
+		if got := h.cursorCommand(); got != "agent" {
+			t.Errorf("cursorCommand = %q, want agent", got)
+		}
+	})
+
+	t.Run("cursor-agent", func(t *testing.T) {
+		t.Setenv("PATH", stub(t, "cursor-agent"))
+		if got := h.cursorCommand(); got != "cursor-agent" {
+			t.Errorf("cursorCommand = %q, want cursor-agent", got)
+		}
+	})
+
+	t.Run("both present prefers the unambiguous name", func(t *testing.T) {
+		t.Setenv("PATH", stub(t, "agent", "cursor-agent"))
+		if got := h.cursorCommand(); got != "cursor-agent" {
+			t.Errorf("cursorCommand = %q, want cursor-agent", got)
+		}
+	})
+
+	t.Run("neither present still names something concrete", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if got := h.cursorCommand(); got == "" {
+			t.Error("returned an empty command; the error would name nothing")
+		}
+	})
+
+	t.Run("explicit path wins over PATH", func(t *testing.T) {
+		t.Setenv("PATH", stub(t, "cursor-agent"))
+		var explicit OllamaHost
+		explicit.SetProvider(ProviderCursor)
+		explicit.SetURI("/opt/custom/agent")
+		if got := explicit.cursorCommand(); got != "/opt/custom/agent" {
+			t.Errorf("cursorCommand = %q, want the configured path", got)
+		}
+	})
 }

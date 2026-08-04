@@ -11,7 +11,7 @@ plain JSON and safe to edit while OllamaCode isn't running.
 | `OLLAMA_HOST` | Default Ollama URL, overriding `localhost:11434` |
 | `OLLAMA_MODEL` | Model to pre-select |
 | `OLLAMA_API_KEY` | Bearer token for the default host. Takes precedence over `api_key` in the config, so the secret never has to touch disk |
-| `CURSOR_API_KEY` | Read by `cursor-agent` when a cursor provider has no key of its own |
+| `CURSOR_API_KEY` | Read by the Cursor agent CLI when a cursor provider has no key of its own |
 | `OLLAMA_COMPANION_BIN` | Path to the `ollama-companion` binary |
 | `OLLAMA_COMPANION_WHISPER_BIN` | Path to `whisper-cli` |
 | `OLLAMA_COMPANION_WHISPER_MODEL` | Path to a `ggml-*.bin` model |
@@ -105,7 +105,7 @@ missing `routes` object disables routing entirely.
 
 | Field | Meaning |
 |---|---|
-| `base_url` | HTTP endpoint for `openai`/`ollama`; the path to the binary for `cursor` (blank → PATH) |
+| `base_url` | HTTP endpoint for `openai`/`ollama`; the path to the agent binary for `cursor` (blank → found on PATH, see [routing](routing.md#offloading-planning-to-the-cursor-agent)) |
 | `api_key` | Stored key. Written by the modal's Key field |
 | `api_key_env` | Environment variable holding the key. Wins over `api_key` |
 | `kind` | `openai` (default), `ollama`, or `cursor` |

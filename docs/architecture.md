@@ -6,7 +6,7 @@ For people changing the code.
 
 | Path | Contents |
 |---|---|
-| `api/` | LLM transports. `api.go` is Ollama's native `/api/*`; `openai.go` translates `/v1/chat/completions`; `cursor.go` drives the `cursor-agent` subprocess |
+| `api/` | LLM transports. `api.go` is Ollama's native `/api/*`; `openai.go` translates `/v1/chat/completions`; `cursor.go` drives the Cursor agent subprocess |
 | `tools/` | Tool registry, schemas, handlers, JSON salvage, call fingerprinting |
 | `tui/` | Everything else — the Bubble Tea model, modes, routing, transcript, modals |
 | `internal/agent/` | Headless bounded agent loop, shared by `spawn_subagent` and the eval harness |
@@ -56,7 +56,7 @@ failing loudly:
 
 ### The cursor transport
 
-`cursor-agent` is a local binary, so this "provider" spawns a subprocess and
+The Cursor agent is a local binary, so this "provider" spawns a subprocess and
 parses `--output-format stream-json`. It never passes `--force`, which is what
 makes it read-only against your repo. It is an agent rather than a model, so its
 profile sets `SupportsTools: false` and it receives a short planning prompt
@@ -170,7 +170,7 @@ assuming repo-root paths. Anything calling `saveConfig` should set `HOME` and
 `tui/route_test.go` shows both patterns.
 
 The transports are tested against fakes: `httptest` servers for the OpenAI wire,
-and a stub shell script standing in for `cursor-agent` that records its argv.
+and a stub shell script standing in for the Cursor agent that records its argv.
 
 ### Evaluation harness
 

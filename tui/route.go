@@ -228,7 +228,7 @@ func (m *Model) saveSettingsInputs() (api.OllamaHost, error) {
 		return api.OllamaHost{}, err
 	}
 	// A cursor provider has no URL to require: a blank command means "find
-	// cursor-agent on PATH", which is what almost everyone wants.
+	// the Cursor agent on PATH", which is what almost everyone wants.
 	if uri == "" && m.settingsKind != api.ProviderCursor {
 		return api.OllamaHost{}, fmt.Errorf("base URL is required")
 	}
