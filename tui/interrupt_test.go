@@ -121,9 +121,6 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	if m.failedCalls[fp] != 1 {
 		t.Fatalf("denial should count as a failed call, got %d", m.failedCalls[fp])
 	}
-	if len(m.recentCalls) != 1 || m.recentCalls[0] != fp {
-		t.Fatalf("denial should append the fingerprint to recentCalls, got %v", m.recentCalls)
-	}
 	if m.state != stateChat {
 		t.Fatalf("expected stateChat after denial, got %v", m.state)
 	}

@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -13,7 +16,7 @@ import (
 const (
 	defaultMaxSteps     = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
 	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
-	recentCallsKept     = 12 // fingerprint ring length for oscillation detection
+	recentOutcomesKept  = 12 // round outcome ring length for oscillation detection
 	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
 	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
 )
@@ -31,7 +34,14 @@ func (m *Model) resetTurnGuards() {
 	m.startTurnClock()
 	m.stepCount = 0
 	m.streamRetries = 0
-	m.recentCalls = m.recentCalls[:0]
+	m.recentOutcomes = m.recentOutcomes[:0]
+	m.oscillationStreak = 0
+	m.stagnantRounds = 0
+	if m.seenOutcomes == nil {
+		m.seenOutcomes = map[string]bool{}
+	} else {
+		clear(m.seenOutcomes)
+	}
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
 	m.lastStepRepeatKey = ""
@@ -87,7 +97,8 @@ var argumentSensitiveRepeatTools = map[string]bool{
 }
 
 // batchRepeatIdentity returns the display tool name and semantic repeat key for
-// a single-tool batch. Mixed batches are progress and return empty identities.
+// a single-tool batch. Mixed batches return empty identities and are handled by
+// the round-outcome stagnation guard instead.
 func batchRepeatIdentity(calls []tools.ToolCall) (string, string) {
 	tool := batchSingleTool(calls)
 	if tool == "" {
@@ -109,12 +120,19 @@ func batchRepeatIdentity(calls []tools.ToolCall) (string, string) {
 // at most once per user turn. stop remains true after the hard threshold so a
 // text-form tool call cannot bypass a single tool-less response; announceStop
 // keeps the transcript explanation to one copy.
-func (m *Model) observeRepeatedBatch(calls []tools.ToolCall) (tool string, warn, stop, announceStop bool) {
+func (m *Model) observeRepeatedBatch(calls []tools.ToolCall, madeProgress ...bool) (tool string, warn, stop, announceStop bool) {
 	tool, key := batchRepeatIdentity(calls)
 	if key == "" {
 		m.lastStepRepeatKey = ""
 		m.sameToolStreak = 0
 		return "", false, false, false
+	}
+	// A repeated tool name is not itself stagnation. A new mutation, diagnostic,
+	// target, or result is material evidence and restarts the tolerance window.
+	if len(madeProgress) > 0 && madeProgress[0] {
+		m.lastStepRepeatKey = key
+		m.sameToolStreak = 1
+		return tool, false, false, false
 	}
 	if key == m.lastStepRepeatKey {
 		m.sameToolStreak++
@@ -136,9 +154,86 @@ func (m *Model) observeRepeatedBatch(calls []tools.ToolCall) (tool string, warn,
 	return tool, warn, stop, announceStop
 }
 
-// maxRereadEvents caps how many times a turn may re-read unchanged files
-// before tools are suppressed and the model is forced to answer in text.
-const maxRereadEvents = 4
+// roundOutcomeIdentity summarizes what a tool round actually observed. Calls
+// and results are paired and hashed so large file reads are not retained twice.
+// Arguments matter: editing a second file or searching for a new symbol is new
+// evidence, while the same call returning the same result is not progress.
+func roundOutcomeIdentity(calls []tools.ToolCall, results []api.Message) string {
+	parts := make([]string, 0, len(calls))
+	for i, call := range calls {
+		result := ""
+		if i < len(results) {
+			result = strings.TrimSpace(results[i].Content)
+		}
+		callID := tools.CallFingerprint(call)
+		// switch_mode's free-form reason can vary without changing the action.
+		// Its result carries the observable state transition (or lack of one).
+		if call.Function.Name == "switch_mode" {
+			callID = call.Function.Name
+		}
+		sum := sha256.Sum256([]byte(callID + "\x00" + result))
+		parts = append(parts, fmt.Sprintf("%x", sum))
+	}
+	sort.Strings(parts) // reordered parallel calls describe the same outcome
+	return strings.Join(parts, "\x01")
+}
+
+// observeRoundProgress distinguishes activity from forward motion. A round is
+// progress when it produces evidence not already seen this turn. Stable A/B/A/B
+// outcomes warn immediately and hard-stop if they continue for two more rounds.
+func (m *Model) observeRoundProgress(calls []tools.ToolCall, results []api.Message) (progress, warnOscillation, stopOscillation bool) {
+	if m.seenOutcomes == nil {
+		m.seenOutcomes = map[string]bool{}
+	}
+	outcome := roundOutcomeIdentity(calls, results)
+	progress = outcome != "" && !m.seenOutcomes[outcome]
+	// A locally refused duplicate is enforcement feedback, not new knowledge,
+	// even though its text differs from the original tool failure.
+	if len(results) > 0 {
+		allRefusedRepeats := true
+		for _, result := range results {
+			if !strings.Contains(result.Content, "you already called") && !strings.Contains(result.Content, "you already ran") {
+				allRefusedRepeats = false
+				break
+			}
+		}
+		if allRefusedRepeats {
+			progress = false
+		}
+	}
+	if outcome != "" {
+		m.seenOutcomes[outcome] = true
+		m.recentOutcomes = append(m.recentOutcomes, outcome)
+		if len(m.recentOutcomes) > recentOutcomesKept {
+			m.recentOutcomes = m.recentOutcomes[len(m.recentOutcomes)-recentOutcomesKept:]
+		}
+	}
+	if tools.IsOscillating(m.recentOutcomes) {
+		m.oscillationStreak++
+		warnOscillation = m.oscillationStreak == 1
+		stopOscillation = m.oscillationStreak >= 3
+	} else {
+		m.oscillationStreak = 0
+	}
+	return progress, warnOscillation, stopOscillation
+}
+
+// observeMixedBatchStagnation covers repeated mixed-tool batches, for which a
+// single tool name cannot describe the loop. Thresholds mirror the 3/5 policy:
+// the first round is evidence, two repeated no-evidence rounds warn (round 3),
+// and four stop (round 5).
+func (m *Model) observeMixedBatchStagnation(progress bool) (warn, stop bool) {
+	if progress {
+		m.stagnantRounds = 0
+		return false, false
+	}
+	m.stagnantRounds++
+	return m.stagnantRounds == 2, m.stagnantRounds >= 4
+}
+
+// maxReadsPerUnchangedTarget allows one initial read and one warned repeat. A
+// third read of that same unchanged target suppresses tools for the next reply.
+const maxReadsPerUnchangedTarget = 3
 
 // pathKeyedReadTools return the same bytes for the same target, so re-reading
 // one without an intervening edit is always wasted work. grep and find_files
@@ -181,8 +276,11 @@ func (m *Model) observeFileReads(calls []tools.ToolCall) (rereads []string, stop
 			rereads = append(rereads, strings.SplitN(key, "\x01", 2)[1])
 			m.rereadEvents++
 		}
+		if m.turnReads[key] >= maxReadsPerUnchangedTarget {
+			stop = true
+		}
 	}
-	return rereads, m.rereadEvents >= maxRereadEvents
+	return rereads, stop
 }
 
 // forgetReads drops read records for paths a mutating tool just changed, so

@@ -352,14 +352,10 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		i := m.pending.index
 		call := m.pending.calls[i]
 		// Count the denial as a failure of this exact call so the identical-call
-		// short-circuit in processPendingTools fires on a retry, and record it in
-		// recentCalls so oscillation detection can see reject-retry loops.
+		// short-circuit in processPendingTools fires on a retry. The finalized
+		// call+result outcome also feeds state-aware oscillation detection.
 		fp := tools.CallFingerprint(call)
 		m.failedCalls[fp]++
-		m.recentCalls = append(m.recentCalls, fp)
-		if len(m.recentCalls) > recentCallsKept {
-			m.recentCalls = m.recentCalls[len(m.recentCalls)-recentCallsKept:]
-		}
 		m.pending.results[i] = api.Message{
 			Role:     "tool",
 			ToolName: call.Function.Name,

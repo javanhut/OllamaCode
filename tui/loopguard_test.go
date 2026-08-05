@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -66,6 +67,96 @@ func TestRepeatGuardStopsExactInspectionRepeat(t *testing.T) {
 		if stop != (round >= 5) || announceStop != (round == 5) {
 			t.Fatalf("round %d: stop=%v announceStop=%v", round, stop, announceStop)
 		}
+	}
+}
+
+func TestMaterialProgressResetsSameToolGuard(t *testing.T) {
+	m := &Model{}
+	for round := 1; round <= 8; round++ {
+		calls := []tools.ToolCall{tc("edit_file", `{"path":"file`+string(rune('a'+round))+`.go","old_string":"x","new_string":"y"}`)}
+		results := []api.Message{{Role: "tool", Content: "edited file\nNew Hash: changed-" + string(rune('a'+round))}}
+		progress, _, _ := m.observeRoundProgress(calls, results)
+		if !progress {
+			t.Fatalf("round %d with a new mutation was not progress", round)
+		}
+		_, warn, stop, _ := m.observeRepeatedBatch(calls, progress)
+		if warn || stop {
+			t.Fatalf("round %d: productive edit triggered guard (warn=%v stop=%v)", round, warn, stop)
+		}
+	}
+}
+
+func TestRepeatedOutcomeWarnsAtThreeAndStopsAtFive(t *testing.T) {
+	m := &Model{}
+	calls := []tools.ToolCall{tc("edit_file", `{"path":"same.go","old_string":"x","new_string":"y"}`)}
+	results := []api.Message{{Role: "tool", Content: "edited same.go\nNew Hash: unchanged"}}
+	for round := 1; round <= 5; round++ {
+		progress, _, _ := m.observeRoundProgress(calls, results)
+		_, warn, stop, _ := m.observeRepeatedBatch(calls, progress)
+		if warn != (round == 3) {
+			t.Fatalf("round %d: warn=%v", round, warn)
+		}
+		if stop != (round >= 5) {
+			t.Fatalf("round %d: stop=%v", round, stop)
+		}
+	}
+}
+
+func TestOutcomeOscillationWarnsThenStops(t *testing.T) {
+	m := &Model{}
+	sequence := []string{"A", "B", "A", "B", "A", "B"}
+	for i, name := range sequence {
+		calls := []tools.ToolCall{tc(name, `{}`)}
+		results := []api.Message{{Role: "tool", Content: "same " + name}}
+		_, warn, stop := m.observeRoundProgress(calls, results)
+		round := i + 1
+		if warn != (round == 4) {
+			t.Fatalf("round %d: warn=%v", round, warn)
+		}
+		if stop != (round >= 6) {
+			t.Fatalf("round %d: stop=%v", round, stop)
+		}
+	}
+}
+
+func TestChangingResultsAreNotOscillation(t *testing.T) {
+	m := &Model{}
+	for i, name := range []string{"A", "B", "A", "B", "A", "B"} {
+		calls := []tools.ToolCall{tc(name, `{}`)}
+		results := []api.Message{{Role: "tool", Content: fmt.Sprintf("new evidence %d", i)}}
+		progress, warn, stop := m.observeRoundProgress(calls, results)
+		if !progress || warn || stop {
+			t.Fatalf("round %d: changing result classified as stagnant (progress=%v warn=%v stop=%v)", i+1, progress, warn, stop)
+		}
+	}
+}
+
+func TestMixedBatchStagnationUsesThreeFivePolicy(t *testing.T) {
+	m := &Model{}
+	calls := []tools.ToolCall{tc("read_file", `{"path":"a.go"}`), tc("grep", `{"pattern":"missing"}`)}
+	results := []api.Message{{Role: "tool", Content: "same file"}, {Role: "tool", Content: "same matches"}}
+	for round := 1; round <= 5; round++ {
+		progress, _, _ := m.observeRoundProgress(calls, results)
+		warn, stop := m.observeMixedBatchStagnation(progress)
+		if warn != (round == 3) {
+			t.Fatalf("round %d: warn=%v", round, warn)
+		}
+		if stop != (round >= 5) {
+			t.Fatalf("round %d: stop=%v", round, stop)
+		}
+	}
+}
+
+func TestRefusedDuplicateIsNotNewProgress(t *testing.T) {
+	m := &Model{}
+	calls := []tools.ToolCall{tc("run_shell", `{"command":"false"}`)}
+	first := []api.Message{{Role: "tool", Content: "error: exit status 1"}}
+	if progress, _, _ := m.observeRoundProgress(calls, first); !progress {
+		t.Fatal("first failure is still new diagnostic evidence")
+	}
+	refused := []api.Message{{Role: "tool", Content: "error: you already called run_shell with these exact arguments 2 times"}}
+	if progress, _, _ := m.observeRoundProgress(calls, refused); progress {
+		t.Fatal("local duplicate refusal was incorrectly treated as new evidence")
 	}
 }
 
@@ -204,8 +295,20 @@ func TestRereadGuardStopsAfterCap(t *testing.T) {
 	if !stop {
 		t.Fatal("re-read loop never hit the stop cap")
 	}
-	if m.rereadEvents < maxRereadEvents {
-		t.Fatalf("expected at least %d reread events, got %d", maxRereadEvents, m.rereadEvents)
+	if got := m.turnReads["read_file\x01a.go"]; got < maxReadsPerUnchangedTarget {
+		t.Fatalf("expected at least %d reads, got %d", maxReadsPerUnchangedTarget, got)
+	}
+}
+
+func TestRereadStopIsPerTarget(t *testing.T) {
+	m := &Model{}
+	for _, path := range []string{"a.go", "a.go", "b.go", "b.go"} {
+		if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"`+path+`"}`)}); stop {
+			t.Fatalf("two reads of %s should warn but not stop", path)
+		}
+	}
+	if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); !stop {
+		t.Fatal("third unchanged read of a.go should stop")
 	}
 }
 
@@ -275,12 +378,20 @@ func TestResetTurnGuardsClearsNewState(t *testing.T) {
 	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)})
 	m.observePreamble("Good question — let me check exactly how the bypass guard behaves.")
 	m.observePreamble("Good question — let me check exactly how the bypass guard behaves!")
+	m.observeRoundProgress(
+		[]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)},
+		[]api.Message{{Role: "tool", Content: "contents"}},
+	)
+	m.stagnantRounds = 3
 	m.resetTurnGuards()
 	if len(m.turnReads) != 0 || m.rereadEvents != 0 || m.rereadStopAnnounced {
 		t.Fatal("resetTurnGuards did not clear re-read state")
 	}
 	if m.lastPreamble != "" || m.preambleStreak != 0 || m.preambleWarned {
 		t.Fatal("resetTurnGuards did not clear preamble state")
+	}
+	if len(m.recentOutcomes) != 0 || len(m.seenOutcomes) != 0 || m.oscillationStreak != 0 || m.stagnantRounds != 0 {
+		t.Fatal("resetTurnGuards did not clear progress state")
 	}
 }
 

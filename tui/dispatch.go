@@ -148,24 +148,54 @@ func (m *Model) processPendingTools() tea.Cmd {
 
 	if m.pending.done >= len(m.pending.calls) {
 		batchCalls := m.pending.calls
-		m.history = append(m.history, m.pending.results...)
+		batchResults := m.pending.results
+		m.history = append(m.history, batchResults...)
 		m.pending = nil
 		m.markToolsDone()
 
-		// No-progress nudge: the model is alternating between the same two
-		// actions. Tell it once, rather than letting it spin.
-		if !m.oscillationWarned && tools.IsOscillating(m.recentCalls) {
+		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
+		warnMixed, stopMixed := false, false
+		if batchSingleTool(batchCalls) == "" {
+			warnMixed, stopMixed = m.observeMixedBatchStagnation(madeProgress)
+		} else {
+			m.stagnantRounds = 0
+		}
+
+		// Outcomes include both the calls and their results, so A/B/A/B only
+		// trips when the observable evidence is repeating, not merely when the
+		// model uses the same pair of tools productively.
+		if warnOscillation && !m.oscillationWarned {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
-				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions without making progress. Stop, state your blocker explicitly, and try a different approach.",
+				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions and receiving the same results. Stop, state your blocker explicitly, and try a materially different approach.",
 			})
 			m.oscillationWarned = true
+		}
+		if stopOscillation {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[LOOP BROKEN] The same A/B outcomes continued after the warning. Tools are disabled for your next message — explain the blocker and summarize what you know.",
+			})
+			m.suppressToolsOnce = true
+		}
+		if warnMixed {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[NO PROGRESS DETECTED] This mixed set of tool calls has produced no new results for three rounds. Use the evidence already gathered, take a materially different action, or state the blocker.",
+			})
+		}
+		if stopMixed {
+			m.history = append(m.history, api.Message{
+				Role:    "system",
+				Content: "[LOOP BROKEN] This mixed tool batch produced no material progress for five rounds. Tools are disabled for your next message — explain the blocker and summarize what you know.",
+			})
+			m.suppressToolsOnce = true
 		}
 
 		// Inspection calls include arguments in their repeat identity, so reading
 		// different files or running different searches is progress. Mutation and
 		// control tools remain name-based to catch varied-argument spam.
-		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls)
+		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls, madeProgress)
 		if warnRepeat {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
@@ -376,10 +406,6 @@ func (m *Model) processPendingTools() tea.Cmd {
 			break
 		}
 
-		m.recentCalls = append(m.recentCalls, fp)
-		if len(m.recentCalls) > recentCallsKept {
-			m.recentCalls = m.recentCalls[len(m.recentCalls)-recentCallsKept:]
-		}
 		m.pending.started[i] = true
 		cmds = append(cmds, m.invokeToolCmd(m.pending.gen, i, call))
 	}

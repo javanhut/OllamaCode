@@ -293,29 +293,32 @@ type Model struct {
 	retrieving     bool   // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
-	turnGen             int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
-	streamRetries       int            // transient stream errors retried this turn
-	stepCount           int            // tool-call rounds since the last user message
-	autoContinues       int            // times we've nudged the model to keep going on open todos this turn
-	maxSteps            int            // budget per turn (cfg.MaxSteps, default 25)
-	recentCalls         []string       // ring of recent call fingerprints (oscillation)
-	failedCalls         map[string]int // fingerprint -> consecutive failure count
-	oscillationWarned   bool           // corrective nudge emitted once per turn
-	suppressToolsOnce   bool           // next stream sends no tools (step budget hit)
-	lastStepRepeatKey   string         // semantic identity of the previous single-tool batch
-	sameToolStreak      int            // consecutive steps repeating that identity
-	sameToolWarned      bool           // early repeat warning emitted this user turn
-	sameToolStopWarned  bool           // hard-stop explanation emitted this user turn
-	turnTouchedFiles    bool           // a file-mutating tool succeeded this turn
-	verifying           bool           // a compile check is running
-	verifyAttempts      int            // failed compile checks this turn
-	challengedThisTurn  bool           // self-check challenge already issued this turn
-	turnReads           map[string]int // read tool + cleaned path -> times read this turn
-	rereadEvents        int            // re-reads of unchanged files this turn
-	rereadStopAnnounced bool           // hard-stop explanation for re-read loops emitted
-	lastPreamble        string         // normalized previous assistant preamble this turn
-	preambleStreak      int            // consecutive near-duplicate preambles
-	preambleWarned      bool           // preamble-echo warning emitted this turn
+	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	streamRetries       int             // transient stream errors retried this turn
+	stepCount           int             // tool-call rounds since the last user message
+	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
+	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
+	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
+	seenOutcomes        map[string]bool // evidence already observed this turn
+	oscillationStreak   int             // consecutive round endings that still form A/B alternation
+	stagnantRounds      int             // repeated no-evidence rounds for mixed-tool batches
+	failedCalls         map[string]int  // fingerprint -> consecutive failure count
+	oscillationWarned   bool            // corrective nudge emitted once per turn
+	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
+	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
+	sameToolStreak      int             // consecutive steps repeating that identity
+	sameToolWarned      bool            // early repeat warning emitted this user turn
+	sameToolStopWarned  bool            // hard-stop explanation emitted this user turn
+	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
+	verifying           bool            // a compile check is running
+	verifyAttempts      int             // failed compile checks this turn
+	challengedThisTurn  bool            // self-check challenge already issued this turn
+	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
+	rereadEvents        int             // re-reads of unchanged files this turn
+	rereadStopAnnounced bool            // hard-stop explanation for re-read loops emitted
+	lastPreamble        string          // normalized previous assistant preamble this turn
+	preambleStreak      int             // consecutive near-duplicate preambles
+	preambleWarned      bool            // preamble-echo warning emitted this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
