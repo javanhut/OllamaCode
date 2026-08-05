@@ -57,10 +57,22 @@ type GenerateResponse struct {
 	Done     bool   `json:"done"`
 }
 
+type ModelSummary struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest,omitempty"`
+}
+
 type ModelListResponse struct {
-	Models []struct {
-		Name string `json:"name"`
-	} `json:"models"`
+	Models []ModelSummary `json:"models"`
+}
+
+func (r ModelListResponse) DigestFor(name string) string {
+	for _, model := range r.Models {
+		if model.Name == name {
+			return model.Digest
+		}
+	}
+	return ""
 }
 
 type VersionResponse struct {

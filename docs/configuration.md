@@ -34,6 +34,8 @@ outranks a stored key. Prefer that over typing the key.
 | `dream` | `false` disables idle reflection |
 | `verify` | `false` disables the compile check after edits |
 | `verify_cmd` | Override the auto-detected check, e.g. `"go build ./... && go test ./..."` |
+| `trace` | Opt in to redacted JSONL execution tracing (off by default) |
+| `trace_path` | Optional trace destination; defaults to the OS cache directory |
 | `face` | `false` hides the mascot overlay |
 | `welcome` | `false` hides the startup panel |
 | `verbose` | Detailed tool output |
@@ -139,8 +141,12 @@ as `mcp_<server>_<tool>` to avoid collisions with built-ins.
   "docs": {
     "command": "npx",
     "args": ["-y", "@example/docs-mcp"],
+    "trusted": true,
     "read_only": true,
-    "small_model_safe": true
+    "small_model_safe": true,
+    "env_allow": ["HOME"],
+    "call_timeout_sec": 60,
+    "max_response_kb": 1024
   }
 }
 ```
@@ -149,6 +155,11 @@ as `mcp_<server>_<tool>` to avoid collisions with built-ins.
 |---|---|
 | `command` | Executable to launch directly; no shell expansion is performed |
 | `args` | Command arguments |
+| `trusted` | Required explicit trust decision. An untrusted server is not launched |
+| `work_dir` | Explicit child working directory; blank inherits the OllamaCode working directory |
+| `env_allow` | Environment variable names passed to the child in addition to `PATH`; everything else is withheld |
+| `call_timeout_sec` | Per-request deadline; defaults to 120 seconds |
+| `max_response_kb` | Maximum JSON-RPC response size; defaults to 4096 KiB |
 | `protocol_version` | Optional stateful MCP protocol version override; defaults to `2025-11-25` |
 | `read_only` | Expose tools in Explore and Plan without destructive prompts; only set this when every server tool is actually read-only |
 | `small_model_safe` | Permit the server's tools in the small-model candidate set |
@@ -156,7 +167,8 @@ as `mcp_<server>_<tool>` to avoid collisions with built-ins.
 
 Unclassified MCP tools default to Write/Auto mode and require approval. Marking
 a whole server read-only is a trust decision because MCP annotations are
-advisory rather than a security boundary.
+advisory rather than a security boundary. Servers advertising tool-list change
+notifications are refreshed atomically while the session is running.
 
 ## Other state
 
@@ -165,6 +177,8 @@ advisory rather than a security boundary.
 | `~/.ollama_code/memory/<workspace>.json` | Long-term memory from `remember`, **scoped per workspace** |
 | `~/.ollama_code/archive.json` | KV archive of compacted conversation history |
 | session saves | Written by `/save`, listed by `/sessions` |
+| OS cache directory `/ollama_code/trace.jsonl` | Optional redacted execution trace |
+| OS cache directory `/ollama_code/calibration/` | Versioned model calibration results |
 
 ### Memory scoping
 

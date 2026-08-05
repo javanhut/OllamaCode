@@ -12,7 +12,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/internal/safeshell"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -33,28 +35,32 @@ type pendingBatch struct {
 
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
-	// Best-effort repair of almost-valid JSON arguments before dispatch.
-	call.Function.Arguments = tools.SalvageJSON(call.Function.Arguments)
-	// Checkpoint affected files before a mutating tool runs, so /undo can revert.
-	if paths := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
-		m.snapshotBeforeMutate(paths)
+	executor := agent.Executor{
+		Registry: m.tools, Host: m.host, Model: m.modelName, NumCtx: m.contextLimit,
+		Before: func(normalized tools.ToolCall) {
+			if paths := tools.MutatedPaths(normalized.Function.Name, normalized.Function.Arguments); len(paths) > 0 {
+				m.snapshotBeforeMutate(paths)
+			}
+		},
+		Observe: func(event agent.ExecutionEvent) {
+			if m.trace == nil {
+				return
+			}
+			errText := ""
+			if event.Err != nil {
+				errText = event.Err.Error()
+			}
+			_ = m.trace.Record(tracepkg.Event{Kind: "tool", Turn: m.turnGen, Model: m.modelName,
+				Tool: event.Call.Function.Name, Arguments: event.Call.Function.Arguments,
+				Result: event.Result, Error: errText, DurationMS: event.Duration.Milliseconds(),
+				Metadata: map[string]any{"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}})
+		},
 	}
-	result, err := m.tools.Invoke(ctx, call)
-	// Last-resort escalation: if the failure is an argument problem, ask the
-	// model for schema-valid arguments via constrained decoding and retry once.
-	if err != nil && tools.ShouldFormatRepair(call, err) {
-		if fixed, ok := m.repairArgsViaFormat(call); ok {
-			call.Function.Arguments = fixed
-			result, err = m.tools.Invoke(ctx, call)
-		}
-	}
-	if err != nil {
-		result = tools.RepairHint(call, err)
-	}
+	event := executor.Execute(ctx, call)
 	return api.Message{
 		Role:     "tool",
 		ToolName: call.Function.Name,
-		Content:  result,
+		Content:  event.Result,
 	}
 }
 
@@ -260,7 +266,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			inFlight++
 		}
 	}
-	parallelLimit := m.profile.maxParallelToolCalls()
+	parallelLimit := m.parallelToolLimit()
 	for i, call := range m.pending.calls {
 		if m.pending.started[i] {
 			continue

@@ -439,7 +439,20 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if val == "/model" || strings.HasPrefix(val, "/model ") {
 			m.input.Reset()
-			m.modelInfoCommand(strings.TrimSpace(strings.TrimPrefix(val, "/model")))
+			args := strings.TrimSpace(strings.TrimPrefix(val, "/model"))
+			if args == "calibrate" {
+				if m.modelName == "" {
+					m.toast = "select a model first"
+					return m, nil
+				}
+				m.toast = "calibrating tool behavior…"
+				return m, m.calibrateModelCmd()
+			}
+			if args == "calibrate apply" {
+				m.applyCalibration()
+				return m, nil
+			}
+			m.modelInfoCommand(args)
 			return m, nil
 		}
 		if val == "/route" || strings.HasPrefix(val, "/route ") {

@@ -8,14 +8,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 const defaultMCPProtocolVersion = "2025-11-25"
+
+type MCPServer interface {
+	Initialize(context.Context, string) error
+	ListTools(context.Context, ToolPolicy) ([]Tool, error)
+	SetToolsChangedHandler(func())
+	Namespace() string
+	Done() <-chan struct{}
+	Close() error
+}
 
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -52,20 +63,46 @@ type ExternalServer struct {
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 
-	writeMu   sync.Mutex
-	mu        sync.Mutex
-	pending   map[string]chan externalResult
-	nextID    int
-	done      chan struct{}
-	errTail   strings.Builder
-	closeOnce sync.Once
+	writeMu          sync.Mutex
+	mu               sync.Mutex
+	pending          map[string]chan externalResult
+	nextID           int
+	done             chan struct{}
+	errTail          strings.Builder
+	closeOnce        sync.Once
+	changeMu         sync.Mutex
+	onToolsChanged   func()
+	maxResponseBytes int
+	callTimeout      time.Duration
+}
+
+type ExternalServerOptions struct {
+	Name               string
+	Command            string
+	Args               []string
+	WorkDir            string
+	EnvAllow           []string
+	InheritEnvironment bool
+	MaxResponseBytes   int
+	CallTimeout        time.Duration
 }
 
 func NewExternalServer(name, command string, args ...string) (*ExternalServer, error) {
+	return NewExternalServerWithOptions(ExternalServerOptions{
+		Name: name, Command: command, Args: args, InheritEnvironment: true,
+	})
+}
+
+func NewExternalServerWithOptions(opts ExternalServerOptions) (*ExternalServer, error) {
+	name, command, args := opts.Name, opts.Command, opts.Args
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("MCP server %q has no command", name)
 	}
 	cmd := exec.Command(command, args...)
+	cmd.Dir = strings.TrimSpace(opts.WorkDir)
+	if !opts.InheritEnvironment {
+		cmd.Env = allowedEnvironment(opts.EnvAllow)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -81,6 +118,13 @@ func NewExternalServer(name, command string, args ...string) (*ExternalServer, e
 	s := &ExternalServer{
 		name: name, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
 		pending: map[string]chan externalResult{}, done: make(chan struct{}),
+		maxResponseBytes: opts.MaxResponseBytes, callTimeout: opts.CallTimeout,
+	}
+	if s.maxResponseBytes <= 0 {
+		s.maxResponseBytes = 4 * 1024 * 1024
+	}
+	if s.callTimeout <= 0 {
+		s.callTimeout = 2 * time.Minute
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
@@ -90,13 +134,44 @@ func NewExternalServer(name, command string, args ...string) (*ExternalServer, e
 	return s, nil
 }
 
+func allowedEnvironment(names []string) []string {
+	wanted := map[string]bool{"PATH": true}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			wanted[name] = true
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	for name := range wanted {
+		if value, ok := os.LookupEnv(name); ok {
+			out = append(out, name+"="+value)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *ExternalServer) listen() {
 	scanner := bufio.NewScanner(s.stdout)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), s.maxResponseBytes)
 	for scanner.Scan() {
+		var envelope struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			continue
+		}
+		if len(envelope.ID) == 0 {
+			if envelope.Method == "notifications/tools/list_changed" {
+				s.dispatchToolsChanged()
+			}
+			continue
+		}
 		var resp JSONRPCResponse
-		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil || len(resp.ID) == 0 {
-			continue // notification or malformed server output
+		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+			continue
 		}
 		key := string(bytes.TrimSpace(resp.ID))
 		s.mu.Lock()
@@ -113,6 +188,27 @@ func (s *ExternalServer) listen() {
 	}
 	s.failPending(fmt.Errorf("MCP server %q stopped: %w%s", s.name, err, s.stderrSuffix()))
 	close(s.done)
+}
+
+func (s *ExternalServer) SetToolsChangedHandler(handler func()) {
+	s.mu.Lock()
+	s.onToolsChanged = handler
+	s.mu.Unlock()
+}
+
+// Done closes when the subprocess exits. Callers use it to withdraw stale tool
+// definitions immediately; reconnecting is intentionally bounded to the next
+// application start rather than spinning on a crashing or compromised server.
+func (s *ExternalServer) Done() <-chan struct{} { return s.done }
+
+func (s *ExternalServer) dispatchToolsChanged() {
+	s.mu.Lock()
+	handler := s.onToolsChanged
+	s.mu.Unlock()
+	if handler == nil {
+		return
+	}
+	go func() { s.changeMu.Lock(); defer s.changeMu.Unlock(); handler() }()
 }
 
 func (s *ExternalServer) captureStderr() {
@@ -167,6 +263,11 @@ func (s *ExternalServer) notify(method string, params any) error {
 }
 
 func (s *ExternalServer) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if s.callTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.callTimeout)
+		defer cancel()
+	}
 	s.mu.Lock()
 	s.nextID++
 	id := s.nextID
@@ -199,6 +300,9 @@ func (s *ExternalServer) Call(ctx context.Context, method string, params any) (j
 		}
 		if result.response.Error != nil {
 			return nil, fmt.Errorf("MCP rpc error (%d): %s", result.response.Error.Code, result.response.Error.Message)
+		}
+		if len(result.response.Result) > s.maxResponseBytes {
+			return nil, fmt.Errorf("MCP response exceeded %d bytes", s.maxResponseBytes)
 		}
 		return result.response.Result, nil
 	}
@@ -256,8 +360,20 @@ type mcpTool struct {
 
 var nonToolName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
+func externalNamespace(server string) string {
+	clean := strings.Trim(nonToolName.ReplaceAllString(server, "_"), "_")
+	if len(clean) > 32 {
+		sum := sha256.Sum256([]byte(clean))
+		clean = clean[:23] + fmt.Sprintf("_%x", sum[:4])
+	}
+	if clean == "" {
+		clean = "server"
+	}
+	return "mcp_" + clean + "_"
+}
+
 func externalToolName(server, remote string) string {
-	name := "mcp_" + nonToolName.ReplaceAllString(server, "_") + "_" + nonToolName.ReplaceAllString(remote, "_")
+	name := externalNamespace(server) + nonToolName.ReplaceAllString(remote, "_")
 	name = strings.Trim(name, "_")
 	if len(name) <= 64 {
 		return name
@@ -265,6 +381,8 @@ func externalToolName(server, remote string) string {
 	sum := sha256.Sum256([]byte(name))
 	return name[:55] + fmt.Sprintf("_%x", sum[:4])
 }
+
+func (s *ExternalServer) Namespace() string { return externalNamespace(s.name) }
 
 // ListTools retrieves every page of tools and adapts their MCP input schemas
 // to OllamaCode's internal function definitions.
@@ -316,6 +434,10 @@ func (s *ExternalServer) callTool(ctx context.Context, name string, args json.Ra
 	if err != nil {
 		return "", err
 	}
+	return decodeMCPToolResult(resp)
+}
+
+func decodeMCPToolResult(resp json.RawMessage) (string, error) {
 	var result struct {
 		Content []struct {
 			Type string `json:"type"`

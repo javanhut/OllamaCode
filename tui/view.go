@@ -19,7 +19,7 @@ var slashCommands = []struct {
 	{"/exit", "exit the application"},
 	{"/settings", "edit endpoint URLs and API keys"},
 	{"/provider", "add or edit an API endpoint and its key"},
-	{"/model", "show/set current model (use, ctx, temp)"},
+	{"/model", "show/set/calibrate the current model"},
 	{"/models", "list, switch, or pull models"},
 	{"/route", "bind a model to a mode (big for plan, small for write)"},
 	{"/clear", "reset the conversation"},

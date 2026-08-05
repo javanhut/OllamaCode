@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +47,44 @@ func TestExternalToolNameIsProviderSafe(t *testing.T) {
 	}
 }
 
+func TestExternalToolLongServerKeepsNamespace(t *testing.T) {
+	server := strings.Repeat("long server ", 20)
+	name := externalToolName(server, strings.Repeat("remote", 20))
+	if len(name) > 64 || !strings.HasPrefix(name, externalNamespace(server)) {
+		t.Fatalf("tool %q escaped namespace %q", name, externalNamespace(server))
+	}
+}
+
+func TestExternalServerReceivesToolListChanged(t *testing.T) {
+	server, err := NewExternalServer("fixture", os.Args[0], "-test.run=TestMCPHelperProcess", "--", "--mcp-helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	changed := make(chan struct{}, 1)
+	server.SetToolsChangedHandler(func() { changed <- struct{}{} })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Initialize(ctx, "2025-11-25"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-changed:
+	case <-ctx.Done():
+		t.Fatal("tools/list_changed notification was not delivered")
+	}
+}
+
+func TestAllowedEnvironmentIsExplicit(t *testing.T) {
+	t.Setenv("MCP_ALLOWED_TEST", "yes")
+	t.Setenv("MCP_SECRET_TEST", "no")
+	env := allowedEnvironment([]string{"MCP_ALLOWED_TEST"})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "MCP_ALLOWED_TEST=yes") || strings.Contains(joined, "MCP_SECRET_TEST") {
+		t.Fatalf("unexpected child environment: %v", env)
+	}
+}
+
 func TestMCPHelperProcess(t *testing.T) {
 	if !slices.Contains(os.Args, "--mcp-helper") {
 		return
@@ -58,7 +97,13 @@ func TestMCPHelperProcess(t *testing.T) {
 			Method  string          `json:"method"`
 			Params  json.RawMessage `json:"params"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &req) != nil || len(req.ID) == 0 {
+		if json.Unmarshal(scanner.Bytes(), &req) != nil {
+			continue
+		}
+		if len(req.ID) == 0 {
+			if req.Method == "notifications/initialized" {
+				fmt.Println(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`)
+			}
 			continue
 		}
 		var result any

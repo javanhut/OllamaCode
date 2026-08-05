@@ -137,3 +137,14 @@ func (m *Model) chatOptions(action bool) map[string]any {
 	}
 	return opts
 }
+
+func (m *Model) parallelToolsEnabled() bool {
+	return m.profile.parallelToolCalls() && m.host.ProviderCapabilities().ParallelTools
+}
+
+func (m *Model) parallelToolLimit() int {
+	if !m.parallelToolsEnabled() {
+		return 1
+	}
+	return m.profile.maxParallelToolCalls()
+}

@@ -2,14 +2,16 @@ package tui
 
 import (
 	"context"
-	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
+	"github.com/javanhut/ollama_code/internal/verification"
 )
 
 // maxVerifyAttempts bounds how many times the harness will force the model to
@@ -17,9 +19,11 @@ import (
 const maxVerifyAttempts = 4
 
 type verifyDoneMsg struct {
-	ok     bool
-	label  string
-	output string
+	ok          bool
+	label       string
+	command     string
+	fingerprint string
+	output      string
 }
 
 const noCheckChallenge = "[SELF-CHECK] Before you finish: did you ACTUALLY verify this works — run it, build it, or test it — and watch it succeed? If not, do that now with your tools. If you genuinely cannot verify it, say so plainly and list exactly what remains unverified. Do not claim something works without evidence."
@@ -28,28 +32,21 @@ func (m *Model) verifyOn() bool {
 	return m.cfg.Verify == nil || *m.cfg.Verify
 }
 
-// verifyCommand returns the compile/typecheck command for the current project —
-// a config override first, then language auto-detection. It deliberately uses
-// compile-only checks (not test runners) so it catches the "basic things" like
-// type and syntax errors without executing project code.
+// verifyCommand returns a targeted test + compile/typecheck plan. Commands are
+// derived only from known manifests and changed paths unless the user supplied
+// an explicit override.
 func (m *Model) verifyCommand() (cmd, label string, ok bool) {
-	if c := strings.TrimSpace(m.cfg.VerifyCmd); c != "" {
-		return c, "verify", true
-	}
-	switch {
-	case fileExists("go.mod"):
-		return "go build ./...", "go build", true
-	case fileExists("Cargo.toml"):
-		return "cargo check --quiet", "cargo check", true
-	case fileExists("tsconfig.json"):
-		return "npx --no-install tsc --noEmit", "tsc --noEmit", true
-	}
-	return "", "", false
+	plan, ok := verification.Detect(".", m.changedPaths(), m.cfg.VerifyCmd)
+	return plan.Command, plan.Label, ok
 }
 
-func fileExists(name string) bool {
-	_, err := os.Stat(name)
-	return err == nil
+func (m *Model) changedPaths() []string {
+	paths := make([]string, 0, len(m.turnChangedPaths))
+	for path := range m.turnChangedPaths {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // maybeVerifyGate runs when a file-touching turn tries to end. It returns a
@@ -74,11 +71,11 @@ func (m *Model) maybeVerifyGate() tea.Cmd {
 	}
 	m.verifying = true
 	m.busySince = time.Now()
-	return m.verifyRunCmd(cmd, label)
+	return m.verifyRunCmd(cmd, label, verification.Fingerprint(".", m.changedPaths()))
 }
 
 // verifyRunCmd runs the compile check in the background and reports the result.
-func (m *Model) verifyRunCmd(command, label string) tea.Cmd {
+func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
@@ -87,7 +84,20 @@ func (m *Model) verifyRunCmd(command, label string) tea.Cmd {
 		if len(text) > 4000 {
 			text = "…\n" + text[len(text)-4000:] // tail: compiler errors cluster at the end
 		}
-		return verifyDoneMsg{ok: err == nil, label: label, output: text}
+		current := verification.Fingerprint(".", m.changedPaths())
+		if current != fingerprint {
+			err = context.Canceled
+			text = "files changed while verification was running; the stale result was discarded"
+		}
+		if m.trace != nil {
+			errText := ""
+			if err != nil {
+				errText = err.Error()
+			}
+			_ = m.trace.Record(tracepkg.Event{Kind: "verification", Turn: m.turnGen, Model: m.modelName,
+				Result: text, Error: errText, Metadata: map[string]any{"command": command, "label": label, "fingerprint": fingerprint[:12], "ok": err == nil}})
+		}
+		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text}
 	}
 }
 

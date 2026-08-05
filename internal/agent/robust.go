@@ -12,7 +12,7 @@ import (
 // toolTimeout bounds a single tool call so a slow or hung tool can't stall the
 // whole agent. run_shell honors the model's timeout_sec (capped); network-ish
 // tools get longer; everything else a modest default.
-func toolTimeout(call tools.ToolCall) time.Duration {
+func ToolTimeout(call tools.ToolCall) time.Duration {
 	switch call.Function.Name {
 	case "run_shell":
 		var a struct {

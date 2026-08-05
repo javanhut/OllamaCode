@@ -19,6 +19,10 @@ func Run() (err error) {
 			_ = server.Close()
 		}
 		m.mcpServers = nil
+		if m.trace != nil {
+			_ = m.trace.Close()
+			m.trace = nil
+		}
 	}()
 	// Last-resort backstop: if Update/View panics, recover so the terminal is
 	// restored and the user gets an error instead of a raw stack trace.

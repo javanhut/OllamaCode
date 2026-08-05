@@ -17,6 +17,11 @@ type mcpServerConfig struct {
 	ReadOnly        bool     `json:"read_only,omitempty"`
 	SmallModelSafe  bool     `json:"small_model_safe,omitempty"`
 	Disabled        bool     `json:"disabled,omitempty"`
+	Trusted         bool     `json:"trusted,omitempty"`
+	WorkDir         string   `json:"work_dir,omitempty"`
+	EnvAllow        []string `json:"env_allow,omitempty"`
+	CallTimeoutSec  int      `json:"call_timeout_sec,omitempty"`
+	MaxResponseKB   int      `json:"max_response_kb,omitempty"`
 }
 
 func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Registry) ([]*tools.ExternalServer, []string) {
@@ -32,7 +37,16 @@ func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Regis
 		if cfg.Disabled {
 			continue
 		}
-		server, err := tools.NewExternalServer(name, cfg.Command, cfg.Args...)
+		if !cfg.Trusted {
+			warnings = append(warnings, fmt.Sprintf("MCP %s: disabled until trusted=true is explicitly configured", name))
+			continue
+		}
+		maxBytes := cfg.MaxResponseKB * 1024
+		server, err := tools.NewExternalServerWithOptions(tools.ExternalServerOptions{
+			Name: name, Command: cfg.Command, Args: cfg.Args, WorkDir: cfg.WorkDir,
+			EnvAllow: cfg.EnvAllow, MaxResponseBytes: maxBytes,
+			CallTimeout: time.Duration(cfg.CallTimeoutSec) * time.Second,
+		})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("MCP %s: %v", name, err))
 			continue
@@ -51,13 +65,23 @@ func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Regis
 			var definitions []tools.Tool
 			definitions, err = server.ListTools(ctx, policy)
 			if err == nil {
-				for _, tool := range definitions {
-					if _, exists := registry.Lookup(tool.Function.Name); exists {
-						err = fmt.Errorf("tool name collision: %s", tool.Function.Name)
+				for _, definition := range definitions {
+					if _, exists := registry.Lookup(definition.Function.Name); exists {
+						err = fmt.Errorf("tool name collision: %s", definition.Function.Name)
 						break
 					}
-					registry.Register(tool)
 				}
+			}
+			if err == nil {
+				err = registry.ReplacePrefix(server.Namespace(), definitions)
+				server.SetToolsChangedHandler(func() {
+					refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer refreshCancel()
+					updated, refreshErr := server.ListTools(refreshCtx, policy)
+					if refreshErr == nil {
+						_ = registry.ReplacePrefix(server.Namespace(), updated)
+					}
+				})
 			}
 		}
 		cancel()
@@ -67,6 +91,10 @@ func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Regis
 			continue
 		}
 		servers = append(servers, server)
+		go func(server *tools.ExternalServer) {
+			<-server.Done()
+			_ = registry.ReplacePrefix(server.Namespace(), nil)
+		}(server)
 	}
 	return servers, compactWarnings(warnings)
 }

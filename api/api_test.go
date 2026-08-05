@@ -15,9 +15,7 @@ func TestGetModelList(t *testing.T) {
 			t.Errorf("expected path /api/tags, got %s", r.URL.Path)
 		}
 		resp := ModelListResponse{
-			Models: []struct {
-				Name string `json:"name"`
-			}{
+			Models: []ModelSummary{
 				{Name: "llama3"},
 				{Name: "mistral"},
 			},

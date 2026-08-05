@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
 	"github.com/javanhut/ollama_code/api"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -87,6 +89,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case calibrationDoneMsg:
+		if msg.err != nil {
+			m.toast = "calibration failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.lastCalibration = &msg.result
+		m.toast = fmt.Sprintf("calibration recommends %s (%.0f%% correct); apply with /model calibrate apply", msg.result.Recommended, msg.result.Score()*100)
+		return m, nil
 	case faceTickMsg:
 		m.faceFrame++
 		return m, m.nextFaceTick()
@@ -111,14 +121,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifyDoneMsg:
 		m.verifying = false
 		if msg.ok {
+			m.lastVerification = fmt.Sprintf("%s (`%s`, checkpoint %s)", msg.label, msg.command, msg.fingerprint)
 			if m.profile.reviewPass() && !m.reviewedThisTurn {
 				m.reviewedThisTurn = true
-				m.history = append(m.history, api.Message{Role: "system", Content: "[ADVERSARIAL REVIEW] The implementation builds. Before finishing, inspect the actual diff as a skeptical reviewer. Look for incorrect assumptions, missing edge cases, unsafe behavior, and inadequate tests. If you find a real issue, fix it and verify again. If not, state that the review found no blocking issue and finish."})
+				m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf("[ADVERSARIAL REVIEW] Verification passed: %s. Before finishing, inspect the actual diff as a skeptical reviewer. Look for incorrect assumptions, missing edge cases, unsafe behavior, and inadequate tests. If you find a real issue, fix it and verify again. If not, state that the review found no blocking issue and finish.", m.lastVerification)})
 				m.busySince = time.Now()
 				m.refreshTranscript()
 				return m, m.startStream()
 			}
-			m.toast = "verified ✓ " + msg.label
+			m.toast = "verified ✓ " + m.lastVerification
 			cmds = append(cmds, m.endTurnTail()...)
 			m.refreshTranscript()
 			return m, tea.Batch(cmds...)
@@ -578,14 +589,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pending.done++
 			if msg.index < len(m.pending.calls) {
 				call := m.pending.calls[msg.index]
-				if strings.HasPrefix(msg.result.Content, "error:") {
+				if !tools.ToolResultOK(msg.result.Content) {
 					m.failedCalls[tools.CallFingerprint(call)]++
 				} else if mutated := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(mutated) > 0 {
 					m.turnTouchedFiles = true // a file edit succeeded → verify before finishing
-					m.forgetReads(mutated)    // re-reading a just-changed file is legitimate
+					if m.turnChangedPaths == nil {
+						m.turnChangedPaths = map[string]bool{}
+					}
+					for _, path := range mutated {
+						m.turnChangedPaths[filepath.Clean(path)] = true
+					}
+					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
+				} else if call.Function.Name == "spawn_subagent" && (m.mode == WriteMode || m.mode == AutoMode) {
+					// A delegated writer uses the same registry but is not checkpointed
+					// call-by-call. Conservatively run the repository-wide verification
+					// gate even when its final report says it only inspected files.
+					m.turnTouchedFiles = true
 				}
 			}
-			if msg.modeSwitch != nil && !strings.HasPrefix(msg.result.Content, "error:") {
+			if msg.modeSwitch != nil && tools.ToolResultOK(msg.result.Content) {
 				m.applyModeTransition(msg.modeSwitch.target, msg.modeSwitch.reason)
 				m.layout()
 			}
@@ -608,6 +630,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatDoneMsg:
+		if m.trace != nil {
+			_ = m.trace.Record(tracepkg.Event{Kind: "model_response", Turn: msg.gen, Model: m.modelName,
+				Metadata: map[string]any{"prompt_tokens": msg.promptEval, "completion_tokens": msg.evalCount, "content_bytes": len(msg.content)}})
+		}
 		if msg.gen != m.turnGen {
 			break // stale completion from a cancelled/replaced stream
 		}

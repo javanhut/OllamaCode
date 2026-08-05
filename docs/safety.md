@@ -74,10 +74,12 @@ the part it can ignore.
 
 ## Verification gate
 
-If a turn touched files, it doesn't end on broken code. An auto-detected compile
-check runs — `go build ./...`, `cargo check`, `tsc --noEmit`, or `verify_cmd` —
-and on failure the model is re-invoked with the errors, up to 4 attempts before
-it gives up and tells you.
+If a turn touched files, it doesn't end on broken code. Go changes run tests for
+the affected package directories before `go build ./...`; Rust runs
+`cargo test --no-run` before `cargo check`; TypeScript runs `tsc --noEmit`.
+`verify_cmd` remains an explicit user override. Each result is bound to a hash
+of the changed files, so an edit made during or after a check invalidates stale
+evidence. On failure the model is re-invoked with the errors, up to 4 attempts.
 
 When no objective check exists for the project, the model is challenged once to
 prove it actually verified its work rather than accepting an unevidenced "done".
@@ -122,6 +124,10 @@ compacted history rides along in the volatile tail.
   doesn't appear in the process list
 - Keys are not accepted on the command line, where they would appear on screen
   and in input history
+- execution tracing is opt-in, stored with mode `0600`, and recursively redacts
+  secret-shaped fields and bearer tokens before writing
+- MCP subprocesses receive only `PATH` plus explicitly allowlisted environment
+  variables, and are not launched until `trusted: true` is configured
 
 ## The Cursor agent is read-only
 

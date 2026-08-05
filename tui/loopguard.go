@@ -56,6 +56,12 @@ func (m *Model) resetTurnGuards() {
 	m.sameToolWarned = false
 	m.sameToolStopWarned = false
 	m.turnTouchedFiles = false
+	if m.turnChangedPaths == nil {
+		m.turnChangedPaths = map[string]bool{}
+	} else {
+		clear(m.turnChangedPaths)
+	}
+	m.lastVerification = ""
 	m.verifyAttempts = 0
 	m.challengedThisTurn = false
 	m.reviewedThisTurn = false

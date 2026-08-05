@@ -119,7 +119,7 @@ func (r *Registry) toCallNamed(name string, args json.RawMessage) (ToolCall, boo
 	if name == "" {
 		return ToolCall{}, false
 	}
-	if _, ok := r.tools[name]; !ok {
+	if _, ok := r.Lookup(name); !ok {
 		return ToolCall{}, false
 	}
 	args = bytesTrim(args)

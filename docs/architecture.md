@@ -10,6 +10,9 @@ For people changing the code.
 | `tools/` | Tool registry, schemas, handlers, JSON salvage, call fingerprinting |
 | `tui/` | Everything else — the Bubble Tea model, modes, routing, transcript, modals |
 | `internal/agent/` | Headless bounded agent loop, shared by `spawn_subagent` and the eval harness |
+| `internal/calibration/` | Versioned model capability probes and recommendation cache |
+| `internal/trace/` | Redacted JSONL recording, replay client, and eval-fixture promotion |
+| `internal/verification/` | Changed-path-aware targeted test and build plans |
 | `internal/semantic/` | Embedding index for auto-RAG |
 | `internal/memory/`, `internal/storage/` | Per-workspace long-term memory, KV archive |
 | `internal/safeshell/` | Read-only shell allowlist, VCS bypass interception |
@@ -131,6 +134,31 @@ it runs:
 Rejections here complete synchronously and don't produce a `toolResultMsg`, so
 the batch is finalized directly — otherwise a batch made entirely of rejected
 calls would hang at `TOOLS n/n`.
+
+After UI-specific preflight, both the interactive TUI and headless/eval loops
+delegate execution to `internal/agent.Executor`. JSON salvage, schema
+validation, deadlines, panic recovery, constrained argument repair, structured
+result envelopes, and trace events therefore share one implementation. A
+parity test runs the same call through both entry points.
+
+Tool results returned to models use a compact JSON envelope with stable
+`ok`, `summary`, `evidence`, `retryable`, `hint`, and optional `data` fields.
+Large output retains its beginning and final diagnostic evidence.
+
+## Evaluation and replay
+
+`go run ./cmd/eval -model <name> -runs 5` runs strict behavior and tool-contract
+fixtures. Required, forbidden, and ordered tools are checked independently from
+the workspace outcome. `-json`, `-min-pass-rate`, and `-min-tool-rate` make the
+runner suitable for regression automation; `-trace <path>` records a redacted
+replay.
+
+Captured model responses can be replayed without a live provider. Convert a
+failed trace into a human-reviewable fixture skeleton with:
+
+```sh
+go run ./cmd/eval -promote-trace trace.jsonl
+```
 
 ### Generation counter
 

@@ -15,6 +15,14 @@ func configPath() string {
 	return filepath.Join(dir, "ollama_code", "config.json")
 }
 
+func defaultTracePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "ollama_code-trace.jsonl")
+	}
+	return filepath.Join(dir, "ollama_code", "trace.jsonl")
+}
+
 // resolveAPIKey returns the Ollama API key to authenticate requests with. The
 // OLLAMA_API_KEY environment variable (matching the ollama CLI convention)
 // takes precedence over the saved config so it can be supplied without writing

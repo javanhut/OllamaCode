@@ -18,10 +18,12 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/calibration"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/semantic"
 	"github.com/javanhut/ollama_code/internal/storage"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -136,6 +138,8 @@ type config struct {
 	Welcome    *bool                      `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
 	Verify     *bool                      `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
 	VerifyCmd  string                     `json:"verify_cmd,omitempty"`  // override the auto-detected check
+	Trace      bool                       `json:"trace,omitempty"`       // opt-in redacted JSONL execution trace
+	TracePath  string                     `json:"trace_path,omitempty"`  // optional trace destination
 	Profiles   map[string]ModelProfile    `json:"profiles,omitempty"`    // per-model, keyed by model name
 	Routes     map[string]string          `json:"routes,omitempty"`      // mode name -> model spec; empty disables routing
 	Providers  map[string]providerConfig  `json:"providers,omitempty"`   // extra endpoints, referenced as "<name>:<model>"
@@ -269,26 +273,28 @@ var (
 )
 
 type Model struct {
-	cfg            config
-	host           api.OllamaHost
-	tools          *tools.Registry
-	mcpServers     []*tools.ExternalServer
-	notes          *sessionNotes
-	todos          *todoList
-	mode           Mode
-	state          state
-	urlInput       textinput.Model
-	keyInput       textinput.Model
-	nameInput      textinput.Model // provider name; the default host has none
-	envInput       textinput.Model // env var holding the provider's key
-	settingsFocus  settingsField
-	settingsTarget int    // index into settingsTargets(); 0 = default host, last = new provider
-	settingsKind   string // wire format of the provider being edited
-	settingsTrust  bool   // cursor providers only: pass --trust
-	models         []string
-	modelsFrom     string // provider the model list came from; "" = default host
-	picker         int
-	modelName      string
+	cfg             config
+	host            api.OllamaHost
+	tools           *tools.Registry
+	mcpServers      []*tools.ExternalServer
+	trace           *tracepkg.Recorder
+	lastCalibration *calibration.Result
+	notes           *sessionNotes
+	todos           *todoList
+	mode            Mode
+	state           state
+	urlInput        textinput.Model
+	keyInput        textinput.Model
+	nameInput       textinput.Model // provider name; the default host has none
+	envInput        textinput.Model // env var holding the provider's key
+	settingsFocus   settingsField
+	settingsTarget  int    // index into settingsTargets(); 0 = default host, last = new provider
+	settingsKind    string // wire format of the provider being edited
+	settingsTrust   bool   // cursor providers only: pass --trust
+	models          []string
+	modelsFrom      string // provider the model list came from; "" = default host
+	picker          int
+	modelName       string
 
 	// Model pulling (from the model picker). pullInput captures the name to
 	// pull; pullStream/progress fields drive the live download UI.
@@ -360,8 +366,10 @@ type Model struct {
 	sameToolWarned      bool            // early repeat warning emitted this user turn
 	sameToolStopWarned  bool            // hard-stop explanation emitted this user turn
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
+	turnChangedPaths    map[string]bool // exact files covered by targeted verification
 	verifying           bool            // a compile check is running
 	verifyAttempts      int             // failed compile checks this turn
+	lastVerification    string          // exact command/evidence from the latest gate
 	challengedThisTurn  bool            // self-check challenge already issued this turn
 	reviewedThisTurn    bool            // optional adversarial review already issued this turn
 	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
@@ -587,6 +595,17 @@ func New() *Model {
 		expandTools:  false,
 		lastActivity: time.Now(),
 		faceLastKey:  time.Now(),
+	}
+	if cfg.Trace {
+		tracePath := strings.TrimSpace(cfg.TracePath)
+		if tracePath == "" {
+			tracePath = defaultTracePath()
+		}
+		if recorder, err := tracepkg.Open(tracePath); err == nil {
+			m.trace = recorder
+		} else if m.toast == "" {
+			m.toast = "trace disabled: " + err.Error()
+		}
 	}
 
 	m.lastActivity = time.Now()

@@ -343,9 +343,7 @@ func (o OllamaHost) modelsCursor() (*ModelListResponse, error) {
 		if id = strings.TrimSpace(id); id == "" {
 			continue
 		}
-		list.Models = append(list.Models, struct {
-			Name string `json:"name"`
-		}{Name: id})
+		list.Models = append(list.Models, ModelSummary{Name: id})
 	}
 	if len(list.Models) == 0 {
 		return nil, fmt.Errorf("--list-models returned no models; is the CLI signed in? (run `%s login`)", o.cursorCommands()[0])

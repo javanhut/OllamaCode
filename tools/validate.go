@@ -254,6 +254,8 @@ func contains(xs []string, s string) bool {
 
 // Lookup returns the registered tool by name.
 func (r *Registry) Lookup(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
 	return t, ok
 }
@@ -314,6 +316,8 @@ func propertySchema(p Property) map[string]any {
 
 // Names returns the registered tool names, sorted.
 func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.tools))
 	for n := range r.tools {
 		out = append(out, n)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Tool is an Ollama/OpenAI-compatible function definition paired with a local
@@ -63,6 +64,7 @@ type ToolCallFunction struct {
 
 // Registry holds the tools available for a session.
 type Registry struct {
+	mu            sync.RWMutex
 	tools         map[string]Tool
 	onFileChanged func([]string)
 }
@@ -74,7 +76,11 @@ func NewRegistry() *Registry {
 // SetFileChangeHook registers a callback invoked with the affected path(s) after
 // a file-mutating tool succeeds. Used to keep the semantic index fresh. The
 // callback may run on a tool goroutine, so it must be concurrency-safe.
-func (r *Registry) SetFileChangeHook(fn func([]string)) { r.onFileChanged = fn }
+func (r *Registry) SetFileChangeHook(fn func([]string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onFileChanged = fn
+}
 
 // fileMutators are the tools whose success should invalidate the semantic index.
 var fileMutators = map[string]bool{
@@ -107,6 +113,13 @@ func mutatedPaths(name string, raw json.RawMessage) []string {
 }
 
 func (r *Registry) Register(t Tool) {
+	t = prepareTool(t)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Function.Name] = t
+}
+
+func prepareTool(t Tool) Tool {
 	if t.Type == "" {
 		t.Type = "function"
 	}
@@ -114,7 +127,31 @@ func (r *Registry) Register(t Tool) {
 		t.Policy = PolicyForName(t.Function.Name)
 	}
 	t.Function.Parameters = tightenSchema(t.Function.Parameters)
-	r.tools[t.Function.Name] = t
+	return t
+}
+
+// ReplacePrefix atomically replaces a dynamic namespace. It is used for MCP
+// tools/list_changed notifications so readers observe either the old complete
+// set or the new complete set, never a partially updated registry.
+func (r *Registry) ReplacePrefix(prefix string, definitions []Tool) error {
+	prepared := make([]Tool, len(definitions))
+	for i, definition := range definitions {
+		prepared[i] = prepareTool(definition)
+		if !strings.HasPrefix(prepared[i].Function.Name, prefix) {
+			return fmt.Errorf("tool %q is outside namespace %q", prepared[i].Function.Name, prefix)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name := range r.tools {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.tools, name)
+		}
+	}
+	for _, definition := range prepared {
+		r.tools[definition.Function.Name] = definition
+	}
+	return nil
 }
 
 func tightenSchema(schema Schema) Schema {
@@ -148,6 +185,8 @@ func tightenProperty(prop Property) Property {
 // Definitions returns the tool list to send in a ChatRequest, sorted by name
 // for stable output.
 func (r *Registry) Definitions() []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		out = append(out, t)
@@ -159,7 +198,10 @@ func (r *Registry) Definitions() []Tool {
 // Invoke dispatches a tool call. Returns the handler's reply string or an
 // error message suitable for sending back as the tool's response.
 func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
+	r.mu.RLock()
 	t, ok := r.tools[call.Function.Name]
+	hook := r.onFileChanged
+	r.mu.RUnlock()
 	if !ok {
 		if cand, d := r.Nearest(call.Function.Name); cand != "" && (d <= 3 || d <= len(call.Function.Name)/3) {
 			return "", fmt.Errorf("unknown tool %q. Did you mean %q? Available tools: %s",
@@ -177,9 +219,9 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 	}
 	call.Function.Arguments = normalized
 	out, err := t.Handler(ctx, normalized)
-	if err == nil && r.onFileChanged != nil {
+	if err == nil && hook != nil {
 		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
-			r.onFileChanged(paths)
+			hook(paths)
 		}
 	}
 	return out, err

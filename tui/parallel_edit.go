@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -243,7 +244,15 @@ func (m *Model) applyStagedOp(ctx context.Context, op stagedOp) (string, error) 
 		return "", err
 	}
 	m.snapshotBeforeMutate([]string{op.path})
-	return m.tools.Invoke(ctx, tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: raw}})
+	out, err := m.tools.Invoke(ctx, tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: raw}})
+	if err == nil {
+		m.turnTouchedFiles = true
+		if m.turnChangedPaths == nil {
+			m.turnChangedPaths = map[string]bool{}
+		}
+		m.turnChangedPaths[filepath.Clean(op.path)] = true
+	}
+	return out, err
 }
 
 // parallelEditTool is the orchestrator: fan out planning workers, then apply

@@ -61,6 +61,8 @@ Type `/` in the input to get an autocomplete menu of every command.
 | `/model use <name>` | Set the default model. Accepts `provider:model` |
 | `/model ctx <tokens>` | Override this model's context window |
 | `/model temp <0.0–2.0>` | Override sampling temperature |
+| `/model calibrate` | Run deterministic tool-use probes and recommend a capability tier |
+| `/model calibrate apply` | Explicitly apply the latest recommendation |
 | `/route` | Show the mode→model table |
 | `/route <mode> <spec>` | Bind a model to a mode |
 | `/route <mode> off` | Unbind one mode |

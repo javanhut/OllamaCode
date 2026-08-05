@@ -198,8 +198,19 @@ func fencedDump(content string, maxLines, width int) string {
 
 func renderCollapsedTool(call tools.ToolCall, content string, verbose bool, width int) string {
 	status := "completed"
-	if strings.HasPrefix(content, "error:") {
+	if !tools.ToolResultOK(content) {
 		status = "failed"
+	}
+	if result, ok := tools.DecodeToolResult(content); ok && verbose {
+		var details []string
+		details = append(details, result.Evidence...)
+		if result.Hint != "" {
+			details = append(details, result.Hint)
+		}
+		content = strings.Join(details, "\n")
+		if content == "" {
+			content = result.Summary
+		}
 	}
 
 	header := fmt.Sprintf("**›** `%s` (%s)", call.Function.Name, status)

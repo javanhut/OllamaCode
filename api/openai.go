@@ -461,9 +461,7 @@ func (o OllamaHost) modelsOpenAI() (*ModelListResponse, error) {
 	}
 	var list ModelListResponse
 	for _, d := range payload.Data {
-		list.Models = append(list.Models, struct {
-			Name string `json:"name"`
-		}{Name: d.ID})
+		list.Models = append(list.Models, ModelSummary{Name: d.ID})
 	}
 	return &list, nil
 }

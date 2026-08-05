@@ -6,10 +6,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/javanhut/ollama_code/api"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -21,11 +23,13 @@ type ChatClient interface {
 
 // Options configures a headless run.
 type Options struct {
-	Model      string
-	System     string
-	MaxSteps   int                    // tool-call rounds before giving up (default 8)
-	NumCtx     int                    // num_ctx option, if > 0
-	ToolFilter func(name string) bool // which tools the agent may see/call (nil = all)
+	Model             string
+	System            string
+	MaxSteps          int                    // tool-call rounds before giving up (default 8)
+	NumCtx            int                    // num_ctx option, if > 0
+	ToolFilter        func(name string) bool // which tools the agent may see/call (nil = all)
+	Trace             *tracepkg.Recorder     // optional redacted JSONL recorder
+	StructuredResults *bool                  // nil/true=envelopes; false for A/B evaluation
 }
 
 // Result is the outcome of a headless run.
@@ -63,6 +67,13 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		opts.MaxSteps = defaultMaxSteps
 	}
 	defs := filterTools(reg.Definitions(), opts.ToolFilter)
+	if opts.Trace != nil {
+		names := make([]string, 0, len(defs))
+		for _, definition := range defs {
+			names = append(names, definition.Function.Name)
+		}
+		_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_start", Model: opts.Model, Metadata: map[string]any{"tools": names, "task": task}})
+	}
 	options := map[string]any{}
 	if opts.NumCtx > 0 {
 		options["num_ctx"] = opts.NumCtx
@@ -75,6 +86,21 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	msgs = append(msgs, api.Message{Role: "user", Content: task})
 
 	var res Result
+	executor := Executor{Registry: reg, Host: host, Model: opts.Model, NumCtx: opts.NumCtx, StructuredResults: opts.StructuredResults,
+		Observe: func(event ExecutionEvent) {
+			if opts.Trace == nil {
+				return
+			}
+			errText := ""
+			if event.Err != nil {
+				errText = event.Err.Error()
+			}
+			_ = opts.Trace.Record(tracepkg.Event{Kind: "tool", Model: opts.Model, Tool: event.Call.Function.Name,
+				Arguments: event.Call.Function.Arguments, Result: event.Result, Error: errText,
+				DurationMS: event.Duration.Milliseconds(), Metadata: map[string]any{
+					"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}})
+		},
+	}
 	fpCount := map[string]int{} // call fingerprint -> times dispatched
 	var recent []string         // ring of recent fingerprints for oscillation
 
@@ -88,6 +114,10 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		if err != nil {
 			return res, err
 		}
+		if opts.Trace != nil {
+			payload, _ := json.Marshal(resp)
+			_ = opts.Trace.Record(tracepkg.Event{Kind: "model_response", Model: opts.Model, Payload: payload})
+		}
 		res.PromptTokens += resp.PromptEval
 		res.CompletionTokens += resp.EvalCount
 		calls := resp.Message.ToolCalls
@@ -96,6 +126,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		}
 		if len(calls) == 0 {
 			res.Output = resp.Message.Content
+			if opts.Trace != nil {
+				_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_end", Model: opts.Model, Metadata: map[string]any{"reason": "completed", "steps": res.Steps, "prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens}})
+			}
 			return res, nil
 		}
 		calls = tools.DedupeCalls(calls)
@@ -133,24 +166,20 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			// Same tool-call robustness as the TUI loop: salvage almost-valid JSON,
 			// run with a per-call timeout + panic recovery, escalate argument
 			// errors to constrained decoding, and feed back actionable hints.
-			c.Function.Arguments = tools.SalvageJSON(c.Function.Arguments)
-			out, err := invokeWithTimeout(ctx, reg, c, toolTimeout(c))
-			if err != nil && tools.ShouldFormatRepair(c, err) {
+			event := executor.Execute(ctx, c)
+			if event.ArgumentFailure {
 				res.ArgumentFailures++
+			}
+			if event.RepairAttempted {
 				res.RepairAttempts++
-				if fixed, ok := RepairArgsViaFormat(ctx, host, reg, opts.Model, opts.NumCtx, c); ok {
-					c.Function.Arguments = fixed
-					out, err = invokeWithTimeout(ctx, reg, c, toolTimeout(c))
-					if err == nil {
-						res.RepairsSucceeded++
-					}
-				}
 			}
-			if err != nil {
+			if event.RepairSucceeded {
+				res.RepairsSucceeded++
+			}
+			if event.Err != nil {
 				res.ToolErrors++
-				out = tools.RepairHint(c, err)
 			}
-			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: out})
+			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: event.Result})
 		}
 
 		// No forward motion — every call this round was a refused repeat, or the
@@ -167,6 +196,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	res.Output = output
 	res.PromptTokens += promptTokens
 	res.CompletionTokens += completionTokens
+	if opts.Trace != nil {
+		_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_end", Model: opts.Model, Metadata: map[string]any{"reason": "limit_or_loop_guard", "steps": res.Steps, "prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens}})
+	}
 	return res, nil
 }
 
@@ -181,6 +213,10 @@ func finalize(ctx context.Context, host ChatClient, opts Options, options map[st
 	})
 	if err != nil || strings.TrimSpace(resp.Message.Content) == "" {
 		return "(sub-agent stopped without a final answer)", 0, 0
+	}
+	if opts.Trace != nil {
+		payload, _ := json.Marshal(resp)
+		_ = opts.Trace.Record(tracepkg.Event{Kind: "model_response", Model: opts.Model, Payload: payload})
 	}
 	return resp.Message.Content, resp.PromptEval, resp.EvalCount
 }
