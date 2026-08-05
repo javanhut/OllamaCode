@@ -26,3 +26,11 @@ func TestAccumulate(t *testing.T) {
 		t.Fatalf("unexpected report: %#v", r)
 	}
 }
+
+func TestRunEvaluationRejectsUnknownTask(t *testing.T) {
+	structured := true
+	_, err := runEvaluation("unused", "http://localhost:11434", 1, 1, false, nil, &structured, "missing")
+	if err == nil {
+		t.Fatal("expected unknown task to fail before contacting the provider")
+	}
+}

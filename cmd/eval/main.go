@@ -172,6 +172,7 @@ func main() {
 	minTools := flag.Float64("min-tool-rate", 1, "minimum passing tool-contract rate from 0 to 1")
 	tracePath := flag.String("trace", "", "optional redacted JSONL trace path")
 	legacyResults := flag.Bool("legacy-results", false, "use pre-envelope prose tool results for A/B comparison")
+	taskName := flag.String("task", "", "run only the named fixture")
 	flag.Parse()
 	if *promoteTrace != "" {
 		fixture, err := tracepkg.Promote(*promoteTrace)
@@ -200,7 +201,7 @@ func main() {
 		defer recorder.Close()
 	}
 	structured := !*legacyResults
-	r, err := runEvaluation(*model, *host, *steps, *runs, !*jsonOutput, recorder, &structured)
+	r, err := runEvaluation(*model, *host, *steps, *runs, !*jsonOutput, recorder, &structured, *taskName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -217,13 +218,26 @@ func main() {
 	}
 }
 
-func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool) (report, error) {
+func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string) (report, error) {
 	h := api.OllamaHost{}
 	h.SetURI(host)
 	rep := report{Version: 1, Model: model, Host: host, StartedAt: time.Now().UTC(), TrialsPerTask: trials}
+	tasks := evalTasks()
+	if taskName != "" {
+		matched := tasks[:0]
+		for _, t := range tasks {
+			if t.Name == taskName {
+				matched = append(matched, t)
+			}
+		}
+		if len(matched) == 0 {
+			return rep, fmt.Errorf("unknown eval task %q", taskName)
+		}
+		tasks = matched
+	}
 	var durations []int64
 	for trial := 1; trial <= trials; trial++ {
-		for _, t := range evalTasks() {
+		for _, t := range tasks {
 			result, err := runTask(h, model, steps, trial, t, recorder, structured)
 			if err != nil {
 				return rep, err

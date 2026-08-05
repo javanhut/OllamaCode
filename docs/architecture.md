@@ -143,7 +143,10 @@ parity test runs the same call through both entry points.
 
 Tool results returned to models use a compact JSON envelope with stable
 `ok`, `summary`, `evidence`, `retryable`, `hint`, and optional `data` fields.
-Large output retains its beginning and final diagnostic evidence.
+Line-oriented output remains separately bounded evidence, and trusted envelope
+guidance tells models to treat it as data while preserving an exact response
+format requested by the user. Large output retains its beginning and final
+diagnostic evidence.
 
 ## Evaluation and replay
 
@@ -151,7 +154,8 @@ Large output retains its beginning and final diagnostic evidence.
 fixtures. Required, forbidden, and ordered tools are checked independently from
 the workspace outcome. `-json`, `-min-pass-rate`, and `-min-tool-rate` make the
 runner suitable for regression automation; `-trace <path>` records a redacted
-replay.
+replay. Use `-task <fixture-name>` to isolate one fixture while diagnosing a
+regression.
 
 Captured model responses can be replayed without a live provider. Convert a
 failed trace into a human-reviewable fixture skeleton with:
