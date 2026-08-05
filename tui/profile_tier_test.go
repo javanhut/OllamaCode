@@ -58,6 +58,24 @@ func TestLeanToolsetForSmallModels(t *testing.T) {
 	}
 }
 
+func TestSmallModelExploreIncludesWebTools(t *testing.T) {
+	m := &Model{
+		mode:    ExploreMode,
+		tools:   tools.DefaultRegistry(),
+		profile: ModelProfile{ParamsB: 7},
+	}
+
+	names := map[string]bool{}
+	for _, tool := range m.toolsForMode() {
+		names[tool.Function.Name] = true
+	}
+	for _, want := range []string{"web_fetch", "web_search", "web_search_api", "web_crawl"} {
+		if !names[want] {
+			t.Errorf("small-model explore set is missing web tool %q", want)
+		}
+	}
+}
+
 func TestActiveSystemPromptByTier(t *testing.T) {
 	m := &Model{profile: ModelProfile{ParamsB: 7}}
 	if !strings.HasPrefix(m.activeSystemPrompt(), compactSystemPrompt) {

@@ -334,6 +334,7 @@ var leanToolNames = map[string]bool{
 	"find_files": true, "grep": true, "file_info": true,
 	"get_working_directory": true, "get_project_tree": true,
 	"run_shell": true, "shell_output": true,
+	"web_fetch": true, "web_search": true, "web_search_api": true, "web_crawl": true,
 	"git_status": true, "git_diff": true, "git_add": true, "git_commit": true, "git_log": true,
 	"switch_mode": true, "todo_write": true,
 }

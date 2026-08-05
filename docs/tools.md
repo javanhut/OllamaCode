@@ -122,8 +122,8 @@ approval prompt, and the preview names the model the switch would route to.
 ## Small-model toolset
 
 Models under 15B parameters get a trimmed set — file operations, directory and
-search tools, `run_shell` / `shell_output`, the common `git_*` tools,
-`switch_mode`, and `todo_write`. A 40-tool schema drowns their
+search tools, web search/fetch/crawl tools, `run_shell` / `shell_output`, the
+common `git_*` tools, `switch_mode`, and `todo_write`. A 40-tool schema drowns their
 instruction-following and produces malformed calls.
 
 They are also told to call exactly one tool per response; larger models are told
