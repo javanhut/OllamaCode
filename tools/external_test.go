@@ -1,0 +1,95 @@
+package tools
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"slices"
+	"testing"
+	"time"
+)
+
+func TestExternalMCPServerLifecycleAndToolCall(t *testing.T) {
+	server, err := NewExternalServer("fixture", os.Args[0], "-test.run=TestMCPHelperProcess", "--", "--mcp-helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Initialize(ctx, "2025-11-25"); err != nil {
+		t.Fatal(err)
+	}
+	policy := ToolPolicy{Modes: ModeReadOnly, SmallModelSafe: true, Network: true, Cost: ToolCostHigh}
+	definitions, err := server.ListTools(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Function.Name != "mcp_fixture_echo" {
+		t.Fatalf("unexpected MCP definitions: %#v", definitions)
+	}
+	got, err := definitions[0].Handler(ctx, json.RawMessage(`{"text":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "echo: hello" {
+		t.Fatalf("unexpected MCP result: %q", got)
+	}
+}
+
+func TestExternalToolNameIsProviderSafe(t *testing.T) {
+	name := externalToolName("server with spaces", "a/very/long/tool/name/that/keeps/going/until/provider/limits/would/be/exceeded")
+	if len(name) > 64 || nonToolName.MatchString(name) {
+		t.Fatalf("unsafe external tool name %q", name)
+	}
+}
+
+func TestMCPHelperProcess(t *testing.T) {
+	if !slices.Contains(os.Args, "--mcp-helper") {
+		return
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		var req struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &req) != nil || len(req.ID) == 0 {
+			continue
+		}
+		var result any
+		switch req.Method {
+		case "initialize":
+			result = map[string]any{
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]string{"name": "fixture", "version": "1"},
+			}
+		case "tools/list":
+			result = map[string]any{"tools": []any{map[string]any{
+				"name": "echo", "description": "Echo text.",
+				"inputSchema": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"text": map[string]any{"type": "string"}},
+					"required":   []string{"text"},
+				},
+			}}}
+		case "tools/call":
+			var params struct {
+				Arguments map[string]any `json:"arguments"`
+			}
+			_ = json.Unmarshal(req.Params, &params)
+			result = map[string]any{"content": []any{map[string]any{
+				"type": "text", "text": "echo: " + fmt.Sprint(params.Arguments["text"]),
+			}}}
+		default:
+			continue
+		}
+		response, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": result})
+		fmt.Println(string(response))
+	}
+}

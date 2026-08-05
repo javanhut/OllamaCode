@@ -66,6 +66,9 @@ func (m *Model) resolveProfile() {
 		}
 		p.ParamsB = show.ParamsB()
 	}
+	if cached, ok := m.cfg.Profiles[name]; ok {
+		p = preserveProfileOverrides(p, cached)
+	}
 
 	if m.cfg.Profiles == nil {
 		m.cfg.Profiles = map[string]ModelProfile{}
@@ -73,6 +76,27 @@ func (m *Model) resolveProfile() {
 	m.cfg.Profiles[name] = p
 	saveConfig(m.cfg)
 	m.applyProfile(p)
+}
+
+func preserveProfileOverrides(discovered, configured ModelProfile) ModelProfile {
+	if configured.NumCtx > 0 {
+		discovered.NumCtx = configured.NumCtx
+	}
+	discovered.CapabilityTier = configured.CapabilityTier
+	discovered.MaxVisibleTools = configured.MaxVisibleTools
+	discovered.ProfileMaxSteps = configured.ProfileMaxSteps
+	discovered.ParallelTools = configured.ParallelTools
+	discovered.MaxParallelTools = configured.MaxParallelTools
+	discovered.Delegation = configured.Delegation
+	discovered.RAGTokens = configured.RAGTokens
+	discovered.RAGTopK = configured.RAGTopK
+	discovered.ActionTemperature = configured.ActionTemperature
+	discovered.ProseTemperature = configured.ProseTemperature
+	discovered.ReviewPass = configured.ReviewPass
+	discovered.Temperature = configured.Temperature
+	discovered.TopP = configured.TopP
+	discovered.NumPredict = configured.NumPredict
+	return discovered
 }
 
 func (m *Model) applyProfile(p ModelProfile) {
@@ -88,14 +112,22 @@ func (m *Model) applyProfile(p ModelProfile) {
 }
 
 // chatOptions builds the Ollama Options map from the active profile.
-func (m *Model) chatOptions() map[string]any {
+func (m *Model) chatOptions(action bool) map[string]any {
 	opts := map[string]any{"num_ctx": m.contextLimit}
 	if m.profile.Temperature != nil {
 		opts["temperature"] = *m.profile.Temperature
+	} else if action && m.profile.ActionTemperature != nil {
+		opts["temperature"] = *m.profile.ActionTemperature
+	} else if !action && m.profile.ProseTemperature != nil {
+		opts["temperature"] = *m.profile.ProseTemperature
 	} else if m.profile.smallModel() {
-		// Weak models at default temperature hallucinate paths and malform
-		// tool-call JSON; near-greedy decoding is the reliable regime for them.
-		opts["temperature"] = 0.2
+		// Greedy decoding improves tool selection and argument stability. A
+		// tool-less finalization pass may be slightly freer without risking calls.
+		if action {
+			opts["temperature"] = 0.0
+		} else {
+			opts["temperature"] = 0.2
+		}
 	}
 	if m.profile.TopP != nil {
 		opts["top_p"] = *m.profile.TopP

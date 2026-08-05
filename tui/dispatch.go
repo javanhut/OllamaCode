@@ -235,7 +235,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Step budget: cap tool-call rounds per user turn so a confused model
 		// can't loop forever burning tokens.
 		m.stepCount++
-		limit := m.maxSteps
+		limit := m.turnStepLimit()
 		if m.mode == AutoMode {
 			limit = 100
 		}
@@ -254,12 +254,19 @@ func (m *Model) processPendingTools() tea.Cmd {
 	}
 
 	var cmds []tea.Cmd
+	inFlight := 0
+	for i, started := range m.pending.started {
+		if started && i < len(m.pending.results) && m.pending.results[i].Role == "" {
+			inFlight++
+		}
+	}
+	parallelLimit := m.profile.maxParallelToolCalls()
 	for i, call := range m.pending.calls {
 		if m.pending.started[i] {
 			continue
 		}
 
-		if !m.toolAllowedInMode(call.Function.Name) {
+		if !m.toolCallAllowedInMode(call) {
 			m.failedCalls[tools.CallFingerprint(call)]++
 			m.pending.results[i] = api.Message{
 				Role:     "tool",
@@ -406,7 +413,11 @@ func (m *Model) processPendingTools() tea.Cmd {
 			break
 		}
 
+		if inFlight >= parallelLimit {
+			break
+		}
 		m.pending.started[i] = true
+		inFlight++
 		cmds = append(cmds, m.invokeToolCmd(m.pending.gen, i, call))
 	}
 
@@ -422,6 +433,30 @@ func (m *Model) processPendingTools() tea.Cmd {
 	}
 
 	return nil
+}
+
+func (m *Model) toolCallAllowedInMode(call tools.ToolCall) bool {
+	if !m.toolAllowedInMode(call.Function.Name) {
+		return false
+	}
+	if m.mode == WriteMode || m.mode == AutoMode {
+		return true
+	}
+	// These combined inspect/mutate tools are visible in read-only modes for
+	// their default list/show actions. Argument-aware gating prevents a create,
+	// delete, add, or remove action from slipping through that name-level policy.
+	var args struct {
+		Action string `json:"action"`
+	}
+	_ = json.Unmarshal(call.Function.Arguments, &args)
+	switch call.Function.Name {
+	case "git_branch":
+		return args.Action == "" || args.Action == "list"
+	case "git_remote":
+		return args.Action == "" || args.Action == "list" || args.Action == "show"
+	default:
+		return true
+	}
 }
 
 func computePreview(call tools.ToolCall) string {
@@ -569,7 +604,13 @@ func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
 	if m.pending.allowAll {
 		return false
 	}
-	if !destructiveToolNames[call.Function.Name] {
+	policy := tools.PolicyForName(call.Function.Name)
+	if m.tools != nil {
+		if tool, ok := m.tools.Lookup(call.Function.Name); ok {
+			policy = tool.Policy
+		}
+	}
+	if !policy.Destructive {
 		return false
 	}
 	if m.mode == AutoMode {

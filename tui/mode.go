@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -87,77 +88,6 @@ func parseMode(s string) (Mode, bool) {
 	default:
 		return ExploreMode, false
 	}
-}
-
-var readOnlyToolNames = map[string]bool{
-	"read_file":             true,
-	"list_directory":        true,
-	"find_files":            true,
-	"grep":                  true,
-	"file_info":             true,
-	"get_working_directory": true,
-	"read_session_notes":    true,
-	"update_session_notes":  true,
-	"append_session_notes":  true,
-	"switch_mode":           true,
-	"remember":              true,
-	"recall":                true,
-	"forget":                true,
-	"web_fetch":             true,
-	"web_search":            true,
-	"web_search_api":        true,
-	"web_crawl":             true,
-	"get_project_tree":      true,
-	"find_symbol":           true,
-	"code_definition":       true,
-	"code_references":       true,
-	"code_hover":            true,
-	"code_index":            true,
-	"semantic_search":       true,
-	"ask_user":              true,
-	"git_status":            true,
-	"git_diff":              true,
-	"git_log":               true,
-	"git_branch":            true,
-	"git_remote":            true,
-	"hash_file":             true,
-	"process_list":          true,
-	"disk_usage":            true,
-	"spawn_subagent":        true,
-}
-
-// exploreExtraToolNames are tools available in explore mode in addition to
-// readOnlyToolNames. run_shell is allowed here, but each call is filtered
-// through safeshell.IsExploreReadOnlyShell before invocation.
-var exploreExtraToolNames = map[string]bool{
-	"run_shell": true,
-}
-
-var planExtraToolNames = map[string]bool{}
-
-var destructiveToolNames = map[string]bool{
-	"write_file":     true,
-	"append_file":    true,
-	"edit_file":      true,
-	"delete_file":    true,
-	"move_file":      true,
-	"copy_file":      true,
-	"make_directory": true,
-	"touch":          true,
-	"run_shell":      true,
-	"git_add":        true,
-	"git_commit":     true,
-	"switch_mode":    true,
-	"git_checkout":   true,
-	"git_pull":       true,
-	"git_push":       true,
-	"git_stash":      true,
-	"git_merge":      true,
-	"git_reset":      true,
-	"git_remote":     true,
-	"git_branch":     true,
-	"process_kill":   true,
-	"parallel_edit":  true,
 }
 
 type modeSwitchRequest struct {
@@ -328,29 +258,103 @@ func (m *Model) switchModeTool() tools.Tool {
 	}
 }
 
-var leanToolNames = map[string]bool{
-	"read_file": true, "write_file": true, "edit_file": true, "append_file": true,
-	"delete_file": true, "list_directory": true, "make_directory": true,
-	"find_files": true, "grep": true, "file_info": true,
-	"get_working_directory": true, "get_project_tree": true,
-	"run_shell": true, "shell_output": true,
-	"web_fetch": true, "web_search": true, "web_search_api": true, "web_crawl": true,
-	"git_status": true, "git_diff": true, "git_add": true, "git_commit": true, "git_log": true,
-	"switch_mode": true, "todo_write": true,
-}
-
 func (m *Model) toolsForMode() []tools.Tool {
 	all := m.tools.Definitions()
 	lean := m.profile.smallModel()
 	out := make([]tools.Tool, 0, len(all))
 	for _, t := range all {
-		if lean && !leanToolNames[t.Function.Name] {
+		if lean && !t.Policy.SmallModelSafe {
 			continue
 		}
-		if m.toolAllowedInMode(t.Function.Name) {
+		if t.Function.Name == "spawn_subagent" && !m.profile.canDelegate() {
+			continue
+		}
+		if t.Policy.Allows(toolMode(m.mode)) {
 			out = append(out, t)
 		}
 	}
+	maxVisible := m.profile.MaxVisibleTools
+	if maxVisible <= 0 && lean {
+		maxVisible = 18
+	}
+	if maxVisible > 0 && len(out) > maxVisible {
+		out = selectRelevantTools(out, m.latestUserRequest(), maxVisible)
+	}
+	return out
+}
+
+func (m *Model) latestUserRequest() string {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "user" {
+			return strings.ToLower(m.history[i].Content)
+		}
+	}
+	return ""
+}
+
+// selectRelevantTools keeps the small-model schema budget focused while
+// preserving the core inspect/edit workflow. Strong profiles normally leave
+// MaxVisibleTools unset and receive every mode-allowed tool.
+func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool {
+	type ranked struct {
+		tool  tools.Tool
+		score int
+	}
+	core := map[string]int{
+		"switch_mode": 100, "read_file": 99, "grep": 98, "find_files": 96,
+		"list_directory": 95, "edit_file": 94, "run_shell": 93,
+		"write_file": 92, "todo_write": 91, "get_project_tree": 88, "file_info": 85,
+		"web_search": 82, "web_fetch": 81, "git_status": 80, "git_diff": 79,
+		"shell_output": 78,
+	}
+	has := func(words ...string) bool {
+		for _, word := range words {
+			if strings.Contains(query, word) {
+				return true
+			}
+		}
+		return false
+	}
+	rankedTools := make([]ranked, 0, len(all))
+	for _, tool := range all {
+		name := tool.Function.Name
+		score := core[name]
+		for _, term := range strings.FieldsFunc(query, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+		}) {
+			if len(term) >= 3 && strings.Contains(strings.ToLower(name+" "+tool.Function.Description), term) {
+				score += 8
+			}
+		}
+		if has("web", "online", "latest", "current", "documentation", "url", "http") && strings.HasPrefix(name, "web_") {
+			score += 50
+		}
+		if has("git", "commit", "branch", "merge", "diff", "repository") && strings.HasPrefix(name, "git_") {
+			score += 50
+		}
+		if has("symbol", "definition", "reference", "function", "class", "type") &&
+			(name == "find_symbol" || strings.HasPrefix(name, "code_") || name == "semantic_search") {
+			score += 50
+		}
+		if has("process", "memory", "disk", "cpu") && (strings.HasPrefix(name, "process_") || name == "disk_usage") {
+			score += 50
+		}
+		if has("create", "add", "implement", "fix", "change", "edit", "delete", "write") && tool.Policy.Destructive {
+			score += 35
+		}
+		rankedTools = append(rankedTools, ranked{tool: tool, score: score})
+	}
+	sort.SliceStable(rankedTools, func(i, j int) bool {
+		if rankedTools[i].score == rankedTools[j].score {
+			return rankedTools[i].tool.Function.Name < rankedTools[j].tool.Function.Name
+		}
+		return rankedTools[i].score > rankedTools[j].score
+	})
+	out := make([]tools.Tool, 0, limit)
+	for _, item := range rankedTools[:limit] {
+		out = append(out, item.tool)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
 	return out
 }
 
@@ -362,13 +366,20 @@ func (m *Model) toolAllowedInMode(name string) bool {
 // sub-agent goroutine) can snapshot the mode once and evaluate it off the UI
 // goroutine without racing on m.mode.
 func toolAllowedInMode(mode Mode, name string) bool {
+	return tools.PolicyForName(name).Allows(toolMode(mode))
+}
+
+func toolMode(mode Mode) tools.ToolMode {
 	switch mode {
 	case ExploreMode:
-		return readOnlyToolNames[name] || exploreExtraToolNames[name]
+		return tools.ModeExplore
 	case PlanMode:
-		return readOnlyToolNames[name] || planExtraToolNames[name]
-	case WriteMode, AutoMode:
-		return true
+		return tools.ModePlan
+	case WriteMode:
+		return tools.ModeWrite
+	case AutoMode:
+		return tools.ModeAuto
+	default:
+		return 0
 	}
-	return false
 }

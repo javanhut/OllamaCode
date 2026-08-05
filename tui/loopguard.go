@@ -28,6 +28,13 @@ func maxStepsFromConfig(c config) int {
 	return defaultMaxSteps
 }
 
+func (m *Model) turnStepLimit() int {
+	if m.profile.ProfileMaxSteps > 0 {
+		return m.profile.ProfileMaxSteps
+	}
+	return m.maxSteps
+}
+
 // resetTurnGuards clears the per-turn loop-safety state. Call at the start of
 // every new user turn (fresh submit or a dequeued message).
 func (m *Model) resetTurnGuards() {
@@ -51,6 +58,7 @@ func (m *Model) resetTurnGuards() {
 	m.turnTouchedFiles = false
 	m.verifyAttempts = 0
 	m.challengedThisTurn = false
+	m.reviewedThisTurn = false
 	m.autoContinues = 0
 	for k := range m.failedCalls {
 		delete(m.failedCalls, k)

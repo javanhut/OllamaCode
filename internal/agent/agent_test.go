@@ -119,6 +119,9 @@ func TestRun_EscalatesBadArgsViaFormat(t *testing.T) {
 	if host.calls != 3 {
 		t.Fatalf("expected 3 chat calls (call, repair, answer), got %d", host.calls)
 	}
+	if res.ArgumentFailures != 1 || res.RepairAttempts != 1 || res.RepairsSucceeded != 1 {
+		t.Fatalf("unexpected repair metrics: %+v", res)
+	}
 }
 
 func TestRun_StuckGuardBreaksAndFinalizes(t *testing.T) {

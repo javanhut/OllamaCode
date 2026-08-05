@@ -307,14 +307,26 @@ func (m *Model) showModelInfo() {
 	if p.ParamsB > 0 {
 		fmt.Fprintf(&b, "- parameters: %.1fB\n", p.ParamsB)
 	}
+	tier := p.CapabilityTier
+	if tier == "" {
+		if p.smallModel() {
+			tier = "small (inferred)"
+		} else {
+			tier = "capable (inferred)"
+		}
+	}
+	fmt.Fprintf(&b, "- capability tier: %s · parallel tools: %t (max %d)\n", tier, p.parallelToolCalls(), p.maxParallelToolCalls())
+	fmt.Fprintf(&b, "- step budget: %d · delegation: %t · review pass: %t\n", m.turnStepLimit(), p.canDelegate(), p.reviewPass())
 	fmt.Fprintf(&b, "- tools: %t · thinking: %t\n", p.SupportsTools, p.SupportsThinking)
 	temp := "ollama default"
 	if p.Temperature != nil {
 		temp = fmt.Sprintf("%.2f", *p.Temperature)
 	} else if p.smallModel() {
-		temp = "0.20 (auto: small model)"
+		temp = "0.00 action / 0.20 prose (auto: small model)"
 	}
 	fmt.Fprintf(&b, "- temperature: %s\n", temp)
+	topK, ragTokens := m.ragLimits()
+	fmt.Fprintf(&b, "- RAG: top %d · %d tokens\n", topK, ragTokens)
 	if p.TopP != nil {
 		fmt.Fprintf(&b, "- top_p: %.2f\n", *p.TopP)
 	}

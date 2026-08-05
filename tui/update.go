@@ -111,6 +111,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifyDoneMsg:
 		m.verifying = false
 		if msg.ok {
+			if m.profile.reviewPass() && !m.reviewedThisTurn {
+				m.reviewedThisTurn = true
+				m.history = append(m.history, api.Message{Role: "system", Content: "[ADVERSARIAL REVIEW] The implementation builds. Before finishing, inspect the actual diff as a skeptical reviewer. Look for incorrect assumptions, missing edge cases, unsafe behavior, and inadequate tests. If you find a real issue, fix it and verify again. If not, state that the review found no blocking issue and finish."})
+				m.busySince = time.Now()
+				m.refreshTranscript()
+				return m, m.startStream()
+			}
 			m.toast = "verified ✓ " + msg.label
 			cmds = append(cmds, m.endTurnTail()...)
 			m.refreshTranscript()
@@ -626,7 +633,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// TEXT instead of via the native channel. If the assistant's message is
 		// actually a tool call, route it through the same execution path as a
 		// native call (guarded by the step budget so it can't loop forever).
-		limit := m.maxSteps
+		limit := m.turnStepLimit()
 		if m.mode == AutoMode {
 			limit = 100
 		}

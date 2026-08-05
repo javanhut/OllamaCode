@@ -47,6 +47,40 @@ func TestValidateArgs_CoercesQuotedBool(t *testing.T) {
 	}
 }
 
+func TestNormalizeArgsCoercesValues(t *testing.T) {
+	fn := Function{Name: "sample", Parameters: Schema{
+		Type: "object",
+		Properties: map[string]Property{
+			"enabled": {Type: "boolean"},
+			"count":   {Type: "integer"},
+		},
+		Required: []string{"enabled", "count"},
+	}}
+	got, err := NormalizeArgs(fn, json.RawMessage(`{"enabled":"true","count":"3"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Enabled bool `json:"enabled"`
+		Count   int  `json:"count"`
+	}
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("normalized arguments still fail handler decoding: %v", err)
+	}
+	if !decoded.Enabled || decoded.Count != 3 {
+		t.Fatalf("unexpected normalized values: %+v", decoded)
+	}
+}
+
+func TestValidateArgsRejectsUnknownAndNullRequired(t *testing.T) {
+	if err := ValidateArgs(editFn(), json.RawMessage(`{"path":"a","old_string":"x","new_string":"y","pth":"typo"}`)); err == nil {
+		t.Fatal("expected unknown field to be rejected")
+	}
+	if err := ValidateArgs(editFn(), json.RawMessage(`{"path":null,"old_string":"x","new_string":"y"}`)); err == nil {
+		t.Fatal("expected null required field to be rejected")
+	}
+}
+
 func TestNearest(t *testing.T) {
 	r := DefaultRegistry()
 	cases := map[string]string{

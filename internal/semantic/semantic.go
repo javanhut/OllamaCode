@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/javanhut/ollama_code/internal/gitignore"
 	"golang.org/x/sync/errgroup"
@@ -245,11 +246,16 @@ func (idx *Index) Search(query string, embedder func(string) ([]float32, error),
 		score float64
 	}
 	var results []scored
+	terms := queryTerms(query)
 	for _, c := range idx.Chunks {
 		if len(c.Embedding) == 0 {
 			continue
 		}
-		s := cosineSimilarity(qemb, c.Embedding)
+		semanticScore := cosineSimilarity(qemb, c.Embedding)
+		lexicalScore := lexicalRelevance(terms, c.Path+"\n"+c.Text)
+		// Semantic similarity supplies broad intent; exact identifiers, filenames,
+		// and error text provide a precision boost that embeddings often blur.
+		s := semanticScore*0.8 + lexicalScore*0.2
 		results = append(results, scored{Chunk: c, score: s})
 	}
 	sort.Slice(results, func(i, j int) bool {
@@ -258,11 +264,67 @@ func (idx *Index) Search(query string, embedder func(string) ([]float32, error),
 	if topK > len(results) {
 		topK = len(results)
 	}
-	out := make([]Result, topK)
-	for i := 0; i < topK; i++ {
-		out[i] = Result{Chunk: results[i].Chunk, Score: results[i].score}
+	out := make([]Result, 0, topK)
+	perFile := map[string]int{}
+	for _, result := range results {
+		if len(out) >= topK {
+			break
+		}
+		if perFile[result.Path] >= 2 {
+			continue
+		}
+		perFile[result.Path]++
+		out = append(out, Result{Chunk: result.Chunk, Score: result.score})
+	}
+	// If a small repository has fewer than topK results after diversification,
+	// fill the remaining slots in score order.
+	if len(out) < topK {
+		seen := map[string]bool{}
+		for _, result := range out {
+			seen[fmt.Sprintf("%s:%d", result.Path, result.StartLine)] = true
+		}
+		for _, result := range results {
+			key := fmt.Sprintf("%s:%d", result.Path, result.StartLine)
+			if seen[key] {
+				continue
+			}
+			out = append(out, Result{Chunk: result.Chunk, Score: result.score})
+			if len(out) >= topK {
+				break
+			}
+		}
 	}
 	return out, nil
+}
+
+func queryTerms(query string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.' || r == '/' || r == '-')
+	})
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range parts {
+		if len(part) < 3 || seen[part] {
+			continue
+		}
+		seen[part] = true
+		out = append(out, part)
+	}
+	return out
+}
+
+func lexicalRelevance(terms []string, candidate string) float64 {
+	if len(terms) == 0 {
+		return 0
+	}
+	candidate = strings.ToLower(candidate)
+	matches := 0
+	for _, term := range terms {
+		if strings.Contains(candidate, term) {
+			matches++
+		}
+	}
+	return float64(matches) / float64(len(terms))
 }
 
 func isBinary(b []byte) bool {

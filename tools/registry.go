@@ -12,9 +12,10 @@ import (
 // handler. The Type/Function fields are what the model sees; Handler runs the
 // call locally when the model emits a matching tool_call.
 type Tool struct {
-	Type     string   `json:"type"`
-	Function Function `json:"function"`
-	Handler  Handler  `json:"-"`
+	Type     string     `json:"type"`
+	Function Function   `json:"function"`
+	Handler  Handler    `json:"-"`
+	Policy   ToolPolicy `json:"-"`
 }
 
 type Function struct {
@@ -24,18 +25,20 @@ type Function struct {
 }
 
 type Schema struct {
-	Type       string              `json:"type"`
-	Properties map[string]Property `json:"properties"`
-	Required   []string            `json:"required,omitempty"`
+	Type                 string              `json:"type"`
+	Properties           map[string]Property `json:"properties"`
+	Required             []string            `json:"required,omitempty"`
+	AdditionalProperties *bool               `json:"additionalProperties,omitempty"`
 }
 
 type Property struct {
-	Type        string              `json:"type"`
-	Description string              `json:"description,omitempty"`
-	Enum        []string            `json:"enum,omitempty"`
-	Items       *Property           `json:"items,omitempty"`      // element schema for type "array"
-	Properties  map[string]Property `json:"properties,omitempty"` // field schemas for type "object"
-	Required    []string            `json:"required,omitempty"`   // required fields for type "object"
+	Type                 string              `json:"type"`
+	Description          string              `json:"description,omitempty"`
+	Enum                 []string            `json:"enum,omitempty"`
+	Items                *Property           `json:"items,omitempty"`      // element schema for type "array"
+	Properties           map[string]Property `json:"properties,omitempty"` // field schemas for type "object"
+	Required             []string            `json:"required,omitempty"`   // required fields for type "object"
+	AdditionalProperties *bool               `json:"additionalProperties,omitempty"`
 }
 
 // Handler executes a tool call. args is the raw JSON object the model sent;
@@ -107,7 +110,39 @@ func (r *Registry) Register(t Tool) {
 	if t.Type == "" {
 		t.Type = "function"
 	}
+	if t.Policy.Modes == 0 {
+		t.Policy = PolicyForName(t.Function.Name)
+	}
+	t.Function.Parameters = tightenSchema(t.Function.Parameters)
 	r.tools[t.Function.Name] = t
+}
+
+func tightenSchema(schema Schema) Schema {
+	if schema.AdditionalProperties == nil {
+		allow := false
+		schema.AdditionalProperties = &allow
+	}
+	for name, prop := range schema.Properties {
+		schema.Properties[name] = tightenProperty(prop)
+	}
+	return schema
+}
+
+func tightenProperty(prop Property) Property {
+	if prop.Items != nil {
+		item := tightenProperty(*prop.Items)
+		prop.Items = &item
+	}
+	if prop.Type == "object" {
+		if prop.AdditionalProperties == nil {
+			allow := false
+			prop.AdditionalProperties = &allow
+		}
+		for name, child := range prop.Properties {
+			prop.Properties[name] = tightenProperty(child)
+		}
+	}
+	return prop
 }
 
 // Definitions returns the tool list to send in a ChatRequest, sorted by name
@@ -136,12 +171,14 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 	if t.Handler == nil {
 		return "", fmt.Errorf("tool %q has no handler", call.Function.Name)
 	}
-	if err := ValidateArgs(t.Function, call.Function.Arguments); err != nil {
+	normalized, err := NormalizeArgs(t.Function, call.Function.Arguments)
+	if err != nil {
 		return "", err
 	}
-	out, err := t.Handler(ctx, call.Function.Arguments)
+	call.Function.Arguments = normalized
+	out, err := t.Handler(ctx, normalized)
 	if err == nil && r.onFileChanged != nil {
-		if paths := mutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
+		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
 			r.onFileChanged(paths)
 		}
 	}

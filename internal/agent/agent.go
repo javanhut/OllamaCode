@@ -30,10 +30,18 @@ type Options struct {
 
 // Result is the outcome of a headless run.
 type Result struct {
-	Output    string // the model's final (non-tool) message
-	Steps     int    // tool-call rounds executed
-	HitLimit  bool   // true if MaxSteps was reached without a final answer
-	ToolsUsed []string
+	Output           string // the model's final (non-tool) message
+	Steps            int    // tool-call rounds executed
+	HitLimit         bool   // true if MaxSteps was reached without a final answer
+	ToolsUsed        []string
+	ToolCalls        int
+	ToolErrors       int
+	ArgumentFailures int
+	RepairAttempts   int
+	RepairsSucceeded int
+	RepeatedBlocked  int
+	PromptTokens     int
+	CompletionTokens int
 }
 
 // Loop-safety tunables for the headless agent.
@@ -80,6 +88,8 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		if err != nil {
 			return res, err
 		}
+		res.PromptTokens += resp.PromptEval
+		res.CompletionTokens += resp.EvalCount
 		calls := resp.Message.ToolCalls
 		if len(calls) == 0 {
 			calls = reg.ParseToolCallsFromContent(resp.Message.Content)
@@ -89,6 +99,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			return res, nil
 		}
 		calls = tools.DedupeCalls(calls)
+		res.ToolCalls += len(calls)
 
 		res.Steps++
 		msgs = append(msgs, api.Message{Role: "assistant", Content: resp.Message.Content, ToolCalls: calls})
@@ -97,6 +108,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		for _, c := range calls {
 			res.ToolsUsed = append(res.ToolsUsed, c.Function.Name)
 			if opts.ToolFilter != nil && !opts.ToolFilter(c.Function.Name) {
+				res.ToolErrors++
 				msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name,
 					Content: "error: tool not permitted for this agent"})
 				continue
@@ -110,6 +122,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			// rather than re-running it, so a weak model can't burn the budget
 			// looping on one action.
 			if fpCount[fp] >= maxIdenticalCalls {
+				res.RepeatedBlocked++
 				msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name,
 					Content: fmt.Sprintf("error: you already ran this exact call %d times with the same result. Stop repeating it — use what you already have, or take a materially different action.", fpCount[fp])})
 				continue
@@ -123,12 +136,18 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			c.Function.Arguments = tools.SalvageJSON(c.Function.Arguments)
 			out, err := invokeWithTimeout(ctx, reg, c, toolTimeout(c))
 			if err != nil && tools.ShouldFormatRepair(c, err) {
+				res.ArgumentFailures++
+				res.RepairAttempts++
 				if fixed, ok := RepairArgsViaFormat(ctx, host, reg, opts.Model, opts.NumCtx, c); ok {
 					c.Function.Arguments = fixed
 					out, err = invokeWithTimeout(ctx, reg, c, toolTimeout(c))
+					if err == nil {
+						res.RepairsSucceeded++
+					}
 				}
 			}
 			if err != nil {
+				res.ToolErrors++
 				out = tools.RepairHint(c, err)
 			}
 			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: out})
@@ -144,13 +163,16 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	// Didn't answer on its own: force one tool-less pass so partial findings come
 	// back instead of a useless "hit the limit" sentinel.
 	res.HitLimit = true
-	res.Output = finalize(ctx, host, opts, options, msgs)
+	output, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs)
+	res.Output = output
+	res.PromptTokens += promptTokens
+	res.CompletionTokens += completionTokens
 	return res, nil
 }
 
 // finalize asks the model, with NO tools available, to write up whatever it
 // gathered. Passing no tools forces a prose answer rather than another tool call.
-func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) string {
+func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, int, int) {
 	msgs = append(msgs, api.Message{Role: "user", Content: "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."})
 	resp, err := host.ChatOnce(ctx, api.ChatRequest{
 		Model:    opts.Model,
@@ -158,9 +180,9 @@ func finalize(ctx context.Context, host ChatClient, opts Options, options map[st
 		Options:  options,
 	})
 	if err != nil || strings.TrimSpace(resp.Message.Content) == "" {
-		return "(sub-agent stopped without a final answer)"
+		return "(sub-agent stopped without a final answer)", 0, 0
 	}
-	return resp.Message.Content
+	return resp.Message.Content, resp.PromptEval, resp.EvalCount
 }
 
 func filterTools(all []tools.Tool, f func(string) bool) []tools.Tool {

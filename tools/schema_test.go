@@ -28,6 +28,34 @@ func TestJSONSchema_EditFile(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaPreservesNestedConstraints(t *testing.T) {
+	fn := Function{Name: "nested", Parameters: Schema{
+		Type: "object",
+		Properties: map[string]Property{
+			"items": {
+				Type: "array",
+				Items: &Property{Type: "object", Properties: map[string]Property{
+					"name": {Type: "string"},
+				}, Required: []string{"name"}},
+			},
+		},
+	}}
+	var schema map[string]any
+	if err := json.Unmarshal(fn.JSONSchema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema["additionalProperties"] != false {
+		t.Fatal("top-level schema should reject additional properties")
+	}
+	items := schema["properties"].(map[string]any)["items"].(map[string]any)["items"].(map[string]any)
+	if items["additionalProperties"] != false {
+		t.Fatal("nested object schema should reject additional properties")
+	}
+	if len(items["required"].([]any)) != 1 {
+		t.Fatal("nested required fields were not preserved")
+	}
+}
+
 func TestLookup(t *testing.T) {
 	r := DefaultRegistry()
 	if _, ok := r.Lookup("read_file"); !ok {

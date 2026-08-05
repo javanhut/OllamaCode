@@ -74,7 +74,7 @@ func plannerAllowed(name string) bool {
 	if plannerToolNames[name] {
 		return true
 	}
-	if !readOnlyToolNames[name] {
+	if !tools.PolicyForName(name).Allows(tools.ModePlan) {
 		return false
 	}
 	switch name {

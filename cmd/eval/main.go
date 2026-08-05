@@ -28,17 +28,19 @@ import (
 const evalSystem = `You are an automated coding agent being evaluated. Use the available tools to complete the task in the current working directory, then stop. Be efficient and do not ask questions.`
 
 type task struct {
-	name   string
-	prompt string
-	setup  map[string]string                       // relative path -> contents
-	check  func(dir, output string) (bool, string) // success criterion
+	name          string
+	prompt        string
+	setup         map[string]string // relative path -> contents
+	expectedTools []string
+	check         func(dir, output string) (bool, string) // success criterion
 }
 
 func tasks() []task {
 	return []task{
 		{
-			name:   "create-file",
-			prompt: "Create a file named hello.txt in the current directory whose entire contents are exactly: Hello, World!",
+			name:          "create-file",
+			prompt:        "Create a file named hello.txt in the current directory whose entire contents are exactly: Hello, World!",
+			expectedTools: []string{"write_file"},
 			check: func(dir, _ string) (bool, string) {
 				b, err := os.ReadFile(filepath.Join(dir, "hello.txt"))
 				if err != nil {
@@ -55,7 +57,8 @@ func tasks() []task {
 			setup: map[string]string{
 				"calc.go": "package calc\n\n// Add returns the sum of a and b.\nfunc Add(a, b int) int {\n\treturn a + a\n}\n",
 			},
-			prompt: "The Add function in calc.go has a bug: it returns a + a instead of the sum of its two parameters. Fix it so it returns the sum of a and b.",
+			prompt:        "The Add function in calc.go has a bug: it returns a + a instead of the sum of its two parameters. Fix it so it returns the sum of a and b.",
+			expectedTools: []string{"read_file", "edit_file"},
 			check: func(dir, _ string) (bool, string) {
 				b, err := os.ReadFile(filepath.Join(dir, "calc.go"))
 				if err != nil {
@@ -78,7 +81,8 @@ func tasks() []task {
 				"b.go":      "package x\n",
 				"notes.txt": "not go\n",
 			},
-			prompt: "How many files ending in .go are in the current directory (non-recursive)? Respond with ONLY the number.",
+			prompt:        "How many files ending in .go are in the current directory (non-recursive)? Respond with ONLY the number.",
+			expectedTools: []string{"list_directory", "find_files"},
 			check: func(_, output string) (bool, string) {
 				if strings.Contains(output, "2") {
 					return true, "answered correctly"
@@ -111,6 +115,12 @@ func main() {
 
 	all := tasks()
 	pass := 0
+	correctToolTasks := 0
+	totalCalls, totalErrors, totalArgFailures := 0, 0, 0
+	totalRepairs, successfulRepairs, repeatedBlocked := 0, 0, 0
+	promptTokens, completionTokens := 0, 0
+	totalSteps := 0
+	var totalDuration time.Duration
 	fmt.Printf("Evaluating model %q against %d tasks\n\n", *model, len(all))
 	for _, t := range all {
 		dir, err := os.MkdirTemp("", "ollamacode-eval-")
@@ -146,12 +156,45 @@ func main() {
 			status = "PASS"
 			pass++
 		}
-		fmt.Printf("[%s] %-12s steps=%-2d %4dms — %s\n", status, t.name, res.Steps, time.Since(start).Milliseconds(), detail)
+		duration := time.Since(start)
+		toolMatch := usesAny(res.ToolsUsed, t.expectedTools)
+		if toolMatch {
+			correctToolTasks++
+		}
+		totalSteps += res.Steps
+		totalCalls += res.ToolCalls
+		totalErrors += res.ToolErrors
+		totalArgFailures += res.ArgumentFailures
+		totalRepairs += res.RepairAttempts
+		successfulRepairs += res.RepairsSucceeded
+		repeatedBlocked += res.RepeatedBlocked
+		promptTokens += res.PromptTokens
+		completionTokens += res.CompletionTokens
+		totalDuration += duration
+		fmt.Printf("[%s] %-12s steps=%-2d calls=%-2d errors=%-2d tool_match=%-5t %4dms — %s\n",
+			status, t.name, res.Steps, res.ToolCalls, res.ToolErrors, toolMatch, duration.Milliseconds(), detail)
 		_ = os.RemoveAll(dir)
 	}
 
-	fmt.Printf("\n%d/%d passed\n", pass, len(all))
+	fmt.Printf("\n%d/%d passed · correct-tool %d/%d · steps %d · calls %d · errors %d · argument failures %d · repairs %d/%d · repeats blocked %d · tokens %d in/%d out · %dms\n",
+		pass, len(all), correctToolTasks, len(all), totalSteps, totalCalls, totalErrors,
+		totalArgFailures, successfulRepairs, totalRepairs, repeatedBlocked,
+		promptTokens, completionTokens, totalDuration.Milliseconds())
 	if pass < len(all) {
 		os.Exit(1)
 	}
+}
+
+func usesAny(got, expected []string) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	for _, used := range got {
+		for _, want := range expected {
+			if used == want {
+				return true
+			}
+		}
+	}
+	return false
 }

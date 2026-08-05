@@ -330,6 +330,19 @@ func TestToolAllowedInModeMatrix(t *testing.T) {
 	}
 }
 
+func TestReadOnlyModesRejectMutatingGitToolActions(t *testing.T) {
+	m := &Model{mode: ExploreMode}
+	branchList := tools.ToolCall{Function: tools.ToolCallFunction{Name: "git_branch", Arguments: json.RawMessage(`{"action":"list"}`)}}
+	branchCreate := tools.ToolCall{Function: tools.ToolCallFunction{Name: "git_branch", Arguments: json.RawMessage(`{"action":"create","name":"unsafe"}`)}}
+	remoteRemove := tools.ToolCall{Function: tools.ToolCallFunction{Name: "git_remote", Arguments: json.RawMessage(`{"action":"remove","name":"origin"}`)}}
+	if !m.toolCallAllowedInMode(branchList) {
+		t.Fatal("branch listing should remain available in Explore")
+	}
+	if m.toolCallAllowedInMode(branchCreate) || m.toolCallAllowedInMode(remoteRemove) {
+		t.Fatal("mutating Git actions must not pass the read-only mode boundary")
+	}
+}
+
 func TestElapsedSuffix(t *testing.T) {
 	m := &Model{}
 	if got := m.elapsedSuffix(); got != "" {

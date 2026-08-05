@@ -128,17 +128,18 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps   int                       `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
-	EmbedModel string                    `json:"embed_model,omitempty"` // model for auto-RAG embeddings
-	AutoRAG    *bool                     `json:"auto_rag,omitempty"`    // nil/true = enabled
-	Dream      *bool                     `json:"dream,omitempty"`       // nil/true = dream mode enabled
-	Face       *bool                     `json:"face,omitempty"`        // nil/true = mascot overlay shown
-	Welcome    *bool                     `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
-	Verify     *bool                     `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
-	VerifyCmd  string                    `json:"verify_cmd,omitempty"`  // override the auto-detected check
-	Profiles   map[string]ModelProfile   `json:"profiles,omitempty"`    // per-model, keyed by model name
-	Routes     map[string]string         `json:"routes,omitempty"`      // mode name -> model spec; empty disables routing
-	Providers  map[string]providerConfig `json:"providers,omitempty"`   // extra endpoints, referenced as "<name>:<model>"
+	MaxSteps   int                        `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
+	EmbedModel string                     `json:"embed_model,omitempty"` // model for auto-RAG embeddings
+	AutoRAG    *bool                      `json:"auto_rag,omitempty"`    // nil/true = enabled
+	Dream      *bool                      `json:"dream,omitempty"`       // nil/true = dream mode enabled
+	Face       *bool                      `json:"face,omitempty"`        // nil/true = mascot overlay shown
+	Welcome    *bool                      `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
+	Verify     *bool                      `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
+	VerifyCmd  string                     `json:"verify_cmd,omitempty"`  // override the auto-detected check
+	Profiles   map[string]ModelProfile    `json:"profiles,omitempty"`    // per-model, keyed by model name
+	Routes     map[string]string          `json:"routes,omitempty"`      // mode name -> model spec; empty disables routing
+	Providers  map[string]providerConfig  `json:"providers,omitempty"`   // extra endpoints, referenced as "<name>:<model>"
+	MCPServers map[string]mcpServerConfig `json:"mcp_servers,omitempty"` // external MCP stdio servers
 }
 
 // providerConfig is one additional LLM endpoint beyond the default host. The
@@ -177,13 +178,24 @@ func providerKindLabel(kind string) string {
 // plus optional sampling overrides, so num_ctx and tool support adapt to the
 // actual model instead of a hardcoded value.
 type ModelProfile struct {
-	NumCtx           int      `json:"num_ctx"`
-	SupportsTools    bool     `json:"supports_tools"`
-	SupportsThinking bool     `json:"supports_thinking,omitempty"`
-	ParamsB          float64  `json:"params_b,omitempty"` // parameter count in billions; 0 = unknown
-	Temperature      *float64 `json:"temperature,omitempty"`
-	TopP             *float64 `json:"top_p,omitempty"`
-	NumPredict       *int     `json:"num_predict,omitempty"`
+	NumCtx            int      `json:"num_ctx"`
+	SupportsTools     bool     `json:"supports_tools"`
+	SupportsThinking  bool     `json:"supports_thinking,omitempty"`
+	ParamsB           float64  `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
+	CapabilityTier    string   `json:"capability_tier,omitempty"` // small, capable, or strong; overrides ParamsB tiering
+	MaxVisibleTools   int      `json:"max_visible_tools,omitempty"`
+	ProfileMaxSteps   int      `json:"max_steps,omitempty"`
+	ParallelTools     *bool    `json:"parallel_tool_calls,omitempty"`
+	MaxParallelTools  int      `json:"max_parallel_tools,omitempty"`
+	Delegation        *bool    `json:"delegation,omitempty"`
+	RAGTokens         int      `json:"rag_tokens,omitempty"`
+	RAGTopK           int      `json:"rag_top_k,omitempty"`
+	ActionTemperature *float64 `json:"action_temperature,omitempty"`
+	ProseTemperature  *float64 `json:"prose_temperature,omitempty"`
+	ReviewPass        *bool    `json:"review_pass,omitempty"`
+	Temperature       *float64 `json:"temperature,omitempty"`
+	TopP              *float64 `json:"top_p,omitempty"`
+	NumPredict        *int     `json:"num_predict,omitempty"`
 }
 
 // smallModelParamsB is the tier cutoff: models under this many billion
@@ -192,7 +204,44 @@ type ModelProfile struct {
 const smallModelParamsB = 15
 
 func (p ModelProfile) smallModel() bool {
+	switch strings.ToLower(strings.TrimSpace(p.CapabilityTier)) {
+	case "small":
+		return true
+	case "capable", "strong":
+		return false
+	}
 	return p.ParamsB > 0 && p.ParamsB < smallModelParamsB
+}
+
+func (p ModelProfile) parallelToolCalls() bool {
+	if p.ParallelTools != nil {
+		return *p.ParallelTools
+	}
+	return !p.smallModel()
+}
+
+func (p ModelProfile) maxParallelToolCalls() int {
+	if !p.parallelToolCalls() {
+		return 1
+	}
+	if p.MaxParallelTools > 0 {
+		return p.MaxParallelTools
+	}
+	return 4
+}
+
+func (p ModelProfile) canDelegate() bool {
+	if p.Delegation != nil {
+		return *p.Delegation
+	}
+	return !p.smallModel()
+}
+
+func (p ModelProfile) reviewPass() bool {
+	if p.ReviewPass != nil {
+		return *p.ReviewPass
+	}
+	return strings.EqualFold(strings.TrimSpace(p.CapabilityTier), "strong")
 }
 
 func (m *Model) logActivity(s string) {
@@ -223,6 +272,7 @@ type Model struct {
 	cfg            config
 	host           api.OllamaHost
 	tools          *tools.Registry
+	mcpServers     []*tools.ExternalServer
 	notes          *sessionNotes
 	todos          *todoList
 	mode           Mode
@@ -313,6 +363,7 @@ type Model struct {
 	verifying           bool            // a compile check is running
 	verifyAttempts      int             // failed compile checks this turn
 	challengedThisTurn  bool            // self-check challenge already issued this turn
+	reviewedThisTurn    bool            // optional adversarial review already issued this turn
 	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
 	rereadEvents        int             // re-reads of unchanged files this turn
 	rereadStopAnnounced bool            // hard-stop explanation for re-read loops emitted
@@ -548,6 +599,11 @@ func New() *Model {
 	registry.Register(tools.CodeIndexTool(liveEmbedder{m}))
 	registry.Register(tools.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
+	var mcpWarnings []string
+	m.mcpServers, mcpWarnings = connectMCPServers(cfg.MCPServers, registry)
+	if len(mcpWarnings) > 0 {
+		m.toast = strings.Join(mcpWarnings, " · ")
+	}
 	// cfg.Model may carry a provider prefix ("cursor:opus-5"), so resolve it the
 	// same way a route spec is, rather than using it as a bare model name against
 	// the default host.

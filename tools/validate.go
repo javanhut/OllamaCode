@@ -16,6 +16,7 @@ type ValidationError struct {
 	Tool    string
 	JSONErr error             // non-nil if the raw arguments aren't a JSON object
 	Missing []string          // required fields that are absent
+	Unknown []string          // fields not declared by the schema
 	Wrong   map[string]string // field -> "expected X, got Y"
 	BadEnum map[string]string // field -> "must be one of [...]"
 	Fn      Function          // for rendering the expected shape
@@ -30,6 +31,9 @@ func (e *ValidationError) Error() string {
 	}
 	if len(e.Missing) > 0 {
 		fmt.Fprintf(&b, " Missing required field(s): %s.", strings.Join(e.Missing, ", "))
+	}
+	if len(e.Unknown) > 0 {
+		fmt.Fprintf(&b, " Unknown field(s): %s.", strings.Join(e.Unknown, ", "))
 	}
 	for f, m := range e.Wrong {
 		fmt.Fprintf(&b, " Field %q: %s.", f, m)
@@ -77,30 +81,34 @@ func (f Function) argShape() string {
 }
 
 // ValidateArgs checks a tool call's raw arguments against the tool's schema.
-// It is intentionally lenient on types (weak models often send a number as a
-// string) and only hard-fails on non-object JSON, missing required fields, and
-// clearly-wrong enum values — the cheap, high-frequency mistakes. Handlers keep
-// owning their own deep validation.
 func ValidateArgs(fn Function, raw json.RawMessage) error {
+	_, err := NormalizeArgs(fn, raw)
+	return err
+}
+
+// NormalizeArgs validates arguments and converts quoted booleans and numbers
+// into the concrete JSON types expected by handlers. Previously validation
+// accepted those values but handlers then failed to unmarshal them.
+func NormalizeArgs(fn Function, raw json.RawMessage) (json.RawMessage, error) {
 	verr := &ValidationError{Tool: fn.Name, Fn: fn, Raw: raw}
 
-	// Empty args are OK only if there are no required fields.
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		if len(fn.Parameters.Required) == 0 {
-			return nil
+			return json.RawMessage(`{}`), nil
 		}
 		verr.Missing = append([]string(nil), fn.Parameters.Required...)
-		return verr
+		return nil, verr
 	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		verr.JSONErr = err
-		return verr
+		return nil, verr
 	}
 
 	for _, req := range fn.Parameters.Required {
-		if _, ok := fields[req]; !ok {
+		value, ok := fields[req]
+		if !ok || jsonKind(value) == "null" {
 			verr.Missing = append(verr.Missing, req)
 		}
 	}
@@ -108,13 +116,17 @@ func ValidateArgs(fn Function, raw json.RawMessage) error {
 	for name, val := range fields {
 		prop, ok := fn.Parameters.Properties[name]
 		if !ok {
-			continue // unknown field: ignore, don't fail
+			verr.Unknown = append(verr.Unknown, name)
+			continue
 		}
-		if !typeLooseMatch(prop.Type, val) {
+		normalized, valid := normalizeValue(prop, val)
+		if !valid {
 			if verr.Wrong == nil {
 				verr.Wrong = map[string]string{}
 			}
 			verr.Wrong[name] = fmt.Sprintf("expected %s, got %s", prop.Type, jsonKind(val))
+		} else {
+			fields[name] = normalized
 		}
 		if len(prop.Enum) > 0 {
 			var s string
@@ -127,10 +139,15 @@ func ValidateArgs(fn Function, raw json.RawMessage) error {
 		}
 	}
 
-	if verr.JSONErr != nil || len(verr.Missing) > 0 || len(verr.Wrong) > 0 || len(verr.BadEnum) > 0 {
-		return verr
+	if verr.JSONErr != nil || len(verr.Missing) > 0 || len(verr.Unknown) > 0 || len(verr.Wrong) > 0 || len(verr.BadEnum) > 0 {
+		sort.Strings(verr.Unknown)
+		return nil, verr
 	}
-	return nil
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // jsonKind reports the JSON kind of a raw value by peeking the first byte.
@@ -155,48 +172,79 @@ func jsonKind(raw json.RawMessage) string {
 	}
 }
 
-// typeLooseMatch reports whether a raw JSON value is acceptable for a schema
-// type. It is coercion-friendly: a quoted number/bool is accepted where a
-// number/boolean is expected, since weak models frequently over-quote.
-func typeLooseMatch(schemaType string, raw json.RawMessage) bool {
+func normalizeValue(prop Property, raw json.RawMessage) (json.RawMessage, bool) {
 	kind := jsonKind(raw)
 	if kind == "null" {
-		return true // treat null as "absent-ish"; let the handler decide
+		return raw, true
 	}
-	switch schemaType {
+	switch prop.Type {
 	case "", "any":
-		return true
+		return raw, true
 	case "string":
-		return kind == "string"
-	case "number", "integer":
+		return raw, kind == "string"
+	case "integer":
 		if kind == "number" {
-			return true
+			return raw, true
 		}
-		// accept a numeric string
 		var s string
-		if json.Unmarshal(raw, &s) == nil {
-			if _, err := strconv.ParseFloat(s, 64); err == nil {
-				return true
-			}
+		if json.Unmarshal(raw, &s) != nil {
+			return nil, false
 		}
-		return false
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		return json.RawMessage(strconv.FormatInt(n, 10)), true
+	case "number":
+		if kind == "number" {
+			return raw, true
+		}
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil, false
+		}
+		n, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, false
+		}
+		return json.RawMessage(strconv.FormatFloat(n, 'g', -1, 64)), true
 	case "boolean":
 		if kind == "boolean" {
-			return true
+			return raw, true
 		}
 		var s string
-		if json.Unmarshal(raw, &s) == nil {
-			if _, err := strconv.ParseBool(s); err == nil {
-				return true
-			}
+		if json.Unmarshal(raw, &s) != nil {
+			return nil, false
 		}
-		return false
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			return nil, false
+		}
+		return json.RawMessage(strconv.FormatBool(v)), true
 	case "object":
-		return kind == "object"
+		return raw, kind == "object"
 	case "array":
-		return kind == "array"
+		if kind != "array" {
+			return nil, false
+		}
+		if prop.Items == nil {
+			return raw, true
+		}
+		var values []json.RawMessage
+		if json.Unmarshal(raw, &values) != nil {
+			return nil, false
+		}
+		for i, value := range values {
+			normalized, ok := normalizeValue(*prop.Items, value)
+			if !ok {
+				return nil, false
+			}
+			values[i] = normalized
+		}
+		out, err := json.Marshal(values)
+		return out, err == nil
 	default:
-		return true
+		return raw, true
 	}
 }
 
@@ -215,19 +263,13 @@ func (r *Registry) Lookup(name string) (Tool, bool) {
 func (f Function) JSONSchema() json.RawMessage {
 	props := map[string]any{}
 	for name, p := range f.Parameters.Properties {
-		entry := map[string]any{}
-		if p.Type != "" {
-			entry["type"] = p.Type
-		}
-		if p.Description != "" {
-			entry["description"] = p.Description
-		}
-		if len(p.Enum) > 0 {
-			entry["enum"] = p.Enum
-		}
-		props[name] = entry
+		props[name] = propertySchema(p)
 	}
-	schema := map[string]any{"type": "object", "properties": props}
+	additional := false
+	if f.Parameters.AdditionalProperties != nil {
+		additional = *f.Parameters.AdditionalProperties
+	}
+	schema := map[string]any{"type": "object", "properties": props, "additionalProperties": additional}
 	if len(f.Parameters.Required) > 0 {
 		schema["required"] = f.Parameters.Required
 	}
@@ -236,6 +278,38 @@ func (f Function) JSONSchema() json.RawMessage {
 		return json.RawMessage(`{"type":"object"}`)
 	}
 	return b
+}
+
+func propertySchema(p Property) map[string]any {
+	entry := map[string]any{}
+	if p.Type != "" {
+		entry["type"] = p.Type
+	}
+	if p.Description != "" {
+		entry["description"] = p.Description
+	}
+	if len(p.Enum) > 0 {
+		entry["enum"] = p.Enum
+	}
+	if p.Items != nil {
+		entry["items"] = propertySchema(*p.Items)
+	}
+	if p.Type == "object" {
+		properties := map[string]any{}
+		for name, child := range p.Properties {
+			properties[name] = propertySchema(child)
+		}
+		entry["properties"] = properties
+		additional := false
+		if p.AdditionalProperties != nil {
+			additional = *p.AdditionalProperties
+		}
+		entry["additionalProperties"] = additional
+		if len(p.Required) > 0 {
+			entry["required"] = p.Required
+		}
+	}
+	return entry
 }
 
 // Names returns the registered tool names, sorted.
