@@ -4,8 +4,12 @@ package tui
 // model reports a larger window — keeps memory/latency sane on local hardware.
 const maxContextBudget = 131072
 
-// defaultContextLimit is the fallback when /api/show reports nothing usable.
-const defaultContextLimit = 124000
+// defaultContextLimit is the conservative fallback when /api/show reports
+// nothing usable. Allocating 124K blindly made a transient introspection error
+// reserve a huge KV cache on local hardware and dramatically slowed startup.
+// Models that advertise a larger window still get it (up to maxContextBudget),
+// and users can override this with `/model ctx`.
+const defaultContextLimit = 32768
 
 // resolveProfile loads the cached profile for the current model, or discovers it
 // via /api/show (context length + tool support) and caches it. It also applies

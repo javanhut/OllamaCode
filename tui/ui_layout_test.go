@@ -208,6 +208,38 @@ func TestScrollCueDoesNotResizeTheLayout(t *testing.T) {
 	}
 }
 
+func TestResizeKeepsTranscriptPinnedToBottom(t *testing.T) {
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m := mm.(*Model)
+	for i := range 80 {
+		m.history = append(m.history, api.Message{Role: "user", Content: fmt.Sprintf("line %d", i)})
+	}
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+
+	mm, _ = m.Update(tea.WindowSizeMsg{Width: 72, Height: 15})
+	m = mm.(*Model)
+	if !m.viewport.AtBottom() {
+		t.Fatalf("resize moved a bottom-pinned transcript to offset %d", m.viewport.YOffset())
+	}
+}
+
+func TestResizePreservesManualScrollPosition(t *testing.T) {
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m := mm.(*Model)
+	for i := range 80 {
+		m.history = append(m.history, api.Message{Role: "user", Content: fmt.Sprintf("line %d", i)})
+	}
+	m.refreshTranscript()
+	m.viewport.SetYOffset(5)
+
+	mm, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 18})
+	m = mm.(*Model)
+	if m.viewport.YOffset() != 5 {
+		t.Fatalf("resize changed manual scroll offset to %d, want 5", m.viewport.YOffset())
+	}
+}
+
 // Sealed turns render once; only the open turn is rebuilt each frame.
 func TestSealedTurnsAreCached(t *testing.T) {
 	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 30})

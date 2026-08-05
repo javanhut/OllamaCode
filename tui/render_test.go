@@ -85,3 +85,18 @@ func TestDiffLineKind(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamingTextUsesStablePlainRendering(t *testing.T) {
+	m := &Model{mode: ExploreMode, md: newMarkdownRenderer()}
+	m.viewport.SetWidth(80)
+	turn := assistantTurn{
+		streaming: true,
+		segments:  []turnSegment{{text: "# unfinished heading\n```go\nfunc main()"}},
+	}
+	var b strings.Builder
+	m.writeAssistantTurn(&b, &turn, false)
+	got := stripANSI(b.String())
+	if !strings.Contains(got, "# unfinished heading") || !strings.Contains(got, "```go") {
+		t.Fatalf("streaming text was reformatted before completion:\n%s", got)
+	}
+}

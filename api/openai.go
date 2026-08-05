@@ -232,7 +232,7 @@ func (o OllamaHost) postOpenAI(ctx context.Context, payload oaRequest) (io.ReadC
 	}
 	o.applyAuth(req)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ollamaHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}
@@ -441,7 +441,7 @@ func (o OllamaHost) modelsOpenAI() (*ModelListResponse, error) {
 		return nil, err
 	}
 	o.applyAuth(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ollamaHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch models: %v", err)
 	}

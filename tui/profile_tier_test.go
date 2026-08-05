@@ -89,3 +89,12 @@ func TestSmallModelTemperatureDefault(t *testing.T) {
 		t.Fatal("big model without override should not set temperature")
 	}
 }
+
+func TestFallbackContextIsLocalHardwareSafe(t *testing.T) {
+	if defaultContextLimit > 32768 {
+		t.Fatalf("fallback context %d allocates too much KV cache when model introspection fails", defaultContextLimit)
+	}
+	if defaultContextLimit <= generationReserve {
+		t.Fatalf("fallback context %d leaves no useful prompt budget", defaultContextLimit)
+	}
+}

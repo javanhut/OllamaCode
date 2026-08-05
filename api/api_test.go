@@ -41,7 +41,11 @@ func TestGetModelList(t *testing.T) {
 }
 
 func TestContinuousChat(t *testing.T) {
+	var gotRequest ChatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Fatal("expected flusher")
@@ -86,6 +90,25 @@ func TestContinuousChat(t *testing.T) {
 done:
 	if content.String() != "Hello world" {
 		t.Errorf("expected 'Hello world', got %q", content.String())
+	}
+	if gotRequest.KeepAlive != defaultKeepAlive {
+		t.Errorf("keep_alive = %q, want %q", gotRequest.KeepAlive, defaultKeepAlive)
+	}
+}
+
+func TestContinuousChatIncludesServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"model needs more memory"}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	host := OllamaHost{uri: server.URL}
+	responses, errs := host.ContinuousChat(context.Background(), ChatRequest{Model: "too-big"})
+	for range responses {
+	}
+	err := <-errs
+	if err == nil || !strings.Contains(err.Error(), "model needs more memory") {
+		t.Fatalf("expected actionable server detail, got %v", err)
 	}
 }
 

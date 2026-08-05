@@ -261,9 +261,15 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	for i := 0; i < len(t.segments); i++ {
 		seg := t.segments[i]
 		if seg.tool == nil {
-			// Partial stream text changes every tick, so skip the render cache
-			// while streaming instead of caching strings that will never recur.
-			b.WriteString(m.renderMarkdown(seg.text, !t.streaming))
+			if t.streaming {
+				// Rendering incomplete Markdown makes the layout jump whenever an
+				// unfinished fence/list/table becomes valid, and rerunning Glamour
+				// over the growing answer every frame is quadratic work. Stream
+				// stable sanitized text; render the final Markdown once at completion.
+				b.WriteString(stripControl(seg.text))
+			} else {
+				b.WriteString(m.renderMarkdown(seg.text, true))
+			}
 			b.WriteString("\n")
 			continue
 		}

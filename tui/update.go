@@ -500,7 +500,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinkTail = "" // answer started; drop the ticker
 			m.streamBuf.WriteString(msg.content)
 		}
-		if time.Since(m.lastRenderTime) > 60*time.Millisecond || strings.Contains(msg.content, "\n") {
+		// Cap paint frequency independently of token boundaries. Newline tokens
+		// used to bypass the cap and cause rapid full-screen redraws and flicker.
+		if time.Since(m.lastRenderTime) > 80*time.Millisecond {
 			m.refreshTranscript()
 			m.lastRenderTime = time.Now()
 			if wasAtBottom {

@@ -579,6 +579,10 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	// Resizing the terminal or growing/shrinking the input changes the viewport
+	// dimensions. Preserve bottom pinning so the newest streamed text does not
+	// jump off-screen; a user who deliberately scrolled up keeps their offset.
+	wasAtBottom := !m.ready || m.viewport.AtBottom()
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	m.keyInput.SetWidth(min(m.width-6, 80))
 	m.nameInput.SetWidth(min(m.width-6, 80))
@@ -684,6 +688,9 @@ func (m *Model) layout() {
 		notesText = "(empty)"
 	}
 	m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 
 }
 
