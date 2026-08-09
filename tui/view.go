@@ -269,30 +269,46 @@ func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
 	}
+	return m.suggestionMenuView(m.slashSuggestions, slashDesc, m.slashSelected)
+}
+
+// mentionSuggestionsView renders the @file completion menu — same chrome as
+// the slash menu, no description column (paths are self-describing).
+func (m *Model) mentionSuggestionsView() string {
+	if !m.mentionVisible || len(m.mentionSuggestions) == 0 {
+		return ""
+	}
+	return m.suggestionMenuView(m.mentionSuggestions, func(string) string { return "" }, m.mentionSelected)
+}
+
+// suggestionMenuView draws one completion dropdown: highlighted row, scrolled
+// window, and a hint/caption footer. Shared by the slash-command and @file
+// menus so they look and behave identically.
+func (m *Model) suggestionMenuView(suggestions []string, descFor func(string) string, selected int) string {
 	c := m.mode.color()
 	nameStyle := lipgloss.NewStyle().Foreground(c).Bold(true)
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	selStyle := lipgloss.NewStyle().Background(c).Foreground(lipgloss.Color("232")).Bold(true)
 
-	total := len(m.slashSuggestions)
+	total := len(suggestions)
 	rows := slashMenuRows
 	if m.height > 0 {
 		rows = clamp(m.height/3, 3, slashMenuRows) // never eat the transcript on a short terminal
 	}
-	win := pickerWindow(total, m.slashSelected, rows)
+	win := pickerWindow(total, selected, rows)
 
 	hint := "↑↓ move · tab complete · enter select"
 	counter := ""
 	if win.end-win.start < total {
-		counter = fmt.Sprintf("%d/%d", m.slashSelected+1, total)
+		counter = fmt.Sprintf("%d/%d", selected+1, total)
 	}
 
 	// Measure across every match, not just the visible window, so the box
 	// doesn't jitter in width while scrolling.
 	nameW, descW := 0, 0
-	for _, s := range m.slashSuggestions {
+	for _, s := range suggestions {
 		nameW = max(nameW, lipgloss.Width(s))
-		descW = max(descW, lipgloss.Width(slashDesc(s)))
+		descW = max(descW, lipgloss.Width(descFor(s)))
 	}
 	inner := max(nameW+descW+4, lipgloss.Width(hint)+lipgloss.Width(counter)+2)
 	if m.width > 0 {
@@ -302,9 +318,9 @@ func (m *Model) slashSuggestionsView() string {
 
 	var lines []string
 	for i := win.start; i < win.end; i++ {
-		s := m.slashSuggestions[i]
-		desc := slashDesc(s)
-		if i == m.slashSelected {
+		s := suggestions[i]
+		desc := descFor(s)
+		if i == selected {
 			text := fmt.Sprintf("› %-*s  %s", nameW, s, desc)
 			lines = append(lines, selStyle.Width(inner).Render(truncatePlain(text, inner)))
 			continue
@@ -436,6 +452,9 @@ func (m *Model) inputView() string {
 		bands = append(bands, s)
 	}
 	if s := m.slashSuggestionsView(); s != "" {
+		bands = append(bands, s)
+	}
+	if s := m.mentionSuggestionsView(); s != "" {
 		bands = append(bands, s)
 	}
 	if status := m.narrowStatusLine(); status != "" {

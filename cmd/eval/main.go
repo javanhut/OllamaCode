@@ -172,6 +172,7 @@ func main() {
 	minTools := flag.Float64("min-tool-rate", 1, "minimum passing tool-contract rate from 0 to 1")
 	tracePath := flag.String("trace", "", "optional redacted JSONL trace path")
 	legacyResults := flag.Bool("legacy-results", false, "use pre-envelope prose tool results for A/B comparison")
+	constrain := flag.Bool("constrain", false, "first-pass schema-constrained tool output (small-model posture; native Ollama only)")
 	taskName := flag.String("task", "", "run only the named fixture")
 	flag.Parse()
 	if *promoteTrace != "" {
@@ -201,7 +202,7 @@ func main() {
 		defer recorder.Close()
 	}
 	structured := !*legacyResults
-	r, err := runEvaluation(*model, *host, *steps, *runs, !*jsonOutput, recorder, &structured, *taskName)
+	r, err := runEvaluation(*model, *host, *steps, *runs, !*jsonOutput, recorder, &structured, *taskName, *constrain)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -218,7 +219,7 @@ func main() {
 	}
 }
 
-func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string) (report, error) {
+func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string, constrain bool) (report, error) {
 	h := api.OllamaHost{}
 	h.SetURI(host)
 	rep := report{Version: 1, Model: model, Host: host, StartedAt: time.Now().UTC(), TrialsPerTask: trials}
@@ -235,10 +236,16 @@ func runEvaluation(model, host string, steps, trials int, verbose bool, recorder
 		}
 		tasks = matched
 	}
+	// One rung cache per evaluation: a host that rejects a schema rung is
+	// probed once across all tasks and trials, not once per request.
+	var constraintCache *agent.ConstraintCache
+	if constrain {
+		constraintCache = agent.NewConstraintCache()
+	}
 	var durations []int64
 	for trial := 1; trial <= trials; trial++ {
 		for _, t := range tasks {
-			result, err := runTask(h, model, steps, trial, t, recorder, structured)
+			result, err := runTask(h, model, steps, trial, t, recorder, structured, constrain, constraintCache)
 			if err != nil {
 				return rep, err
 			}
@@ -261,7 +268,7 @@ func runEvaluation(model, host string, steps, trials int, verbose bool, recorder
 	return rep, nil
 }
 
-func runTask(host api.OllamaHost, model string, steps, trial int, t task, recorder *tracepkg.Recorder, structured *bool) (runResult, error) {
+func runTask(host api.OllamaHost, model string, steps, trial int, t task, recorder *tracepkg.Recorder, structured *bool, constrain bool, constraintCache *agent.ConstraintCache) (runResult, error) {
 	dir, err := os.MkdirTemp("", "ollamacode-eval-")
 	if err != nil {
 		return runResult{}, err
@@ -289,6 +296,7 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 	start := time.Now()
 	res, runErr := agent.Run(ctx, host, tools.DefaultRegistry(), t.Prompt, agent.Options{
 		Model: model, System: evalSystem, MaxSteps: steps, ToolFilter: t.Filter, Trace: recorder, StructuredResults: structured,
+		ConstrainToolCalls: constrain, Constraints: constraintCache,
 	})
 	cancel()
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // maxSnapshotBytes bounds per-file checkpoint memory; larger files are not
@@ -34,6 +36,19 @@ type checkpointStore struct {
 }
 
 const maxUndoDepth = 25
+
+// checkpointBeforeCall returns the executor Before hook that snapshots every
+// file a mutating tool call is about to touch. Direct tool calls and sub-agent
+// runs share it, so delegated writes land in the parent turn's checkpoint and
+// one /undo rewinds the whole delegation. First-version-wins per path: a file
+// already snapshotted this turn is never re-read.
+func (m *Model) checkpointBeforeCall() func(tools.ToolCall) {
+	return func(call tools.ToolCall) {
+		if paths := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
+			m.snapshotBeforeMutate(paths)
+		}
+	}
+}
 
 // snapshotBeforeMutate records the current state of each path before a mutating
 // tool runs, once per path per turn. Safe to call from a tool goroutine.

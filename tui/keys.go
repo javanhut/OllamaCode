@@ -397,12 +397,14 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.slashVisible = false
 			m.slashSuggestions = nil
+			m.dismissMention()
 			m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
 			return m, nil
 		}
 
 		m.slashVisible = false
 		m.slashSuggestions = nil
+		m.dismissMention()
 		m.toast = ""
 		if val == "/clearnotes" || val == "/notes clear" || val == "/notes reset" {
 			m.input.Reset()
@@ -501,6 +503,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.turnRecords = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
+			m.mentionBlock = "" // attachments belong to the conversation just cleared
 			m.routeDeclines = 0 // new conversation: the routing offer is worth making again
 			m.refreshTranscript()
 			m.viewport.GotoTop()
@@ -680,16 +683,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.toast = "archive not initialized"
 				return m, nil
 			}
-			// Just show the most recent archive for demo
-			var lastKey string
-			for k := range m.kvStore.GetFullData() {
-				if strings.HasPrefix(k, "archive_") {
-					if k > lastKey {
-						lastKey = k
-					}
-				}
-			}
-			if lastKey == "" {
+			// Just show the most recent archive for demo. LatestKey parses the
+			// archive_<unix> suffix numerically — lexical order breaks across
+			// digit-width boundaries.
+			lastKey, ok := m.kvStore.LatestKey("archive_")
+			if !ok {
 				m.toast = "no archives found"
 				return m, nil
 			}

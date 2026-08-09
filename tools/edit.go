@@ -216,6 +216,9 @@ func EditFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			data, err := os.ReadFile(a.Path)
 			if err != nil {
 				return "", err

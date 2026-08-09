@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -33,5 +34,47 @@ func TestTodoWriteTool(t *testing.T) {
 	}
 	if list.openCount() != 1 {
 		t.Fatalf("openCount = %d, want 1", list.openCount())
+	}
+}
+
+func TestTodoReadTool(t *testing.T) {
+	list := &todoList{}
+	read := todoReadTool(list)
+
+	// An empty list reads back as an empty array, not null, so the output is
+	// always valid todo_write input.
+	out, err := read.Handler(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != `{"todos":[]}` {
+		t.Fatalf("empty read = %q", out)
+	}
+
+	write := todoWriteTool(list)
+	if _, err := write.Handler(context.Background(), []byte(`{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	out, err = read.Handler(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var round struct {
+		Todos []todoItem `json:"todos"`
+	}
+	if err := json.Unmarshal([]byte(out), &round); err != nil {
+		t.Fatalf("read output not in todo_write's shape: %v", err)
+	}
+	if len(round.Todos) != 2 || round.Todos[1].Status != todoInProgress {
+		t.Fatalf("read items = %+v", round.Todos)
+	}
+
+	// Read-modify-write: the read output must feed straight back into
+	// todo_write and reproduce the same list.
+	if _, err := write.Handler(context.Background(), []byte(out)); err != nil {
+		t.Fatalf("read output must be valid todo_write input: %v", err)
+	}
+	if items := list.get(); len(items) != 2 || items[0].Content != "a" {
+		t.Fatalf("round-trip items = %+v", items)
 	}
 }

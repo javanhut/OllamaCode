@@ -30,6 +30,19 @@ type Options struct {
 	ToolFilter        func(name string) bool // which tools the agent may see/call (nil = all)
 	Trace             *tracepkg.Recorder     // optional redacted JSONL recorder
 	StructuredResults *bool                  // nil/true=envelopes; false for A/B evaluation
+	// ConstrainToolCalls asks for first-pass schema-constrained tool output
+	// (small-tier models on native Ollama; see constrain.go). The format repair
+	// path stays as the fallback for argument-level mistakes.
+	ConstrainToolCalls bool
+	// Constraints carries the per-model+host rung cache across runs (a parent
+	// shares its cache with spawned sub-agents); nil uses a throwaway cache so
+	// the fallback ladder still works within this run.
+	Constraints *ConstraintCache
+	// Before, when set, is forwarded to the executor and runs synchronously
+	// before each dispatched tool call (see Executor.Before). The TUI installs
+	// it to checkpoint a child's file-mutating calls into the PARENT turn's
+	// /undo bank, so one undo rewinds a whole delegation. Nil means no hook.
+	Before func(tools.ToolCall)
 }
 
 // Result is the outcome of a headless run.
@@ -87,6 +100,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 
 	var res Result
 	executor := Executor{Registry: reg, Host: host, Model: opts.Model, NumCtx: opts.NumCtx, StructuredResults: opts.StructuredResults,
+		Before: opts.Before,
 		Observe: func(event ExecutionEvent) {
 			if opts.Trace == nil {
 				return
@@ -104,13 +118,38 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	fpCount := map[string]int{} // call fingerprint -> times dispatched
 	var recent []string         // ring of recent fingerprints for oscillation
 
+	// First-pass constrained decoding is opted into by callers that know the
+	// model's tier; the loop additionally requires a native-Ollama host and a
+	// non-empty tool list (a tool-less request is a prose turn).
+	var constraints *ConstraintCache
+	constraintKey := ""
+	if opts.ConstrainToolCalls && ConstrainedDecodingSupported(host) {
+		constraints = opts.Constraints
+		if constraints == nil {
+			constraints = NewConstraintCache()
+		}
+		constraintKey = ConstraintKey(host, opts.Model)
+	}
+
 	for res.Steps < opts.MaxSteps {
-		resp, err := host.ChatOnce(ctx, api.ChatRequest{
+		req := api.ChatRequest{
 			Model:    opts.Model,
 			Messages: msgs,
 			Tools:    defs,
 			Options:  options,
-		})
+		}
+		constrained := false
+		if constraints != nil {
+			req.Format, constrained = constraints.Format(constraintKey, defs)
+		}
+		resp, err := host.ChatOnce(ctx, req)
+		// A host that rejects the schema (400 from the grammar conversion) gets
+		// an immediate retry at the next-weaker rung; the cache starts later
+		// requests at the working rung, so the probe cost is paid once.
+		for err != nil && constrained && IsFormatRejection(err) && constraints.Downgrade(constraintKey) {
+			req.Format, constrained = constraints.Format(constraintKey, defs)
+			resp, err = host.ChatOnce(ctx, req)
+		}
 		if err != nil {
 			return res, err
 		}
@@ -125,7 +164,15 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			calls = reg.ParseToolCallsFromContent(resp.Message.Content)
 		}
 		if len(calls) == 0 {
-			res.Output = resp.Message.Content
+			output := resp.Message.Content
+			// A constrained reply that isn't a tool call chose the prose escape
+			// branch; unwrap it so callers see the answer, not the envelope.
+			if constrained {
+				if prose, ok := UnwrapConstrainedProse(output); ok {
+					output = prose
+				}
+			}
+			res.Output = output
 			if opts.Trace != nil {
 				_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_end", Model: opts.Model, Metadata: map[string]any{"reason": "completed", "steps": res.Steps, "prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens}})
 			}

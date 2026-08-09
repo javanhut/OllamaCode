@@ -41,7 +41,7 @@ var (
 // it keeps running after the tool call returns. Returns immediately with a job
 // handle; the command is reaped by a background goroutine.
 func startBackgroundShell(command, workingDir, stdin string) (*bgJob, error) {
-	cmd := exec.Command("sh", "-c", command)
+	cmd := newShellCommand(command)
 	configureShellCommand(cmd) // own process group, so kill reaches children
 	if workingDir != "" {
 		cmd.Dir = workingDir

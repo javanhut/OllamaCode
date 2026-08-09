@@ -19,7 +19,16 @@ import (
 )
 
 var diffPreviewTools = map[string]bool{
-	"write_file": true, "edit_file": true, "apply_diff": true, "append_file": true,
+	"write_file": true, "edit_file": true, "append_file": true,
+}
+
+// webContentTools pull attacker-controlled bytes into the conversation. Their
+// results are wrapped as UNTRUSTED, but the model still reasons over the
+// text, so once any of these has been recorded this turn the fetched-content
+// gate (noteFetchedContent / shouldPromptPermission) treats every later
+// destructive call as potentially injected and asks the user to confirm it.
+var webContentTools = map[string]bool{
+	"web_fetch": true, "web_search": true, "web_search_api": true, "web_crawl": true,
 }
 
 type pendingBatch struct {
@@ -37,11 +46,7 @@ func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message
 	m.logActivity("Tool: " + call.Function.Name)
 	executor := agent.Executor{
 		Registry: m.tools, Host: m.host, Model: m.modelName, NumCtx: m.contextLimit,
-		Before: func(normalized tools.ToolCall) {
-			if paths := tools.MutatedPaths(normalized.Function.Name, normalized.Function.Arguments); len(paths) > 0 {
-				m.snapshotBeforeMutate(paths)
-			}
-		},
+		Before: m.checkpointBeforeCall(),
 		Observe: func(event agent.ExecutionEvent) {
 			if m.trace == nil {
 				return
@@ -118,7 +123,7 @@ func toolCallTimeout(call tools.ToolCall) time.Duration {
 		"get_working_directory", "process_list", "disk_usage", "system_info",
 		"read_session_notes", "recall":
 		return localInspectToolTimeout
-	case "write_file", "edit_file", "append_file", "apply_diff", "delete_file", "move_file",
+	case "write_file", "edit_file", "append_file", "delete_file", "move_file",
 		"copy_file", "make_directory", "touch", "git_add", "git_commit", "git_checkout",
 		"git_stash", "git_merge", "git_reset", "git_remote", "process_kill",
 		"update_session_notes", "append_session_notes", "remember", "forget":
@@ -156,6 +161,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		batchCalls := m.pending.calls
 		batchResults := m.pending.results
 		m.history = append(m.history, batchResults...)
+		m.noteFetchedContent(batchCalls, batchResults)
 		m.pending = nil
 		m.markToolsDone()
 
@@ -407,6 +413,12 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if m.shouldPromptPermission(call) && !exploreReadOnly {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)
+			// When the fetched-content gate is what stands between this call
+			// and execution, say so — y/N is then a decision about whether the
+			// action is the user's intent or an injected instruction.
+			if m.mode == AutoMode && m.fetchedContent {
+				m.pending.preview = "Web content entered the conversation this turn — confirm this action is your intent, not an injected instruction.\n" + m.pending.preview
+			}
 			// Name the model the switch would route to, so y/N is a decision
 			// about which model runs next, not just which mode.
 			if call.Function.Name == "switch_mode" {
@@ -487,11 +499,6 @@ func computePreview(call tools.ToolCall) string {
 		oldStr, _ := args["old_string"].(string)
 		newStr, _ := args["new_string"].(string)
 		return path + "\n" + simpleDiff(oldStr, newStr, 3)
-	case "apply_diff":
-		path, _ := args["path"].(string)
-		search, _ := args["search"].(string)
-		replace, _ := args["replace"].(string)
-		return path + "\n" + simpleDiff(search, replace, 3)
 	case "append_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)
@@ -606,6 +613,24 @@ func simpleDiff(old, new string, context int) string {
 	return b.String()
 }
 
+// noteFetchedContent records when untrusted web bytes actually entered the
+// conversation this turn (see webContentTools). A failed fetch returns an
+// error string without the untrusted markers and does not trip the gate.
+func (m *Model) noteFetchedContent(calls []tools.ToolCall, results []api.Message) {
+	if m.fetchedContent {
+		return
+	}
+	for i, call := range calls {
+		if !webContentTools[call.Function.Name] || i >= len(results) {
+			continue
+		}
+		if strings.Contains(results[i].Content, "UNTRUSTED EXTERNAL CONTENT") {
+			m.fetchedContent = true
+			return
+		}
+	}
+}
+
 func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
 	if m.pending.allowAll {
 		return false
@@ -620,6 +645,13 @@ func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
 		return false
 	}
 	if m.mode == AutoMode {
+		// Fetched-content gate: once untrusted web bytes have entered the
+		// conversation this turn, any destructive call may be carrying out an
+		// injected instruction — confirm with the user even for in-workspace
+		// paths. (Write mode already prompts for every destructive call.)
+		if m.fetchedContent {
+			return true
+		}
 		var args map[string]any
 		if err := json.Unmarshal(call.Function.Arguments, &args); err == nil {
 			for _, key := range []string{"path", "dest", "destination", "new_path", "to", "source", "src", "working_dir"} {

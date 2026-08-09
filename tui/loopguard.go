@@ -56,6 +56,7 @@ func (m *Model) resetTurnGuards() {
 	m.sameToolWarned = false
 	m.sameToolStopWarned = false
 	m.turnTouchedFiles = false
+	m.fetchedContent = false
 	if m.turnChangedPaths == nil {
 		m.turnChangedPaths = map[string]bool{}
 	} else {

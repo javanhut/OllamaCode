@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/javanhut/ollama_code/api"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/internal/verification"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // maxVerifyAttempts bounds how many times the harness will force the model to
@@ -24,6 +26,7 @@ type verifyDoneMsg struct {
 	command     string
 	fingerprint string
 	output      string
+	lint        string // capped linter diagnostics, "" when no linter applies
 }
 
 const noCheckChallenge = "[SELF-CHECK] Before you finish: did you ACTUALLY verify this works — run it, build it, or test it — and watch it succeed? If not, do that now with your tools. If you genuinely cannot verify it, say so plainly and list exactly what remains unverified. Do not claim something works without evidence."
@@ -51,14 +54,27 @@ func (m *Model) changedPaths() []string {
 
 // maybeVerifyGate runs when a file-touching turn tries to end. It returns a
 // command to run the compile check (which re-invokes the model on failure), a
-// command for a one-time self-check challenge when no objective check exists, or
-// nil to let the turn end normally.
+// re-invocation when tree-sitter finds syntax errors and no manifest check
+// exists, a command for a one-time self-check challenge when no objective
+// check exists at all, or nil to let the turn end normally.
 func (m *Model) maybeVerifyGate() tea.Cmd {
 	if !m.verifyOn() || !m.turnTouchedFiles || m.verifyAttempts >= maxVerifyAttempts {
 		return nil
 	}
 	cmd, label, ok := m.verifyCommand()
 	if !ok {
+		// No manifest-driven check for this project. In treesitter builds a
+		// syntax error in a changed file is still an objective failure — treat
+		// it like a failed check and make the model fix it. The default build
+		// compiles the grammars out and this is silently nil.
+		if errs := tools.TreeSitterParseErrors(m.changedPaths()); len(errs) > 0 {
+			m.verifyAttempts++
+			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
+				"[VERIFICATION FAILED] You are NOT done — changed files do not parse. Fix the actual syntax errors, then they will be re-checked:\n\n%s",
+				strings.Join(errs, "\n"))})
+			m.busySince = time.Now()
+			return m.startStream()
+		}
 		// No objective check for this project: challenge the model once to prove
 		// it verified its work, instead of accepting an unverified "done".
 		if !m.challengedThisTurn {
@@ -84,10 +100,15 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 		if len(text) > 4000 {
 			text = "…\n" + text[len(text)-4000:] // tail: compiler errors cluster at the end
 		}
+		// Lint runs after the check either way: a failed compile is exactly
+		// when per-diagnostic signal helps most. Informational only — it never
+		// decides pass/fail, and a missing linter binary is silent.
+		lint := verification.Lint(ctx, ".", m.changedPaths())
 		current := verification.Fingerprint(".", m.changedPaths())
 		if current != fingerprint {
 			err = context.Canceled
 			text = "files changed while verification was running; the stale result was discarded"
+			lint = ""
 		}
 		if m.trace != nil {
 			errText := ""
@@ -95,10 +116,19 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 				errText = err.Error()
 			}
 			_ = m.trace.Record(tracepkg.Event{Kind: "verification", Turn: m.turnGen, Model: m.modelName,
-				Result: text, Error: errText, Metadata: map[string]any{"command": command, "label": label, "fingerprint": fingerprint[:12], "ok": err == nil}})
+				Result: text, Error: errText, Metadata: map[string]any{"command": command, "label": label, "fingerprint": fingerprint[:12], "ok": err == nil, "lint": lint}})
 		}
-		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text}
+		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text, lint: lint}
 	}
+}
+
+// repairDetail combines the check output with any linter diagnostics for the
+// message handed back to the model after a failed verification.
+func repairDetail(output, lint string) string {
+	if lint == "" {
+		return output
+	}
+	return output + "\n\nLinter diagnostics (files changed this turn):\n" + lint
 }
 
 // endTurnTail handles post-turn housekeeping — proactive compaction and

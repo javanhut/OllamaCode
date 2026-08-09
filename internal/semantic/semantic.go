@@ -28,6 +28,12 @@ type Index struct {
 	Root   string  `json:"root"`
 	Model  string  `json:"model"`
 	Chunks []Chunk `json:"chunks"`
+	// Chunker identifies the chunking scheme that produced Chunks
+	// (chunkerID). LoadIndex rejects an index built with a different scheme
+	// than this binary's, so a stale boundary layout is rebuilt instead of
+	// served. Empty in indexes saved before the field existed, which means
+	// the window scheme.
+	Chunker string `json:"chunker,omitempty"`
 }
 
 func cachePath(root string) string {
@@ -61,18 +67,29 @@ func LoadIndex(root string) (*Index, error) {
 	if err := json.Unmarshal(data, &idx); err != nil {
 		return nil, err
 	}
+	if err := chunkerCompat(idx.Chunker); err != nil {
+		return nil, err
+	}
 	return &idx, nil
+}
+
+// chunkerCompat checks a stored index's chunking scheme against this
+// binary's. Indexes saved before the Chunker field existed (empty) were
+// window-chunked.
+func chunkerCompat(stored string) error {
+	if stored == "" {
+		stored = chunkerWindow
+	}
+	if stored != chunkerID {
+		return fmt.Errorf("semantic index was chunked with %q, this binary chunks with %q; rebuild", stored, chunkerID)
+	}
+	return nil
 }
 
 func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)) (*Index, error) {
 	var chunks []Chunk
 	var batch []string
-	var batchMeta []struct {
-		idx   int
-		start int
-		end   int
-		path  string
-	}
+	var batchIdx []int
 
 	gi := gitignore.NewMatcher(root)
 
@@ -101,21 +118,10 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		lines := strings.Split(string(data), "\n")
-		chunkSize := 100
-		overlap := 20
-		for i := 0; i < len(lines); i += chunkSize - overlap {
-			end := min(i+chunkSize, len(lines))
-			text := strings.Join(lines[i:end], "\n")
-			batch = append(batch, text)
-			batchMeta = append(batchMeta, struct {
-				idx, start, end int
-				path            string
-			}{idx: len(chunks), start: i + 1, end: end, path: rel})
-			chunks = append(chunks, Chunk{Path: rel, StartLine: i + 1, EndLine: end, Text: text})
-			if end == len(lines) {
-				break
-			}
+		for _, c := range chunkFile(rel, data) {
+			batch = append(batch, c.Text)
+			batchIdx = append(batchIdx, len(chunks))
+			chunks = append(chunks, c)
 		}
 		fileCount++
 		return nil
@@ -141,8 +147,7 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 				return fmt.Errorf("embedding batch %d-%d failed: %w", start, end, err)
 			}
 			for j, emb := range embs {
-				meta := batchMeta[start+j]
-				chunks[meta.idx].Embedding = emb
+				chunks[batchIdx[start+j]].Embedding = emb
 			}
 			return nil
 		})
@@ -152,31 +157,7 @@ func BuildIndex(root, model string, embedder func([]string) ([][]float32, error)
 		return nil, err
 	}
 
-	return &Index{Root: root, Model: model, Chunks: chunks}, nil
-}
-
-// chunkFile splits a file's contents into overlapping line-windows, matching
-// BuildIndex's chunking parameters. Returns nil for binary files.
-func chunkFile(rel string, data []byte) []Chunk {
-	if isBinary(data) {
-		return nil
-	}
-	lines := strings.Split(string(data), "\n")
-	const chunkSize, overlap = 100, 20
-	var chunks []Chunk
-	for i := 0; i < len(lines); i += chunkSize - overlap {
-		end := min(i+chunkSize, len(lines))
-		chunks = append(chunks, Chunk{
-			Path:      rel,
-			StartLine: i + 1,
-			EndLine:   end,
-			Text:      strings.Join(lines[i:end], "\n"),
-		})
-		if end == len(lines) {
-			break
-		}
-	}
-	return chunks
+	return &Index{Root: root, Model: model, Chunks: chunks, Chunker: chunkerID}, nil
 }
 
 // Clone returns a deep-enough copy: a new Index with a fresh Chunks slice. The
@@ -184,7 +165,7 @@ func chunkFile(rel string, data []byte) []Chunk {
 // background reindex can mutate a copy without racing readers of the published
 // index.
 func (idx *Index) Clone() *Index {
-	out := &Index{Root: idx.Root, Model: idx.Model}
+	out := &Index{Root: idx.Root, Model: idx.Model, Chunker: idx.Chunker}
 	out.Chunks = append([]Chunk(nil), idx.Chunks...)
 	return out
 }

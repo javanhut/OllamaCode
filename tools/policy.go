@@ -71,7 +71,11 @@ var toolPolicies = func() map[string]ToolPolicy {
 		m[name] = policy(ModeReadOnly, false, false, false, ToolCostLow)
 	}
 	m["switch_mode"] = policy(ModeReadOnly, true, true, false, ToolCostLow)
-	m["todo_write"] = policy(ModeReadOnly, true, false, false, ToolCostLow)
+	// Todos are session-local state like notes: available in every mode,
+	// safe for small models. todo_read is the read-only half of the pair.
+	for _, name := range []string{"todo_write", "todo_read"} {
+		m[name] = policy(ModeReadOnly, true, false, false, ToolCostLow)
+	}
 	m["run_shell"] = policy(ModeExploreShell, true, true, false, ToolCostHigh)
 	m["shell_output"] = policy(ModeMutable, true, false, false, ToolCostLow)
 	// These tools combine read-only defaults with mutating optional actions, so

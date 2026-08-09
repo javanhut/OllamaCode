@@ -16,6 +16,7 @@ expensive thinking somewhere else.
 | [Safety](safety.md) | Approval prompts, undo, loop guards, verification |
 | [Architecture](architecture.md) | How a turn actually runs, for people changing the code |
 | [Voice companion](companion.md) | Optional speech-in, speech-out popup |
+| [Training](training.md) | Export traces as a dataset and LoRA-tune a model on them |
 
 ## The 60-second version
 

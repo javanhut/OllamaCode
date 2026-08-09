@@ -3,8 +3,10 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/javanhut/ollama_code/tools"
@@ -24,6 +26,9 @@ func mustArgs(t *testing.T, v any) json.RawMessage {
 // every change is checkpointed so /undo can revert the whole batch.
 func TestApplyStagedOp(t *testing.T) {
 	dir := t.TempDir()
+	// applyStagedOp goes through the real (workspace-jailed) fs tools, so the
+	// temp dir must be the working root for its absolute paths to pass.
+	t.Chdir(dir)
 	f := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(f, []byte("alpha beta gamma"), 0o644); err != nil {
 		t.Fatal(err)
@@ -62,6 +67,104 @@ func TestApplyStagedOp(t *testing.T) {
 	}
 	if _, err := os.Stat(g); !os.IsNotExist(err) {
 		t.Fatalf("undo did not remove created file new.txt (err=%v)", err)
+	}
+}
+
+// TestParallelEditRollbackOnConflict covers the atomic batch semantics: a
+// mid-batch conflict aborts the apply, every file the batch already touched is
+// restored to its pre-batch content (including removing files the batch
+// created), the error names the failed op and the rolled-back changes, and the
+// turn checkpoint is left intact so /undo still works afterwards.
+func TestParallelEditRollbackOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	// applyPlannedOps goes through the workspace-jailed fs tools, so the temp
+	// dir must be the working root for its absolute paths to pass.
+	t.Chdir(dir)
+	f := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(f, []byte("alpha beta gamma"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{tools: tools.DefaultRegistry()}
+	ctx := context.Background()
+
+	// Worker 1 applies cleanly (edit + create). Worker 2 then fails: its edit
+	// targets text worker 1 already replaced — a stale-edit conflict.
+	st1 := &editStage{}
+	st1.add(stagedOp{kind: "edit", path: f, oldString: "beta", newString: "BETA", summary: "edit a.txt"})
+	created := filepath.Join(dir, "created.txt")
+	st1.add(stagedOp{kind: "write", path: created, content: "brand new", summary: "create created.txt"})
+	st2 := &editStage{}
+	st2.add(stagedOp{kind: "edit", path: f, oldString: "beta", newString: "x", summary: "stale edit"})
+
+	out, err := m.applyPlannedOps(ctx, []peWorkerResult{
+		{task: "update a.txt and add a file", stage: st1},
+		{task: "conflicting update", stage: st2},
+		{task: "planner blew up", stage: &editStage{}, err: errors.New("model unavailable")},
+	})
+	if err == nil {
+		t.Fatalf("expected atomic abort error, got success: %q", out)
+	}
+	msg := err.Error()
+	for _, want := range []string{"aborted", "rolled back", "CONFLICT", f, created} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q, got:\n%s", want, msg)
+		}
+	}
+
+	// Rollback restored pre-batch content and removed the created file.
+	if got, _ := os.ReadFile(f); string(got) != "alpha beta gamma" {
+		t.Errorf("a.txt not rolled back, got %q", got)
+	}
+	if _, statErr := os.Stat(created); !os.IsNotExist(statErr) {
+		t.Errorf("created.txt should have been removed by rollback (err=%v)", statErr)
+	}
+
+	// The turn checkpoint must be untouched by the rollback: /undo still sees
+	// the batch's snapshots and restores the same pre-batch state.
+	m.finalizeCheckpoint("parallel_edit rollback test")
+	if _, touched := m.undoLast(); len(touched) == 0 {
+		t.Error("expected /undo record to survive the rollback")
+	}
+	if got, _ := os.ReadFile(f); string(got) != "alpha beta gamma" {
+		t.Errorf("undo after rollback changed a.txt, got %q", got)
+	}
+}
+
+// TestParallelEditApplySuccess locks in that a clean batch applies every op,
+// reports each worker's applied changes, and touches no rollback machinery.
+func TestParallelEditApplySuccess(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	f1 := filepath.Join(dir, "a.txt")
+	f2 := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(f1, []byte("one two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Model{tools: tools.DefaultRegistry()}
+
+	st1 := &editStage{}
+	st1.add(stagedOp{kind: "edit", path: f1, oldString: "two", newString: "2", summary: "edit a.txt"})
+	st2 := &editStage{}
+	st2.add(stagedOp{kind: "delete", path: f2, summary: "remove b.txt"})
+
+	out, err := m.applyPlannedOps(context.Background(), []peWorkerResult{
+		{task: "update a.txt", stage: st1},
+		{task: "delete b.txt", stage: st2},
+	})
+	if err != nil {
+		t.Fatalf("clean batch should succeed: %v", err)
+	}
+	if !strings.Contains(out, "2 change(s) applied") || strings.Contains(out, "CONFLICT") {
+		t.Errorf("unexpected report: %q", out)
+	}
+	if got, _ := os.ReadFile(f1); string(got) != "one 2" {
+		t.Errorf("a.txt not applied, got %q", got)
+	}
+	if _, statErr := os.Stat(f2); !os.IsNotExist(statErr) {
+		t.Errorf("b.txt should be deleted (err=%v)", statErr)
 	}
 }
 

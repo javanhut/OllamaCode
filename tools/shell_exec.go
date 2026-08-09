@@ -33,7 +33,7 @@ func runShellCommand(ctx context.Context, command, workingDir, stdin string, tim
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command("sh", "-c", command)
+	cmd := newShellCommand(command)
 	configureShellCommand(cmd)
 	if workingDir != "" {
 		cmd.Dir = workingDir

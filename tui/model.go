@@ -130,20 +130,22 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps   int                        `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
-	EmbedModel string                     `json:"embed_model,omitempty"` // model for auto-RAG embeddings
-	AutoRAG    *bool                      `json:"auto_rag,omitempty"`    // nil/true = enabled
-	Dream      *bool                      `json:"dream,omitempty"`       // nil/true = dream mode enabled
-	Face       *bool                      `json:"face,omitempty"`        // nil/true = mascot overlay shown
-	Welcome    *bool                      `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
-	Verify     *bool                      `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
-	VerifyCmd  string                     `json:"verify_cmd,omitempty"`  // override the auto-detected check
-	Trace      bool                       `json:"trace,omitempty"`       // opt-in redacted JSONL execution trace
-	TracePath  string                     `json:"trace_path,omitempty"`  // optional trace destination
-	Profiles   map[string]ModelProfile    `json:"profiles,omitempty"`    // per-model, keyed by model name
-	Routes     map[string]string          `json:"routes,omitempty"`      // mode name -> model spec; empty disables routing
-	Providers  map[string]providerConfig  `json:"providers,omitempty"`   // extra endpoints, referenced as "<name>:<model>"
-	MCPServers map[string]mcpServerConfig `json:"mcp_servers,omitempty"` // external MCP stdio servers
+	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 25)
+	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
+	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
+	Dream         *bool                      `json:"dream,omitempty"`          // nil/true = dream mode enabled
+	Face          *bool                      `json:"face,omitempty"`           // nil/true = mascot overlay shown
+	Welcome       *bool                      `json:"welcome,omitempty"`        // nil/true = show welcome panel on empty chat
+	Verify        *bool                      `json:"verify,omitempty"`         // nil/true = auto compile-check on file edits
+	VerifyCmd     string                     `json:"verify_cmd,omitempty"`     // override the auto-detected check
+	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
+	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
+	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
+	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
+	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by model name
+	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
+	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
+	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP stdio servers
 }
 
 // providerConfig is one additional LLM endpoint beyond the default host. The
@@ -367,6 +369,7 @@ type Model struct {
 	sameToolStopWarned  bool            // hard-stop explanation emitted this user turn
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
+	fetchedContent      bool            // untrusted web content entered the conversation this turn
 	verifying           bool            // a compile check is running
 	verifyAttempts      int             // failed compile checks this turn
 	lastVerification    string          // exact command/evidence from the latest gate
@@ -407,6 +410,15 @@ type Model struct {
 	slashVisible     bool
 	slashSuggestions []string
 	slashSelected    int
+
+	// @file mentions: mentionBlock is the current turn's expanded attachments,
+	// injected via buildDynamicContext like the RAG block; the rest drive the
+	// tab-completion menu.
+	mentionBlock       string
+	mentionVisible     bool
+	mentionSuggestions []string
+	mentionSelected    int
+	mentionFiles       []string // workspace file list behind the completion menu
 
 	userHistory     []string
 	historyIndex    int
@@ -476,6 +488,14 @@ func (e liveEmbedder) Embed(model string, inputs []string) ([][]float32, error) 
 
 func New() *Model {
 	cfg := loadConfig()
+	// Confinement is process-wide tools state, pinned once before any tool can
+	// run: fs tool paths jail to the workspace root (plus any allowlisted
+	// roots), and run_shell is wrapped in the OS sandbox unless opted out.
+	tools.SetWorkspaceRoot(workspaceRoot())
+	tools.SetJailAllowlist(cfg.JailAllowlist)
+	if cfg.ShellSandbox != nil {
+		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
+	}
 	// ... (host setup ...)
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)
@@ -550,15 +570,8 @@ func New() *Model {
 
 	notes := &sessionNotes{}
 	notes.load()
-	registry := tools.DefaultRegistry()
-	registry.Register(readNotesTool(notes))
-	registry.Register(updateNotesTool(notes))
-	registry.Register(appendNotesTool(notes))
 	todos := &todoList{}
-	registry.Register(todoWriteTool(todos))
-	registry.Register(rememberTool(mem))
-	registry.Register(recallTool(mem))
-	registry.Register(forgetTool(mem))
+	registry := baseRegistry(notes, todos, mem)
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot

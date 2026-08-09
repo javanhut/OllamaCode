@@ -19,7 +19,9 @@ import (
 // model: the expensive reasoning fans out, but no two writes ever race because
 // nothing touches disk until every worker has finished and the orchestrator
 // replays the staged edits one at a time (with /undo checkpoints and conflict
-// detection inherited from the real edit tools).
+// detection inherited from the real edit tools). The batch is ATOMIC: the first
+// op that fails to apply rolls back everything the batch already changed, so a
+// conflict never leaves a half-applied workspace.
 const (
 	maxParallelEditTasks   = 8
 	maxParallelEditWorkers = 4
@@ -263,7 +265,7 @@ func (m *Model) parallelEditTool() tools.Tool {
 		Type: "function",
 		Function: tools.Function{
 			Name:        "parallel_edit",
-			Description: "Split a large change into independent subtasks and complete them faster than one agent could. Each subtask is planned by its own read-only worker IN PARALLEL; the workers propose edits, which are then applied SERIALLY and safely (with /undo checkpoints and conflict detection). Give each subtask a DISJOINT set of files — workers must not edit the same file. Overlapping or stale edits are reported as conflicts, never silently merged. Use for genuinely parallelizable work (e.g. \"rename X across these 5 packages\", \"add the same guard to each of these handlers\"). For a single focused change, just edit directly.",
+			Description: "Split a large change into independent subtasks and complete them faster than one agent could. Each subtask is planned by its own read-only worker IN PARALLEL; the workers propose edits, which are then applied SERIALLY through the safe write path (with /undo checkpoints). The batch is ATOMIC: if any change fails to apply, every change already applied is rolled back — files restored, created files removed — and you get a retryable error naming the failed change; fix the cause and re-run the whole call. Give each subtask a DISJOINT set of files — workers must not edit the same file. Overlapping or stale edits are reported as conflicts, never silently merged. Use for genuinely parallelizable work (e.g. \"rename X across these 5 packages\", \"add the same guard to each of these handlers\"). For a single focused change, just edit directly.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
@@ -305,18 +307,12 @@ func (m *Model) parallelEditTool() tools.Tool {
 				}
 			}
 
-			type workerResult struct {
-				task   string
-				stage  *editStage
-				output string
-				err    error
-			}
-			results := make([]workerResult, len(a.Tasks))
+			results := make([]peWorkerResult, len(a.Tasks))
 			sem := make(chan struct{}, maxParallelEditWorkers)
 			var wg sync.WaitGroup
 			for i := range a.Tasks {
 				stage := &editStage{}
-				results[i] = workerResult{task: a.Tasks[i].Task, stage: stage}
+				results[i] = peWorkerResult{task: a.Tasks[i].Task, stage: stage}
 				wg.Add(1)
 				go func(i int, task string, files []string) {
 					defer wg.Done()
@@ -326,11 +322,14 @@ func (m *Model) parallelEditTool() tools.Tool {
 					if len(files) > 0 {
 						prompt += "\n\nFiles in your scope (do not modify any others): " + strings.Join(files, ", ")
 					}
+					constrain, constraintCache := m.subagentConstraintOptions()
 					res, err := agent.Run(ctx, m.host, m.plannerRegistry(stage), prompt, agent.Options{
-						Model:    m.modelName,
-						System:   plannerSystem,
-						MaxSteps: parallelEditMaxSteps,
-						NumCtx:   m.contextLimit,
+						Model:              m.modelName,
+						System:             plannerSystem,
+						MaxSteps:           parallelEditMaxSteps,
+						NumCtx:             m.contextLimit,
+						ConstrainToolCalls: constrain,
+						Constraints:        constraintCache,
 					})
 					results[i].output = res.Output
 					results[i].err = err
@@ -338,63 +337,163 @@ func (m *Model) parallelEditTool() tools.Tool {
 			}
 			wg.Wait()
 
-			// Record intended file ownership across workers so cross-worker
-			// overlaps can be flagged before they collide at apply time.
-			owner := map[string]int{}
-			for i := range results {
-				for _, op := range results[i].stage.list() {
-					if _, ok := owner[op.path]; !ok {
-						owner[op.path] = i
-					}
-				}
-			}
-
-			// Serial apply — no two writes ever run concurrently.
-			var b strings.Builder
-			applied, conflicts, skipped := 0, 0, 0
-			for i := range results {
-				r := results[i]
-				fmt.Fprintf(&b, "\n[worker %d] %s\n", i+1, peClip(r.task, 100))
-				if r.err != nil {
-					fmt.Fprintf(&b, "  planning failed: %v\n", r.err)
-					continue
-				}
-				ops := r.stage.list()
-				if len(ops) == 0 {
-					fmt.Fprintf(&b, "  proposed no changes — %s\n", peClip(r.output, 160))
-					continue
-				}
-				for _, op := range ops {
-					if !m.isPathInTrustedFolder(op.path) {
-						skipped++
-						fmt.Fprintf(&b, "  SKIP %s — outside workspace, apply it manually\n", op.path)
-						continue
-					}
-					if own, ok := owner[op.path]; ok && own != i {
-						fmt.Fprintf(&b, "  NOTE %s is also owned by worker %d (overlap)\n", op.path, own+1)
-					}
-					out, err := m.applyStagedOp(ctx, op)
-					if err != nil {
-						conflicts++
-						fmt.Fprintf(&b, "  CONFLICT %s — %s\n", op.path, peFirstLine(err.Error()))
-						continue
-					}
-					applied++
-					label := op.summary
-					if label == "" {
-						label = peFirstLine(out)
-					}
-					fmt.Fprintf(&b, "  applied %s — %s\n", op.path, peClip(label, 100))
-				}
-			}
-
-			header := fmt.Sprintf("parallel_edit: %d worker(s) · %d change(s) applied · %d conflict(s) · %d skipped.", len(results), applied, conflicts, skipped)
-			if conflicts > 0 {
-				header += " Resolve conflicts by editing the affected files directly, or re-run with non-overlapping scopes."
-			}
-			return header + b.String(), nil
+			return m.applyPlannedOps(ctx, results)
 		},
 	}
+}
+
+// peWorkerResult is one planning worker's outcome: its staged proposals, its
+// final summary line, or the error that ended its run.
+type peWorkerResult struct {
+	task   string
+	stage  *editStage
+	output string
+	err    error
+}
+
+// applyPlannedOps replays every worker's staged ops serially — and atomically.
+// The first op that fails to apply aborts the batch: every file the batch
+// already modified is restored to its pre-batch content (files the batch
+// created are removed) and a retryable error is returned so the model can fix
+// the cause and re-run, instead of inheriting a half-applied workspace.
+// Pre-batch state is captured in batch-local snapshots, separate from the turn
+// checkpoint (which stays first-version-wins so the parent turn's /undo record
+// is neither corrupted nor consumed by the rollback).
+func (m *Model) applyPlannedOps(ctx context.Context, results []peWorkerResult) (string, error) {
+	// Record intended file ownership across workers so cross-worker
+	// overlaps can be flagged before they collide at apply time.
+	owner := map[string]int{}
+	for i := range results {
+		for _, op := range results[i].stage.list() {
+			if _, ok := owner[op.path]; !ok {
+				owner[op.path] = i
+			}
+		}
+	}
+
+	// Serial apply — no two writes ever run concurrently.
+	var b strings.Builder
+	applied, skipped := 0, 0
+	pre := map[string]fileSnap{} // pre-batch state per path, first capture wins
+	var appliedPaths []string    // paths this batch actually modified, in order
+	for i := range results {
+		r := results[i]
+		fmt.Fprintf(&b, "\n[worker %d] %s\n", i+1, peClip(r.task, 100))
+		if r.err != nil {
+			fmt.Fprintf(&b, "  planning failed: %v\n", r.err)
+			continue
+		}
+		ops := r.stage.list()
+		if len(ops) == 0 {
+			fmt.Fprintf(&b, "  proposed no changes — %s\n", peClip(r.output, 160))
+			continue
+		}
+		for _, op := range ops {
+			if !m.isPathInTrustedFolder(op.path) {
+				skipped++
+				fmt.Fprintf(&b, "  SKIP %s — outside workspace, apply it manually\n", op.path)
+				continue
+			}
+			if own, ok := owner[op.path]; ok && own != i {
+				fmt.Fprintf(&b, "  NOTE %s is also owned by worker %d (overlap)\n", op.path, own+1)
+			}
+			if _, seen := pre[op.path]; !seen {
+				pre[op.path] = captureFileSnap(op.path)
+			}
+			out, err := m.applyStagedOp(ctx, op)
+			if err != nil {
+				fmt.Fprintf(&b, "  CONFLICT %s — %s\n", op.path, peFirstLine(err.Error()))
+				return "", peAtomicFailure(&b, i+1, op, err, pre, appliedPaths)
+			}
+			applied++
+			appliedPaths = append(appliedPaths, op.path)
+			label := op.summary
+			if label == "" {
+				label = peFirstLine(out)
+			}
+			fmt.Fprintf(&b, "  applied %s — %s\n", op.path, peClip(label, 100))
+		}
+	}
+
+	header := fmt.Sprintf("parallel_edit: %d worker(s) · %d change(s) applied · %d skipped.", len(results), applied, skipped)
+	return header + b.String(), nil
+}
+
+// captureFileSnap records a file's pre-batch state for rollback, mirroring the
+// per-file logic of the turn checkpoint (same size cap; directories and
+// unreadable files can't be content-restored and are reported as such).
+func captureFileSnap(path string) fileSnap {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileSnap{existed: false}
+	}
+	if info.IsDir() || info.Size() > maxSnapshotBytes {
+		return fileSnap{existed: true, tooBig: true, mode: info.Mode().Perm()}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fileSnap{existed: false}
+	}
+	return fileSnap{existed: true, data: data, mode: info.Mode().Perm()}
+}
+
+// peAtomicFailure rolls back every change the batch already applied and builds
+// the retryable error handed back to the model. Rollback writes file content
+// directly from the batch-local snapshots; the turn checkpoint's snapshots are
+// left untouched so /undo still sees the whole turn.
+func peAtomicFailure(report *strings.Builder, worker int, op stagedOp, cause error, pre map[string]fileSnap, appliedPaths []string) error {
+	restored, removed, unrestorable, failed := rollbackBatch(pre, appliedPaths)
+
+	var e strings.Builder
+	fmt.Fprintf(&e, "parallel_edit aborted: worker %d's %s on %s failed: %s\n", worker, op.kind, op.path, peFirstLine(cause.Error()))
+	if len(appliedPaths) > 0 {
+		fmt.Fprintf(&e, "The batch is atomic, so the %d change(s) already applied were rolled back (%d file(s) restored, %d created file(s) removed) — the workspace is back to its pre-batch state, nothing was partially applied.\n", len(appliedPaths), restored, removed)
+	}
+	if len(unrestorable) > 0 {
+		fmt.Fprintf(&e, "WARNING could not restore %s (directory or over the snapshot size cap) — inspect manually.\n", strings.Join(unrestorable, ", "))
+	}
+	if len(failed) > 0 {
+		fmt.Fprintf(&e, "WARNING rollback itself failed for %s — inspect these files manually.\n", strings.Join(failed, ", "))
+	}
+	e.WriteString("Fix the cause (re-read the file and refresh the stale edit, or give workers disjoint file scopes) and retry the whole parallel_edit call.\n")
+	e.WriteString("Batch report:" + report.String())
+	return fmt.Errorf("%s", e.String())
+}
+
+// rollbackBatch restores each path the batch modified to its pre-batch state.
+// Returns counts of restored/removed files plus the paths that could not be
+// restored (unsnapshot-able) or whose restore failed.
+func rollbackBatch(pre map[string]fileSnap, appliedPaths []string) (restored, removed int, unrestorable, failed []string) {
+	seen := map[string]bool{}
+	for _, p := range appliedPaths {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		s := pre[p]
+		switch {
+		case s.tooBig:
+			unrestorable = append(unrestorable, p)
+		case !s.existed:
+			// The batch created this file → remove it to roll back.
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				failed = append(failed, p)
+			} else {
+				removed++
+			}
+		default:
+			mode := s.mode
+			if mode == 0 {
+				mode = 0o644
+			}
+			if err := os.WriteFile(p, s.data, mode); err != nil {
+				failed = append(failed, p)
+			} else {
+				restored++
+			}
+		}
+	}
+	return restored, removed, unrestorable, failed
 }
 
 func peFirstLine(s string) string {

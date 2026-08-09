@@ -29,7 +29,7 @@ func TestAccumulate(t *testing.T) {
 
 func TestRunEvaluationRejectsUnknownTask(t *testing.T) {
 	structured := true
-	_, err := runEvaluation("unused", "http://localhost:11434", 1, 1, false, nil, &structured, "missing")
+	_, err := runEvaluation("unused", "http://localhost:11434", 1, 1, false, nil, &structured, "missing", false)
 	if err == nil {
 		t.Fatal("expected unknown task to fail before contacting the provider")
 	}

@@ -2,6 +2,59 @@
 
 Type `/` in the input to get an autocomplete menu of every command.
 
+## Headless mode
+
+`ocode -p "..."` runs a single prompt non-interactively and prints the final
+answer to stdout — no TUI, for scripts, git hooks, and CI. Without `-p`,
+`ocode` starts the TUI as usual.
+
+| Flag | Effect |
+|---|---|
+| `-p`, `--prompt` | Run one prompt headless and print the final answer |
+| `-json` | Emit a single JSON object instead of plain text (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, token counts) |
+| `-model` | Model for the run (default: the configured model); accepts `provider:model` |
+| `-max-steps` | Cap tool-call rounds (default: configured `max_steps`) |
+
+Errors go to stderr with a non-zero exit code. The same confinement as the TUI
+applies: file tools are jailed to the workspace and `run_shell` goes through
+the OS sandbox. There is no approval prompt headless — running `ocode -p` is
+itself the trust decision.
+
+```sh
+# In a script: summarize the working tree as JSON for jq.
+ocode -p "summarize uncommitted changes in one line" -json | jq -r .output
+```
+
+```sh
+# .git/hooks/prepare-commit-msg: draft a commit message from the staged diff.
+if ! ocode -p "Write a one-line commit message for the staged changes." > "$1.msg" 2>/dev/null; then
+  rm -f "$1.msg"   # model unavailable — commit without a draft
+else
+  cat "$1.msg" >> "$1"
+fi
+```
+
+```yaml
+# CI: fail the job when the model can't explain the lint fallout.
+- name: Explain lint failures
+  run: ocode -p "Explain the golangci-lint failures above and name the files to fix." -json
+```
+
+## @file mentions
+
+Type `@path` anywhere in a message to attach a file's contents to that turn —
+e.g. `explain @tui/keys.go`. While typing an `@token`, `Tab` completes workspace
+file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss).
+
+- Paths resolve relative to the working directory and are confined to the
+  workspace (the same jail the file tools use); escapes and missing files are
+  noted inline for the model instead of failing the send.
+- Files are capped at 32 KiB each (128 KiB per message), binary files are
+  skipped, and a token only counts as a mention when it looks path-like
+  (contains `/` or `.`), so `@handles` are left alone.
+- The transcript shows your message as typed; the file contents are attached
+  to the turn sent to the model.
+
 ## Keys
 
 ### Chat

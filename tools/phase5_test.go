@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -60,6 +62,61 @@ func TestVerifyBytes(t *testing.T) {
 	}
 	if err := verifyBytes("notes.txt", []byte("anything at all (")); err != nil {
 		t.Errorf("unknown extension should pass: %v", err)
+	}
+}
+
+func TestWriteFileVerifyGate(t *testing.T) {
+	root := t.TempDir()
+	pinJail(t, root)
+	t.Chdir(root)
+	ctx := context.Background()
+	write := WriteFileTool()
+
+	// Broken syntax in a gated extension is rejected with a retryable error,
+	// and nothing is written — the file must not even be created.
+	_, err := write.Handler(ctx, jailArgs(t, map[string]string{
+		"path": "broken.go", "content": "package x\nfunc A( {\n",
+	}))
+	if err == nil {
+		t.Fatal("broken go write should be rejected")
+	}
+	if !strings.Contains(err.Error(), "syntax error") || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("rejection should explain the syntax error and invite a retry, got: %v", err)
+	}
+	if _, statErr := os.Stat("broken.go"); !os.IsNotExist(statErr) {
+		t.Fatal("rejected write must not create the file")
+	}
+
+	// Same gate for JSON.
+	if _, err := write.Handler(ctx, jailArgs(t, map[string]string{
+		"path": "broken.json", "content": `{bad`,
+	})); err == nil {
+		t.Fatal("broken json write should be rejected")
+	}
+
+	// Valid content writes fine.
+	if _, err := write.Handler(ctx, jailArgs(t, map[string]string{
+		"path": "ok.go", "content": "package x\nfunc A() {}\n",
+	})); err != nil {
+		t.Fatalf("valid go write: %v", err)
+	}
+
+	// Unlike edit_file, write_file supplies the whole file, so a rewrite that
+	// breaks syntax is rejected even though the existing file parses.
+	if _, err := write.Handler(ctx, jailArgs(t, map[string]string{
+		"path": "ok.go", "content": "package x\nfunc B( {\n",
+	})); err == nil {
+		t.Fatal("rewriting a valid file with broken go should be rejected")
+	}
+	if data, _ := os.ReadFile("ok.go"); !strings.Contains(string(data), "func A()") {
+		t.Fatalf("rejected rewrite must leave the file untouched, got:\n%s", data)
+	}
+
+	// Unknown extensions are never gated.
+	if _, err := write.Handler(ctx, jailArgs(t, map[string]string{
+		"path": "notes.txt", "content": "anything ( at all",
+	})); err != nil {
+		t.Fatalf("unknown extension must bypass the gate: %v", err)
 	}
 }
 

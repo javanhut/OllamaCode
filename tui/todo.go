@@ -129,6 +129,34 @@ func todoWriteTool(list *todoList) tools.Tool {
 	}
 }
 
+// todoReadTool lets the model read its checklist back. todo_write replaces the
+// whole list, so a model that can't read first has to rewrite blind and
+// clobbers items it forgot. Returns JSON in exactly the shape todo_write
+// accepts, making read-modify-write round-trips trivial. Read-only.
+func todoReadTool(list *todoList) tools.Tool {
+	return tools.Tool{
+		Type: "function",
+		Function: tools.Function{
+			Name:        "todo_read",
+			Description: "Read the current todo checklist. Returns JSON {\"todos\":[{\"content\",\"status\"},...]} — the same shape todo_write accepts.",
+			Parameters:  tools.Schema{Type: "object", Properties: map[string]tools.Property{}},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			items := list.get()
+			if items == nil {
+				items = []todoItem{} // emit [], not null, for a clean round-trip
+			}
+			out, err := json.Marshal(struct {
+				Todos []todoItem `json:"todos"`
+			}{Todos: items})
+			if err != nil {
+				return "", err
+			}
+			return string(out), nil
+		},
+	}
+}
+
 // todoSidebar renders the checklist as a sidebar block, one line per step.
 // Empty when there are no todos.
 func (m *Model) todoSidebar(inner int) string {

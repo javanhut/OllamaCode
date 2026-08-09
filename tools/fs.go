@@ -56,6 +56,9 @@ func HashFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			hash, err := calculateHash(a.Path)
 			if err != nil {
 				return "", err
@@ -93,6 +96,9 @@ func ReadFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
 			}
 			info, err := os.Stat(a.Path)
 			if err != nil {
@@ -297,6 +303,16 @@ func WriteFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
+			// Verify-before-write: write_file supplies the file's entire
+			// contents, so unlike edit_file there is no "parsed before"
+			// condition — broken syntax in a full write is always a mistake,
+			// whether the file is new or a rewrite. Unknown extensions pass.
+			if verr := verifyBytes(a.Path, []byte(a.Content)); verr != nil {
+				return "", fmt.Errorf("write rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix content and retry", a.Path, verr)
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
@@ -346,6 +362,9 @@ func ListDirectoryTool() Tool {
 			if path == "" {
 				path = "."
 			}
+			if err := jailCheck(path); err != nil {
+				return "", err
+			}
 			entries, err := os.ReadDir(path)
 			if err != nil {
 				return "", err
@@ -391,6 +410,9 @@ func MakeDirectoryTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			if err := os.MkdirAll(a.Path, 0o755); err != nil {
 				return "", err
 			}
@@ -422,6 +444,9 @@ func TouchFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
 			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
@@ -567,6 +592,9 @@ func GrepTool() Tool {
 			if path == "" {
 				path = "."
 			}
+			if err := jailCheck(path); err != nil {
+				return "", err
+			}
 			recursive := false
 			if info, err := os.Stat(path); err == nil && info.IsDir() {
 				recursive = true
@@ -639,6 +667,18 @@ func AppendFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
+			// Verify-before-write, gated the same way as edit_file: appends
+			// carry fragments, so only reject when the file parsed before and
+			// would not parse after. A missing or not-yet-parseable file skips
+			// the gate — incremental writes build up over several appends.
+			if old, err := os.ReadFile(a.Path); err == nil && verifyBytes(a.Path, old) == nil {
+				if verr := verifyBytes(a.Path, append(old, []byte(a.Content)...)); verr != nil {
+					return "", fmt.Errorf("append rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix content and retry", a.Path, verr)
+				}
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
@@ -683,6 +723,9 @@ func DeleteFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			if a.Recursive {
 				if err := os.RemoveAll(a.Path); err != nil {
 					return "", err
@@ -723,6 +766,12 @@ func MoveFileTool() Tool {
 			if a.Source == "" || a.Destination == "" {
 				return "", fmt.Errorf("source and destination are required")
 			}
+			if err := jailCheck(a.Source); err != nil {
+				return "", err
+			}
+			if err := jailCheck(a.Destination); err != nil {
+				return "", err
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Destination), 0o755); err != nil {
 				return "", err
 			}
@@ -759,6 +808,12 @@ func CopyFileTool() Tool {
 			}
 			if a.Source == "" || a.Destination == "" {
 				return "", fmt.Errorf("source and destination are required")
+			}
+			if err := jailCheck(a.Source); err != nil {
+				return "", err
+			}
+			if err := jailCheck(a.Destination); err != nil {
+				return "", err
 			}
 			if err := os.MkdirAll(filepath.Dir(a.Destination), 0o755); err != nil {
 				return "", err
@@ -806,6 +861,9 @@ func FindFilesTool() Tool {
 			root := a.Path
 			if root == "" {
 				root = "."
+			}
+			if err := jailCheck(root); err != nil {
+				return "", err
 			}
 			maxDepth := 10
 			if a.MaxDepth != nil {
@@ -881,6 +939,9 @@ func FileInfoTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			info, err := os.Lstat(a.Path)
 			if err != nil {
 				return "", err
@@ -941,6 +1002,9 @@ func GetProjectTreeTool() Tool {
 			root := a.Path
 			if root == "" {
 				root = "."
+			}
+			if err := jailCheck(root); err != nil {
+				return "", err
 			}
 			if a.MaxDepth <= 0 {
 				a.MaxDepth = 4

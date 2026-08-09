@@ -39,6 +39,17 @@ func Detect(root string, changed []string, override string) (Plan, bool) {
 }
 
 func goSteps(root string, changed []string) []string {
+	ordered := goChangedPackages(root, changed)
+	steps := make([]string, 0, len(ordered))
+	for _, pkg := range ordered {
+		steps = append(steps, "go test "+pkg)
+	}
+	return steps
+}
+
+// goChangedPackages maps changed .go files to their package patterns,
+// sorted for deterministic command lines.
+func goChangedPackages(root string, changed []string) []string {
 	packages := map[string]bool{}
 	for _, path := range changed {
 		if filepath.Ext(path) != ".go" {
@@ -62,11 +73,7 @@ func goSteps(root string, changed []string) []string {
 		ordered = append(ordered, pkg)
 	}
 	sort.Strings(ordered)
-	steps := make([]string, 0, len(ordered))
-	for _, pkg := range ordered {
-		steps = append(steps, "go test "+pkg)
-	}
-	return steps
+	return ordered
 }
 
 // Fingerprint identifies the exact changed-file state covered by verification.

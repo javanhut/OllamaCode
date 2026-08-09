@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
@@ -130,6 +131,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.startStream()
 			}
 			m.toast = "verified ✓ " + m.lastVerification
+			if msg.lint != "" {
+				m.toast += fmt.Sprintf(" · %d lint findings in trace", strings.Count(msg.lint, "\n")+1)
+			}
 			cmds = append(cmds, m.endTurnTail()...)
 			m.refreshTranscript()
 			return m, tea.Batch(cmds...)
@@ -138,12 +142,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.verifyAttempts >= maxVerifyAttempts {
 			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
 				"[VERIFICATION STILL FAILING after %d attempts] `%s` does not pass:\n\n%s\n\nStop editing. Explain to the user in plain text what is broken and why you couldn't fix it — do not claim it works.",
-				m.verifyAttempts, msg.label, msg.output)})
+				m.verifyAttempts, msg.label, repairDetail(msg.output, msg.lint))})
 			m.suppressToolsOnce = true
 		} else {
 			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
 				"[VERIFICATION FAILED] You are NOT done — `%s` failed. Read the errors, fix the actual cause (don't blame the tools), then it will be re-checked:\n\n%s",
-				msg.label, msg.output)})
+				msg.label, repairDetail(msg.output, msg.lint))})
 		}
 		m.busySince = time.Now()
 		cmds = append(cmds, m.startStream())
@@ -248,6 +252,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dismissSlash()
 			return m, nil
 		}
+		if msg.String() == "esc" && m.mentionVisible {
+			m.dismissMention()
+			return m, nil
+		}
 		// Not at a permission prompt: there, esc means "deny this call" and is
 		// handled by updatePermission, not by cancelling the whole turn.
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil && m.state != statePermission {
@@ -312,6 +320,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.slashSelected = (m.slashSelected - 1 + n) % n
 				return m, nil
 			}
+			if m.mentionVisible && len(m.mentionSuggestions) > 0 {
+				n := len(m.mentionSuggestions)
+				m.mentionSelected = (m.mentionSelected - 1 + n) % n
+				return m, nil
+			}
 			changed := m.applyModeTransition(m.mode.next(), "")
 			if changed {
 				m.refreshTranscript()
@@ -327,6 +340,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			m.dismissSlash()
 			m.layout()
+			return m, nil
+		}
+		if msg.String() == "tab" && m.mentionVisible && len(m.mentionSuggestions) > 0 {
+			m.acceptMention()
 			return m, nil
 		}
 		switch m.state {
@@ -377,6 +394,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
+			if m.mentionVisible && len(m.mentionSuggestions) > 0 {
+				n := len(m.mentionSuggestions)
+				switch msg.String() {
+				case "down":
+					m.mentionSelected = (m.mentionSelected + 1) % n
+					return m, nil
+				case "up":
+					m.mentionSelected = (m.mentionSelected - 1 + n) % n
+					return m, nil
+				}
+			}
 			// Enter accepts the highlighted slash command into the input (so args
 			// can be added); a second Enter then runs it. A fully-typed command wins
 			// over the menu — "/model" runs /model, not the suggested "/models".
@@ -386,6 +414,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.CursorEnd()
 				m.dismissSlash()
 				m.layout()
+				return m, nil
+			}
+			// Same accept-first rhythm for @file completion: Enter fills in the
+			// highlighted path, a second Enter submits.
+			if msg.String() == "enter" && m.mentionVisible && len(m.mentionSuggestions) > 0 {
+				m.acceptMention()
 				return m, nil
 			}
 			if msg.String() == "enter" {
@@ -650,6 +684,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		finalAssistant := m.streamBuf.String()
 		m.streamBuf.Reset()
+		// Remember whether this stream was schema-constrained before clearing
+		// the stream state: a constrained reply that isn't a tool call is the
+		// prose escape envelope and gets unwrapped below.
+		constrained := m.stream != nil && m.stream.constrained
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
@@ -685,6 +723,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.GotoBottom()
 			}
 		} else {
+			// The model chose the schema's prose escape branch: surface the
+			// answer text, not the {"response": ...} envelope it arrived in.
+			if constrained {
+				if prose, ok := agent.UnwrapConstrainedProse(finalAssistant); ok {
+					finalAssistant = prose
+				}
+			}
 			if len(finalAssistant) > 0 {
 				m.history = append(m.history, api.Message{
 					Role:    "assistant",
@@ -774,6 +819,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatErrMsg:
 		if msg.gen != m.turnGen {
 			break // stale error (e.g. "context canceled" from an esc'd stream)
+		}
+		// A 400 against a schema-constrained request is the host refusing the
+		// format, not a transient failure: step down the fallback ladder and
+		// retry immediately rather than burning a stream retry (and its backoff)
+		// on a request shape that will deterministically fail again.
+		if m.stream != nil && m.stream.constrained && agent.IsFormatRejection(msg.err) && m.downgradeToolCallFormat() {
+			m.streamBuf.Reset() // discard any partial response; the retry regenerates it
+			m.logActivity(fmt.Sprintf("constrained decoding rejected, trying weaker format: %v", msg.err))
+			m.toast = "host rejected constrained decoding — retrying with a weaker format"
+			gen := m.turnGen
+			cmds = append(cmds, func() tea.Msg { return retryStreamMsg{gen: gen} })
+			m.refreshTranscript()
+			break
 		}
 		// Transient failure (connection reset, 5xx, idle timeout): retry the
 		// stream a bounded number of times before killing the turn, with a
@@ -878,15 +936,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateChat:
 		prevBandH := lipgloss.Height(m.inputView())
 		prevSlash := len(m.slashSuggestions)
+		prevMention := len(m.mentionSuggestions)
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
 		m.updateSlashSuggestions()
+		m.updateMentionSuggestions()
 		// Relayout when the rendered input band grows/shrinks (wrapped pastes,
 		// slash menu, narrow-mode status line) so the viewport stays sized
 		// correctly above the input area. The rendered height — not just the
 		// textarea's own Height() — is what actually takes screen rows.
-		if lipgloss.Height(m.inputView()) != prevBandH || len(m.slashSuggestions) != prevSlash {
+		if lipgloss.Height(m.inputView()) != prevBandH ||
+			len(m.slashSuggestions) != prevSlash || len(m.mentionSuggestions) != prevMention {
 			m.layout()
 		}
 		m.viewport, cmd = m.viewport.Update(msg)

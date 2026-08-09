@@ -99,4 +99,4 @@ lifecycle, and how to add a tool, a slash command, or a provider kind.
 
 ## License
 
-MIT. (There is no `LICENSE` file in the repo yet — worth adding one.)
+MIT — see [LICENSE](LICENSE).

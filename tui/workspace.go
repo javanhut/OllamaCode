@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Long-term memory is injected into every prompt, so a single global store means
@@ -22,31 +24,11 @@ func legacyMemoryPath() string {
 
 // workspaceRoot is the directory memory is keyed on: the enclosing repository
 // when there is one, so launching from a subdirectory doesn't fork a separate
-// store, else the working directory.
+// store, else the working directory. The implementation lives in the tools
+// package, which pins the same root for the filesystem path jail — memory and
+// confinement must agree on what "the workspace" is.
 func workspaceRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
-	}
-	for {
-		for _, marker := range []string{".ivaldi", ".git"} {
-			if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
-				return dir
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break // reached the filesystem root
-		}
-		dir = parent
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		return cwd
-	}
-	return ""
+	return tools.WorkspaceRoot()
 }
 
 // workspaceKey is a stable, human-recognizable filename for a workspace: its

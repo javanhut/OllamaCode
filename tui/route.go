@@ -43,37 +43,50 @@ func (m *Model) modelForMode(mode Mode) string {
 // splitRouteSpec separates the provider prefix from the model name. Model names
 // contain colons themselves ("qwen3-coder:30b"), so a prefix only counts when it
 // names a provider that is actually configured — which also means a provider must
-// not be named after a model family.
-func (m *Model) splitRouteSpec(spec string) (provider, model string) {
+// not be named after a model family. A free function so headless mode resolves
+// specs without a Model.
+func splitRouteSpec(cfg config, spec string) (provider, model string) {
 	if name, rest, ok := strings.Cut(spec, ":"); ok {
-		if _, known := m.cfg.Providers[name]; known {
+		if _, known := cfg.Providers[name]; known {
 			return name, rest
 		}
 	}
 	return "", spec
 }
 
-// defaultHost builds a client for the configured Ollama daemon.
-func (m *Model) defaultHost() api.OllamaHost {
+func (m *Model) splitRouteSpec(spec string) (provider, model string) {
+	return splitRouteSpec(m.cfg, spec)
+}
+
+// defaultHostFor builds a client for the configured Ollama daemon.
+func defaultHostFor(cfg config) api.OllamaHost {
 	h := api.OllamaHost{}
-	h.SetURI(m.cfg.Host)
-	h.SetAPIKey(resolveAPIKey(m.cfg))
+	h.SetURI(cfg.Host)
+	h.SetAPIKey(resolveAPIKey(cfg))
 	return h
+}
+
+func (m *Model) defaultHost() api.OllamaHost {
+	return defaultHostFor(m.cfg)
 }
 
 // hostForSpec builds the client a route spec runs against, plus the bare model
 // name to send it.
-func (m *Model) hostForSpec(spec string) (api.OllamaHost, string) {
-	provider, model := m.splitRouteSpec(spec)
+func hostForSpec(cfg config, spec string) (api.OllamaHost, string) {
+	provider, model := splitRouteSpec(cfg, spec)
 	if provider == "" {
-		return m.defaultHost(), model
+		return defaultHostFor(cfg), model
 	}
-	return m.providerHost(provider), model
+	return providerHostFor(cfg, provider), model
 }
 
-// providerHost builds a client for a named provider.
-func (m *Model) providerHost(name string) api.OllamaHost {
-	p := m.cfg.Providers[name]
+func (m *Model) hostForSpec(spec string) (api.OllamaHost, string) {
+	return hostForSpec(m.cfg, spec)
+}
+
+// providerHostFor builds a client for a named provider.
+func providerHostFor(cfg config, name string) api.OllamaHost {
+	p := cfg.Providers[name]
 	h := api.OllamaHost{}
 	h.SetURI(p.BaseURL)
 	h.SetAPIKey(providerKey(p))
@@ -84,6 +97,10 @@ func (m *Model) providerHost(name string) api.OllamaHost {
 	h.SetProvider(kind)
 	h.SetTrustWorkspace(p.Trust)
 	return h
+}
+
+func (m *Model) providerHost(name string) api.OllamaHost {
+	return providerHostFor(m.cfg, name)
 }
 
 // providerKey prefers the environment variable, so an API key never has to be

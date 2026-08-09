@@ -63,6 +63,9 @@ can be damaged while you get a feel for it:
 where is the mode switching logic?
 ```
 
+Mention a file with `@path` (`explain @main.go`) to attach its contents to the
+message; `Tab` completes paths while you type.
+
 When you want changes made, `shift+tab` to write mode — or just ask, and the
 model will request the switch itself. Every file write shows you a diff and
 waits for `y`.

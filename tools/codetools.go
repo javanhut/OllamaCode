@@ -74,11 +74,18 @@ func CodeDefinitionTool() Tool {
 				`(^|[[:space:]])(func|fn|class|struct|trait|enum|impl|interface|type|var|const|def)[[:space:]]+.*%s([[:space:]]|$)`,
 				regexp.QuoteMeta(sym),
 			)
-			cmd := exec.CommandContext(ctx, "grep", "-rnE", "--color=never",
-				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
-				"--exclude-dir=vendor", "--exclude-dir=target", pat, ".")
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			// Tree-sitter precision path (build tag treesitter); ok=false in the
+			// default build, which keeps the grep behavior below unchanged.
+			text := ""
+			if body, ok := tsFindDefinitions(ctx, sym, pat); ok {
+				text = body
+			} else {
+				cmd := exec.CommandContext(ctx, "grep", "-rnE", "--color=never",
+					"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
+					"--exclude-dir=vendor", "--exclude-dir=target", pat, ".")
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			}
 			if text == "" {
 				return fmt.Sprintf("definition of %q not found in project (found on line %d of %s)", sym, a.Line, a.Path), nil
 			}
@@ -145,11 +152,18 @@ func CodeReferencesTool() Tool {
 			}
 
 			// Grep for all occurrences of this word (word-boundary match via -w)
-			cmd := exec.CommandContext(ctx, "grep", "-rnwE", "--color=never",
-				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
-				"--exclude-dir=vendor", "--exclude-dir=target", sym, ".")
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			// Tree-sitter precision path (build tag treesitter); ok=false in the
+			// default build, which keeps the grep behavior below unchanged.
+			text := ""
+			if body, ok := tsFindReferences(ctx, sym); ok {
+				text = body
+			} else {
+				cmd := exec.CommandContext(ctx, "grep", "-rnwE", "--color=never",
+					"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
+					"--exclude-dir=vendor", "--exclude-dir=target", sym, ".")
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			}
 			if text == "" {
 				return fmt.Sprintf("no references to %q found in project", sym), nil
 			}
@@ -301,14 +315,21 @@ func FindSymbolTool() Tool {
 				`(^|[[:space:]])(func|fn|class|struct|trait|enum|impl|interface|type|var|const|def|let|static|async[[:space:]]+def|union|module|pub)[[:space:]]+.*%s|^[[:space:]]*%s[[:space:]]*:=|^[[:space:]]*%s[[:space:]]*=`,
 				sym, sym, sym,
 			)
-			argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", "--exclude-dir=vendor", "--exclude-dir=target", pattern}
-			if a.FileTypes != "" {
-				argv = append(argv, "--include="+a.FileTypes)
+			// Tree-sitter precision path (build tag treesitter); ok=false in the
+			// default build, which keeps the grep behavior below unchanged.
+			text := ""
+			if body, ok := tsFindSymbolLines(ctx, a.Symbol, a.FileTypes, pattern); ok {
+				text = body
+			} else {
+				argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", "--exclude-dir=vendor", "--exclude-dir=target", pattern}
+				if a.FileTypes != "" {
+					argv = append(argv, "--include="+a.FileTypes)
+				}
+				argv = append(argv, ".")
+				cmd := exec.CommandContext(ctx, "grep", argv...)
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 100)
 			}
-			argv = append(argv, ".")
-			cmd := exec.CommandContext(ctx, "grep", argv...)
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 100)
 			if text == "" {
 				return fmt.Sprintf("symbol %q not found in project", a.Symbol), nil
 			}

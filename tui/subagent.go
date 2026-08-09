@@ -42,7 +42,7 @@ func (m *Model) spawnSubagentTool() tools.Tool {
 		Type: "function",
 		Function: tools.Function{
 			Name:        "spawn_subagent",
-			Description: "Delegate self-contained task(s) to autonomous sub-agents that run to completion and report back. Each sub-agent has its own bounded loop and full capability within your current mode (always read/search; in write mode also edit/write files and run shell). Pass MULTIPLE tasks to run them in PARALLEL — ideal for independent work, e.g. investigate three modules at once, or apply an unrelated change in each of several files. WARNING: parallel sub-agents run concurrently with NO cross-task conflict detection, and their file edits are not individually checkpointed for /undo — only parallelize tasks that touch INDEPENDENT files. Give each task enough context to work without seeing this conversation.",
+			Description: "Delegate self-contained task(s) to autonomous sub-agents that run to completion and report back. Each sub-agent has its own bounded loop and full capability within your current mode (always read/search; in write mode also edit/write files and run shell). Pass MULTIPLE tasks to run them in PARALLEL — ideal for independent work, e.g. investigate three modules at once, or apply an unrelated change in each of several files. WARNING: parallel sub-agents run concurrently with NO cross-task conflict detection — only parallelize tasks that touch INDEPENDENT files. Sub-agent file edits are checkpointed into this turn, so one /undo rewinds the whole delegation (they are not individually undoable). Give each task enough context to work without seeing this conversation.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
@@ -71,6 +71,7 @@ func (m *Model) spawnSubagentTool() tools.Tool {
 
 			// Snapshot the mode once so parallel workers don't race on m.mode.
 			mode := m.mode
+			constrain, constraintCache := m.subagentConstraintOptions()
 			opts := agent.Options{
 				Model:    m.modelName,
 				System:   subagentSystem,
@@ -79,6 +80,14 @@ func (m *Model) spawnSubagentTool() tools.Tool {
 				ToolFilter: func(name string) bool {
 					return !subagentExcluded[name] && toolAllowedInMode(mode, name)
 				},
+				ConstrainToolCalls: constrain,
+				Constraints:        constraintCache,
+				// Bank child file mutations into THIS turn's /undo checkpoint.
+				// The executor runs Before synchronously right before each tool
+				// call, and this handler only returns after every child has
+				// finished, so all snapshots land while the parent turn is still
+				// open — one /undo rewinds the whole delegation.
+				Before: m.checkpointBeforeCall(),
 			}
 
 			if len(tasks) == 1 {

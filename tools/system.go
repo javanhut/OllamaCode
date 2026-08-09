@@ -42,13 +42,20 @@ func RunShellTool() Tool {
 			if strings.TrimSpace(a.Command) == "" {
 				return "", fmt.Errorf("command is required")
 			}
+			// The command string itself is not confinable, but the directory it
+			// starts in is — don't let working_dir teleport the shell elsewhere.
+			if a.WorkingDir != "" {
+				if err := jailCheck(a.WorkingDir); err != nil {
+					return "", err
+				}
+			}
 			if a.Background {
 				job, err := startBackgroundShell(a.Command, a.WorkingDir, a.Stdin)
 				if err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
-					job.id, job.pid, shortCommand(a.Command), job.id, job.id), nil
+				return withSandboxNotice(fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
+					job.id, job.pid, shortCommand(a.Command), job.id, job.id)), nil
 			}
 			timeout := 30 * time.Second
 			if a.TimeoutSec > 0 {
@@ -57,7 +64,8 @@ func RunShellTool() Tool {
 			if timeout > 300*time.Second {
 				timeout = 300 * time.Second
 			}
-			return runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, timeout)
+			res, err := runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, timeout)
+			return withSandboxNotice(res), err
 		},
 	}
 }
