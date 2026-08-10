@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -12,6 +13,49 @@ import (
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
 )
+
+func TestChatChunkQueuesMissingRenderFrame(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 2
+	m.streaming = true
+	m.lastRenderTime = time.Now()
+
+	_, cmd := m.Update(chatChunkMsg{gen: 2, content: "new text"})
+	if cmd == nil {
+		t.Fatal("chunk inside cadence window did not schedule a render")
+	}
+	if !m.renderQueued {
+		t.Fatal("scheduled render was not marked as queued")
+	}
+	if got := m.streamBuf.String(); got != "new text" {
+		t.Fatalf("stream buffer = %q, want new text", got)
+	}
+
+	m.Update(streamRenderMsg{gen: 2})
+	if m.renderQueued {
+		t.Fatal("render message did not clear the queued marker")
+	}
+	if !strings.Contains(stripANSI(m.transcript.String()), "new text") {
+		t.Fatal("scheduled frame did not paint buffered response text")
+	}
+}
+
+func TestWaitForStreamKeepsThinkingAndContentFromSameFrame(t *testing.T) {
+	responses := make(chan api.ChatResponse, 1)
+	responses <- api.ChatResponse{Message: api.Message{
+		Thinking: "reasoning",
+		Content:  "answer",
+	}}
+	m := &Model{stream: &streamState{gen: 3, resp: responses}}
+
+	msg, ok := m.waitForStream()().(chatChunkMsg)
+	if !ok {
+		t.Fatalf("stream frame returned %T, want chatChunkMsg", msg)
+	}
+	if msg.thinking != "reasoning" || msg.content != "answer" {
+		t.Fatalf("stream frame lost a field: %#v", msg)
+	}
+}
 
 // statusTestModel is interruptTestModel plus the bits layout()/Update() touch
 // (markdown notes renderer, focused textarea, real viewport via layout).

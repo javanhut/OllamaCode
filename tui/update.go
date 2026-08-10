@@ -19,9 +19,10 @@ import (
 
 type chatChunkMsg struct {
 	gen      int
-	content  string
-	thinking bool // content is reasoning stream: shown as a live ticker, never stored in history
+	content  string // answer text
+	thinking string // reasoning text: isolated from content and never stored in history
 }
+type streamRenderMsg struct{ gen int }
 type chatDoneMsg struct {
 	gen        int
 	content    string
@@ -549,29 +550,54 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale chunk from a cancelled/replaced stream
 		}
 		wasAtBottom := m.viewport.AtBottom()
-		if msg.thinking {
+		if msg.thinking != "" {
 			// Reasoning stream: keep a short tail as a live ticker next to the
 			// spinner. Never enters streamBuf, so it never reaches history.
-			m.thinkTail += msg.content
+			m.thinkTail += msg.thinking
 			if len(m.thinkTail) > 400 {
 				m.thinkTail = m.thinkTail[len(m.thinkTail)-400:]
 			}
-			m.recordThinking(msg.content) // kept for /show_thinking to replay later
-		} else {
+			m.recordThinking(msg.thinking)
+		}
+		if msg.content != "" {
 			m.thinkTail = "" // answer started; drop the ticker
 			m.streamBuf.WriteString(msg.content)
 		}
-		// Cap paint frequency independently of token boundaries. Newline tokens
-		// used to bypass the cap and cause rapid full-screen redraws and flicker.
-		if time.Since(m.lastRenderTime) > 80*time.Millisecond {
+		// Paint at a responsive cadence independently of token boundaries. When a
+		// chunk arrives inside the cadence window, schedule the missing frame: the
+		// old opportunistic throttle simply skipped it and waited for some later
+		// token (or completion) to happen to trigger another paint.
+		elapsed := time.Since(m.lastRenderTime)
+		if m.lastRenderTime.IsZero() || elapsed >= streamRenderInterval {
 			m.refreshTranscript()
 			m.lastRenderTime = time.Now()
 			if wasAtBottom {
 				m.viewport.GotoBottom()
 			}
+		} else if !m.renderQueued {
+			m.renderQueued = true
+			gen := m.turnGen
+			cmds = append(cmds, tea.Tick(streamRenderInterval-elapsed, func(time.Time) tea.Msg {
+				return streamRenderMsg{gen: gen}
+			}))
 		}
 		if m.stream != nil {
 			cmds = append(cmds, m.waitForStream())
+		}
+
+	case streamRenderMsg:
+		if msg.gen != m.turnGen {
+			break
+		}
+		m.renderQueued = false
+		if !m.streaming {
+			break
+		}
+		wasAtBottom := m.viewport.AtBottom()
+		m.refreshTranscript()
+		m.lastRenderTime = time.Now()
+		if wasAtBottom {
+			m.viewport.GotoBottom()
 		}
 
 	case chatToolCallsMsg:

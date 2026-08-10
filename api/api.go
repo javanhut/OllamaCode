@@ -214,7 +214,10 @@ var ollamaCalls map[string]Endpoint = map[string]Endpoint{
 // resident avoids paying its load cost again after a longer shell command,
 // index update, or permission prompt. This is long enough for normal turns but
 // still lets Ollama reclaim memory after the session goes idle.
-const defaultKeepAlive = "30m"
+const (
+	defaultKeepAlive     = "30m"
+	responseStreamBuffer = 64
+)
 
 // A shared transport preserves HTTP connections across chat, embedding, model
 // discovery, and tool rounds. The default transport only keeps two idle
@@ -433,7 +436,9 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 		req.KeepAlive = defaultKeepAlive
 	}
 
-	respChan := make(chan ChatResponse)
+	// Decouple socket reads from terminal paints. A short burst of tokens should
+	// not stall the HTTP decoder while the UI is laying out a frame.
+	respChan := make(chan ChatResponse, responseStreamBuffer)
 	errChan := make(chan error, 1)
 
 	go func() {

@@ -25,6 +25,10 @@ type streamState struct {
 	constrained bool   // request carried a small-tier constrained-decoding format
 }
 
+// A 30 Hz terminal paint is quick enough to look continuous while leaving
+// enough room for layout and input handling on large transcripts.
+const streamRenderInterval = time.Second / 30
+
 // pullStreamState tracks an in-flight model download driven from the picker.
 
 func (m *Model) submit() tea.Cmd {
@@ -200,8 +204,15 @@ func (m *Model) waitForStream() tea.Cmd {
 			if !ok {
 				return chatDoneMsg{gen: s.gen}
 			}
-			if chunk.Message.Thinking != "" && !chunk.Done && len(chunk.Message.ToolCalls) == 0 {
-				return chatChunkMsg{gen: s.gen, content: chunk.Message.Thinking, thinking: true}
+			if !chunk.Done && len(chunk.Message.ToolCalls) == 0 &&
+				(chunk.Message.Thinking != "" || chunk.Message.Content != "") {
+				// Keep both fields when a provider emits reasoning and answer text in
+				// one frame. Preferring Thinking here used to silently drop Content.
+				return chatChunkMsg{
+					gen:      s.gen,
+					content:  chunk.Message.Content,
+					thinking: chunk.Message.Thinking,
+				}
 			}
 			if len(chunk.Message.ToolCalls) > 0 {
 				return chatToolCallsMsg{
@@ -359,6 +370,7 @@ func (m *Model) startStream() tea.Cmd {
 	m.streamBuf.Reset()
 	m.thinkTail = ""
 	m.lastRenderTime = time.Time{}
+	m.renderQueued = false
 	m.busySince = time.Now()
 	return m.waitForStream()
 }

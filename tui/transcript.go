@@ -222,9 +222,12 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	b.WriteString(assistantStyle.Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
 
-	// The reasoning that produced this answer, when /show_thinking is on. It ran
-	// before the answer, so it reads first.
-	if !t.streaming {
+	// Keep reasoning isolated above the answer. /show_thinking used to replay it
+	// only after completion, which made the toggle appear broken during the part
+	// of the turn when reasoning was most useful.
+	if t.streaming {
+		b.WriteString(m.liveThinkingBlock(m.viewport.Width()))
+	} else {
 		b.WriteString(m.thinkingBlock(t.userIdx, m.viewport.Width()))
 	}
 
@@ -251,7 +254,7 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString("\n")
 		// Live reasoning ticker: the last line of the model's thinking stream,
 		// so long reasoning reads as progress instead of a frozen spinner.
-		if line := lastNonEmptyLine(m.thinkTail); line != "" {
+		if line := lastNonEmptyLine(m.thinkTail); line != "" && !m.cfg.Thinking {
 			b.WriteString(mutedStyle.Render("  " + truncatePlain(line, max(m.viewport.Width()-4, 20))))
 			b.WriteString("\n")
 		}

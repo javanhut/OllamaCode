@@ -142,6 +142,29 @@ func TestShowThinkingToggle(t *testing.T) {
 	}
 }
 
+func TestShowThinkingWhileStreaming(t *testing.T) {
+	m := &Model{
+		cfg:        config{Thinking: true},
+		streaming:  true,
+		history:    []api.Message{{Role: "user", Content: "why?"}},
+		streamBuf:  &strings.Builder{},
+		transcript: &strings.Builder{},
+		md:         newMarkdownRenderer(),
+	}
+	m.viewport.SetWidth(80)
+	m.turnThinking.WriteString("checking the first option")
+	m.streamBuf.WriteString("The answer has started.")
+
+	m.refreshTranscript()
+	got := stripANSI(m.transcript.String())
+	if !strings.Contains(got, "thinking · live") || !strings.Contains(got, "checking the first option") {
+		t.Fatalf("live reasoning was not rendered as an isolated block:\n%s", got)
+	}
+	if !strings.Contains(got, "└\nThe answer has started.") {
+		t.Fatalf("reasoning block was not closed before answer text:\n%s", got)
+	}
+}
+
 // Reasoning is captured per turn regardless of the toggle, and bounded.
 func TestRecordThinkingIsBounded(t *testing.T) {
 	m := &Model{}

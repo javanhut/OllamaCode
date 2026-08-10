@@ -153,7 +153,7 @@ func (o OllamaHost) startCursor(ctx context.Context, args []string) (*exec.Cmd, 
 }
 
 func (o OllamaHost) chatCursor(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
-	respChan := make(chan ChatResponse)
+	respChan := make(chan ChatResponse, responseStreamBuffer)
 	errChan := make(chan error, 1)
 
 	go func() {

@@ -202,7 +202,7 @@ The recipe and its safety rules are described in [research.md](research.md).
 |---|---|
 | `/help`, `/?` | Help screen |
 | `/verbose` | Toggle detailed tool output |
-| `/show_thinking`, `/thinking` | Replay the model's reasoning in the transcript |
+| `/show_thinking`, `/thinking` | Show reasoning in an isolated live block and retain it with the completed answer |
 | `/face` | Toggle the mascot overlay |
 | `/welcome` | Toggle the startup panel |
 | `/verify` | Toggle the auto compile-check after edits |

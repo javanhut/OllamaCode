@@ -675,7 +675,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cfg.Thinking = !m.cfg.Thinking
 			saveConfig(m.cfg)
 			if m.cfg.Thinking {
-				m.toast = "thinking shown — reasoning from this session is replayed"
+				m.toast = "thinking shown — live and completed reasoning is isolated above answers"
 			} else {
 				m.toast = "thinking hidden"
 			}

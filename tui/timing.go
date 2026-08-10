@@ -103,13 +103,38 @@ func (m *Model) thinkingBlock(userIdx, width int) string {
 	if !ok || t.thinking == "" {
 		return ""
 	}
+	return renderThinkingBlock(t.thinking, width, false)
+}
+
+// liveThinkingBlock renders the reasoning accumulated so far while the answer
+// is still streaming. It deliberately reads turnThinking rather than thinkTail:
+// thinkTail is a short fallback ticker and is cleared as soon as answer text
+// starts, while the expanded block should remain visible and isolated.
+func (m *Model) liveThinkingBlock(width int) string {
+	if !m.cfg.Thinking {
+		return ""
+	}
+	thinking := strings.TrimSpace(m.turnThinking.String())
+	if thinking == "" {
+		return ""
+	}
+	return renderThinkingBlock(thinking, width, true)
+}
+
+func renderThinkingBlock(thinking string, width int, live bool) string {
 	var b strings.Builder
-	b.WriteString(hintStyle.Render("┌ thinking"))
+	heading := "┌ thinking"
+	if live {
+		heading += " · live"
+	}
+	b.WriteString(hintStyle.Render(heading))
 	b.WriteString("\n")
-	for _, line := range strings.Split(ansi.Wordwrap(t.thinking, max(width-4, 20), " -"), "\n") {
+	for _, line := range strings.Split(ansi.Wordwrap(thinking, max(width-4, 20), " -"), "\n") {
 		b.WriteString(hintStyle.Render("│ " + line))
 		b.WriteString("\n")
 	}
+	b.WriteString(hintStyle.Render("└"))
+	b.WriteString("\n")
 	return b.String()
 }
 

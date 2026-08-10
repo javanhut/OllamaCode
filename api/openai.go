@@ -249,7 +249,7 @@ func (o OllamaHost) postOpenAI(ctx context.Context, payload oaRequest) (io.ReadC
 }
 
 func (o OllamaHost) chatOpenAI(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
-	respChan := make(chan ChatResponse)
+	respChan := make(chan ChatResponse, responseStreamBuffer)
 	errChan := make(chan error, 1)
 
 	go func() {

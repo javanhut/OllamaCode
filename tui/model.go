@@ -434,6 +434,7 @@ type Model struct {
 	companion       *companion.Client
 	companionSender func(tea.Msg)
 	lastRenderTime  time.Time
+	renderQueued    bool // a cadence-limited transcript paint is already scheduled
 	busySince       time.Time
 	faceFrame       int
 	faceLastKey     time.Time

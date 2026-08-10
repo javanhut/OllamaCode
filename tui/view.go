@@ -42,7 +42,7 @@ var slashCommands = []struct {
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 	{"/stats", "session timing and token totals"},
-	{"/show_thinking", "toggle the model's reasoning in the transcript"},
+	{"/show_thinking", "toggle live and saved model reasoning"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
 	{"/research", "guided web research: dedupe sources, synthesize with citations"},

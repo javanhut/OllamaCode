@@ -41,7 +41,7 @@ outranks a stored key. Prefer that over typing the key.
 | `face` | `false` hides the mascot overlay |
 | `welcome` | `false` hides the startup panel |
 | `verbose` | Detailed tool output |
-| `show_thinking` | Replay reasoning in the transcript |
+| `show_thinking` | Show reasoning live in an isolated block and retain it in the transcript |
 | `profiles` | Per-model settings, see below |
 | `routes` | Mode → model spec, see [routing](routing.md) |
 | `providers` | Extra endpoints, see below |
