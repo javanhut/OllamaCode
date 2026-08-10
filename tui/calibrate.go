@@ -15,12 +15,23 @@ type calibrationDoneMsg struct {
 	err    error
 }
 
-func (m *Model) calibrateModelCmd() tea.Cmd {
-	host, model := m.host, m.modelName
+// ratioProvider names the provider the same way calibrateModelCmd does, so the
+// persisted chars-per-token ratio is keyed identically on save and load.
+func (m *Model) ratioProvider() string {
 	provider := m.activeProvider()
 	if provider == "" {
-		provider = "ollama:" + host.URL()
+		provider = "ollama:" + m.host.URL()
 	}
+	return provider
+}
+
+func tokenRatioKey(provider, model string) string {
+	return provider + "|" + model
+}
+
+func (m *Model) calibrateModelCmd() tea.Cmd {
+	host, model := m.host, m.modelName
+	provider := m.ratioProvider()
 	return func() tea.Msg {
 		runtime := "unknown"
 		if version, err := host.GetOllamaVersion(); err == nil {
@@ -37,8 +48,28 @@ func (m *Model) calibrateModelCmd() tea.Cmd {
 		if err == nil {
 			err = calibration.Save(result)
 		}
+		if err == nil && result.CharsPerToken > 0 {
+			// Install the measured ratio immediately and persist it so later
+			// sessions estimate tokens with it from the first render.
+			markRatioKey(tokenRatioKey(provider, model))
+			SetCharsPerToken(result.CharsPerToken)
+			saveTokenRatio(tokenRatioKey(provider, model), result.CharsPerToken)
+		}
 		return calibrationDoneMsg{result: result, err: err}
 	}
+}
+
+// ensureMeasuredRatio loads the calibrated chars-per-token ratio for the
+// current provider+model at most once per model switch; afterwards it is a
+// mutex and a string compare, cheap enough for the render path. Models that
+// were never calibrated stay on the default heuristic.
+func (m *Model) ensureMeasuredRatio() {
+	key := tokenRatioKey(m.ratioProvider(), m.modelName)
+	if ratioKeySeen(key) {
+		return
+	}
+	markRatioKey(key)
+	SetCharsPerToken(loadTokenRatios()[key]) // missing key → 0 → default
 }
 
 func (m *Model) applyCalibration() {

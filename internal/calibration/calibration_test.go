@@ -14,6 +14,11 @@ type fakeClient struct {
 }
 
 func (f *fakeClient) ChatOnce(context.Context, api.ChatRequest) (api.ChatResponse, error) {
+	if f.index >= len(f.responses) {
+		// Run appends ratio-measurement probes after the behavior probes; a
+		// zero response reports no prompt_eval_count, so measurement is skipped.
+		return api.ChatResponse{}, nil
+	}
 	r := f.responses[f.index]
 	f.index++
 	return r, nil

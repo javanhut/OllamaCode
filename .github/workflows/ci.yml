@@ -27,3 +27,9 @@ jobs:
 
     - name: Run unit tests (go test)
       run: go test -v ./...
+
+    - name: Eval fixture regression gate (hermetic)
+      # No Ollama host exists in CI: -selftest runs every fixture through the
+      # real agent loop and tools against an in-process scripted model, and
+      # exits non-zero if any fixture's behavior check or tool contract fails.
+      run: go run ./cmd/eval -selftest -samples 2

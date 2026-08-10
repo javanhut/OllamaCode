@@ -109,12 +109,14 @@ func (m *Model) sidebarSections(inner int) []string {
 		line = m.spinner.View() + " " + line
 	}
 	status := m.sidebarHeading("Status") + "\n" + line
-	if m.totalTokens > 0 {
-		tokens := fmt.Sprintf("%dk / %dk ctx", m.totalTokens/1000, m.contextLimit/1000)
-		if m.totalTokens > m.contextLimit*8/10 {
-			status += "\n" + errorStyle.Render(tokens)
+	// Live estimate while streaming, last completed count when idle.
+	m.ensureMeasuredRatio()
+	if tokens := m.displayTokens(); tokens > 0 {
+		text := fmt.Sprintf("%dk / %dk ctx", tokens/1000, m.contextLimit/1000)
+		if tokens > m.contextLimit*8/10 {
+			status += "\n" + errorStyle.Render(text)
 		} else {
-			status += "\n" + mutedStyle.Render(tokens)
+			status += "\n" + mutedStyle.Render(text)
 		}
 	}
 	if toast := m.activeToast(); toast != "" {

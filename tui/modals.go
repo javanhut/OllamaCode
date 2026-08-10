@@ -474,7 +474,8 @@ func (m *Model) statsModal() string {
 	row("average turn", shortDuration(total/time.Duration(turns)))
 	b.WriteString("\n")
 	if m.contextLimit > 0 {
-		row("context", fmt.Sprintf("%dk / %dk tokens", m.totalTokens/1000, m.contextLimit/1000))
+		m.ensureMeasuredRatio()
+		row("context", fmt.Sprintf("%dk / %dk tokens", m.displayTokens()/1000, m.contextLimit/1000))
 	}
 	row("model", m.modelName)
 	row("mode", strings.ToUpper(m.mode.String()))

@@ -134,6 +134,15 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 | `/mode <explore\|plan\|write\|auto>` | Switch directly |
 | `/auto` | Shortcut for `/mode auto` |
 
+### Research
+
+| Command | Description |
+|---|---|
+| `/research <question>` | Guided research turn: decomposes the question, searches the web, dedupes sources, reads the primary ones, and synthesizes an answer with a numbered source list |
+| `/research` | On an existing research thread, continue/deepen it instead of restarting |
+
+The recipe and its safety rules are described in [research.md](research.md).
+
 ### Session
 
 | Command | Description |

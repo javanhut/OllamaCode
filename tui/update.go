@@ -773,6 +773,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 
+			// Verified-citations gate (explore mode): an answer that makes code
+			// claims must back them with path:line citations that resolve
+			// against the workspace. Missing/invalid citations earn one
+			// corrective nudge and a re-invoke; the retried answer passes
+			// through here again and is accepted as-is, so this can't loop.
+			if cc := m.maybeCitationGate(finalAssistant); cc != nil {
+				cmds = append(cmds, cc)
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+				break
+			}
+
 			// Turn complete: bank any file changes as one undoable checkpoint.
 			m.finalizeCheckpoint(m.lastUserMessage())
 

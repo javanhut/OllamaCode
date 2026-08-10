@@ -346,10 +346,12 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 	if width <= 4 {
 		width = 80
 	}
+	// styleCitations runs on the rendered output: printable text is unchanged
+	// (still greppable/copyable `path:line`), only the ANSI styling differs.
 	if out, ok := m.md.render(s, width-2, useCache); ok {
-		return out
+		return styleCitations(out)
 	}
-	return s
+	return styleCitations(s)
 }
 
 func (m *Model) renderNotesMarkdown(s string, width int) string {

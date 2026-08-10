@@ -17,6 +17,8 @@ expensive thinking somewhere else.
 | [Architecture](architecture.md) | How a turn actually runs, for people changing the code |
 | [Voice companion](companion.md) | Optional speech-in, speech-out popup |
 | [Training](training.md) | Export traces as a dataset and LoRA-tune a model on them |
+| [Evals](eval.md) | Running cmd/eval, multi-sample pass rates, and the CI self-test gate |
+| [Research](research.md) | Guided web research with deduped sources and citations |
 
 ## The 60-second version
 

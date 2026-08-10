@@ -31,6 +31,11 @@ type Result struct {
 	Correct      int       `json:"correct"`
 	ValidArgs    int       `json:"valid_args"`
 	Recommended  string    `json:"recommended_tier"`
+	// CharsPerToken is the model's measured chars-per-token ratio, from
+	// comparing known prompt lengths against prompt_eval_count. 0 means the
+	// host reported no prompt_eval_count and callers keep their default
+	// heuristic.
+	CharsPerToken float64 `json:"chars_per_token,omitempty"`
 }
 
 func (r Result) Score() float64 {
@@ -85,7 +90,49 @@ func Run(ctx context.Context, client Client, model, provider, runtime string) (R
 	} else {
 		result.Recommended = "small"
 	}
+	if ratio, ok := measureCharsPerToken(ctx, client, model); ok {
+		result.CharsPerToken = ratio
+	}
 	return result, nil
+}
+
+// ratioSamples are fixed texts of known length, sent without tools so the
+// model's real chars-per-token ratio can be measured against prompt_eval_count.
+// Prose and code are mixed because real prompts are both, and the samples are
+// long enough that the chat template's constant token overhead is noise.
+var ratioSamples = []string{
+	strings.Repeat("The quick brown fox jumps over the lazy dog while the rain taps steadily against the windowpane. ", 12),
+	strings.Repeat("func render(width int) string {\n\tif width <= 0 {\n\t\treturn \"\"\n\t}\n\treturn strings.Repeat(\"-\", width)\n}\n", 8),
+}
+
+// measureCharsPerToken estimates the model's chars-per-token ratio by sending
+// the known-length ratioSamples and dividing by the summed prompt_eval_count.
+// ok is false when the host errors or reports no prompt_eval_count (some
+// OpenAI-compatible endpoints), leaving callers on their default heuristic.
+func measureCharsPerToken(ctx context.Context, client Client, model string) (ratio float64, ok bool) {
+	var chars, tokens int
+	for _, sample := range ratioSamples {
+		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		resp, err := client.ChatOnce(requestCtx, api.ChatRequest{Model: model,
+			Messages: []api.Message{{Role: "user", Content: sample}},
+			Options:  map[string]any{"temperature": 0, "num_predict": 1}})
+		cancel()
+		if err != nil || resp.PromptEval <= 0 {
+			return 0, false
+		}
+		chars += len(sample)
+		tokens += resp.PromptEval
+	}
+	if chars == 0 || tokens == 0 {
+		return 0, false
+	}
+	ratio = float64(chars) / float64(tokens)
+	// Reject garbage counts from non-native backends: a real tokenizer lands
+	// roughly between 1.5 and 8 chars per token for English prose and code.
+	if ratio < 1.5 || ratio > 8 {
+		return 0, false
+	}
+	return ratio, true
 }
 
 func calibrationRegistry() *tools.Registry {

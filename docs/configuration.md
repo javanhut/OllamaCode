@@ -88,6 +88,18 @@ override.
 
 `/model ctx` and `/model temp` write here.
 
+### Token estimation
+
+Prompt budgeting, compaction, and the mid-turn ctx meter estimate tokens with a
+chars-per-token ratio. The default is the ~4-chars-per-token heuristic; running
+`/model calibrate` measures the model's real ratio by comparing known prompt
+lengths against the host's `prompt_eval_count`, and the estimators use the
+measured value from then on. The ratio is stored with the calibration result in
+the OS cache directory (`/ollama_code/calibration/`) and mirrored to
+`~/.config/ollama_code/token_ratios.json`, keyed by `provider|model`, so later
+sessions pick it up on the first render. Models that were never calibrated — or
+whose host reports no `prompt_eval_count` — stay on the default heuristic.
+
 ## `routes`
 
 ```json

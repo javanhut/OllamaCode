@@ -62,3 +62,45 @@ func saveConfig(c config) {
 	}
 	_ = os.WriteFile(path, data, 0o644)
 }
+
+func tokenRatiosPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "ollama_code", "token_ratios.json")
+}
+
+// loadTokenRatios reads the calibrated chars-per-token ratios, keyed by
+// provider|model. A missing or corrupt file yields an empty map — the
+// estimators then stay on their default heuristic.
+func loadTokenRatios() map[string]float64 {
+	ratios := map[string]float64{}
+	path := tokenRatiosPath()
+	if path == "" {
+		return ratios
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &ratios)
+	}
+	return ratios
+}
+
+// saveTokenRatio persists the ratio measured by /model calibrate for one
+// provider|model, keeping the ratios recorded for other models.
+func saveTokenRatio(key string, ratio float64) {
+	path := tokenRatiosPath()
+	if path == "" {
+		return
+	}
+	ratios := loadTokenRatios()
+	ratios[key] = ratio
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(ratios, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o600)
+}

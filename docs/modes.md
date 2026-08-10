@@ -28,6 +28,29 @@ and `go version/env/list/doc/vet`.
 Output redirection (`>`, `>>`) and command substitution (`$(...)`, backticks)
 are blocked, because either one turns a read into a write.
 
+### Verified citations
+
+Answers in explore mode must back every claim about the code with an inline
+`path:line` citation — `tui/mode.go:42`, or `api/api.go:120-135` for a range.
+When an answer finalizes, the harness parses each citation, resolves it
+against the workspace, and checks that the file exists and the line number is
+in range (`maybeCitationGate` in `tui/citations.go`, same re-invoke mechanics
+as the compile-verify gate).
+
+An answer that names source files but cites none — or whose citations don't
+resolve — is sent back to the model once, with the exact list of which
+citations failed and why. The retried answer is then shown as-is, so the gate
+can't loop (the correction is detected in the history tail, not via extra
+state). Pure explanations that name no source files are never challenged —
+the "makes code claims" heuristic only triggers on a mention of a plausible
+source path.
+
+Citations render as underlined `path:line` references in the transcript. The
+printable text is unchanged, so they stay greppable (`ctrl+f`) and copyable
+(drag-select). There is no click-to-open in the transcript; to jump to a
+cited location, copy the reference and ask about the file (an `@path` mention
+works too).
+
 ## plan — read plus notes
 
 Everything explore allows **except shell**, plus the session-notes tools.

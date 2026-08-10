@@ -45,6 +45,7 @@ var slashCommands = []struct {
 	{"/show_thinking", "toggle the model's reasoning in the transcript"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
+	{"/research", "guided web research: dedupe sources, synthesize with citations"},
 }
 
 // isSlashCommand reports whether val is exactly a known command. The suggestion
@@ -187,11 +188,15 @@ func (m *Model) headerView() string {
 		// otherwise eat the context counter, which is the more useful half.
 		meta = append(meta, truncatePlain(m.gitBranch, max(width/5, 12)))
 	}
-	if m.totalTokens > 0 && m.contextLimit > 0 {
-		meta = append(meta, fmt.Sprintf("%dk/%dk ctx", m.totalTokens/1000, m.contextLimit/1000))
+	// Mid-turn the completed count is stale, so the meter shows the live
+	// estimate (history plus the partial reply) whenever it runs ahead.
+	m.ensureMeasuredRatio()
+	tokens := m.displayTokens()
+	if tokens > 0 && m.contextLimit > 0 {
+		meta = append(meta, fmt.Sprintf("%dk/%dk ctx", tokens/1000, m.contextLimit/1000))
 	}
 	metaStyle := mutedStyle.Background(surfaceColor)
-	if m.contextLimit > 0 && m.totalTokens > m.contextLimit*8/10 {
+	if m.contextLimit > 0 && tokens > m.contextLimit*8/10 {
 		metaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(surfaceColor)
 	}
 	// roomFor is what the left side has left once brand, right side and the gap

@@ -472,6 +472,10 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.providerCommand(strings.TrimSpace(strings.TrimPrefix(val, "/provider")))
 			return m, nil
 		}
+		if val == "/research" || strings.HasPrefix(val, "/research ") {
+			m.input.Reset()
+			return m, m.researchCommand(strings.TrimSpace(strings.TrimPrefix(val, "/research")))
+		}
 		switch val {
 		case "/auto":
 			m.input.Reset()
