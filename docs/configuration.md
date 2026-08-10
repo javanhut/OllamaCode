@@ -147,8 +147,10 @@ model in a route spec.
 
 ## MCP servers
 
-External MCP servers run as local stdio subprocesses. Their tools are namespaced
-as `mcp_<server>_<tool>` to avoid collisions with built-ins.
+External MCP servers run as local stdio subprocesses or Streamable HTTP
+endpoints — see [MCP servers](mcp.md) for HTTP and auth configuration. Their
+tools are namespaced as `mcp_<server>_<tool>` to avoid collisions with
+built-ins.
 
 ```json
 "mcp_servers": {

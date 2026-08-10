@@ -13,6 +13,7 @@ expensive thinking somewhere else.
 | [Commands](commands.md) | Every slash command and key binding |
 | [Tools](tools.md) | What the model can do, and what each mode allows |
 | [Configuration](configuration.md) | `config.json`, environment variables, per-model profiles |
+| [MCP servers](mcp.md) | External tools over stdio or Streamable HTTP |
 | [Safety](safety.md) | Approval prompts, undo, loop guards, verification |
 | [Architecture](architecture.md) | How a turn actually runs, for people changing the code |
 | [Voice companion](companion.md) | Optional speech-in, speech-out popup |

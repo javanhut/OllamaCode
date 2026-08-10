@@ -19,6 +19,76 @@ import (
 
 const defaultMCPProtocolVersion = "2025-11-25"
 
+// ExternalServerSpec describes one configured MCP server. Exactly one of
+// Command (stdio subprocess) or URL (Streamable HTTP endpoint) must be set;
+// everything else applies to the selected transport as documented per field.
+type ExternalServerSpec struct {
+	Name             string
+	Command          string
+	Args             []string
+	WorkDir          string
+	EnvAllow         []string
+	URL              string
+	Headers          map[string]string
+	HeadersEnv       map[string]string
+	MaxResponseBytes int
+	CallTimeout      time.Duration
+}
+
+// NewMCPServerFromSpec validates the transport selection and constructs the
+// matching MCP server: a stdio subprocess for Command, a Streamable HTTP
+// client for URL. Guardrails (timeouts, response caps, namespacing) are
+// transport-independent and apply to both.
+func NewMCPServerFromSpec(spec ExternalServerSpec) (MCPServer, error) {
+	hasCommand := strings.TrimSpace(spec.Command) != ""
+	hasURL := strings.TrimSpace(spec.URL) != ""
+	switch {
+	case hasCommand && hasURL:
+		return nil, fmt.Errorf("MCP server %q sets both command and url; exactly one transport is allowed", spec.Name)
+	case !hasCommand && !hasURL:
+		return nil, fmt.Errorf("MCP server %q requires either a command (stdio) or a url (HTTP)", spec.Name)
+	}
+	if hasURL {
+		headers, err := ResolveExternalHeaders(spec.Headers, spec.HeadersEnv)
+		if err != nil {
+			return nil, fmt.Errorf("MCP server %q: %w", spec.Name, err)
+		}
+		return NewHTTPExternalServer(HTTPExternalServerOptions{
+			Name: spec.Name, URL: strings.TrimSpace(spec.URL), Headers: headers,
+			MaxResponseBytes: spec.MaxResponseBytes, CallTimeout: spec.CallTimeout,
+		})
+	}
+	return NewExternalServerWithOptions(ExternalServerOptions{
+		Name: spec.Name, Command: spec.Command, Args: spec.Args, WorkDir: spec.WorkDir,
+		EnvAllow: spec.EnvAllow, MaxResponseBytes: spec.MaxResponseBytes, CallTimeout: spec.CallTimeout,
+	})
+}
+
+// ResolveExternalHeaders merges static headers with env-var indirections.
+// headersEnv maps a header name to the environment variable holding its value
+// (mirroring provider api_key_env) so secrets stay out of the config file; a
+// set env value wins over the static value for the same header. An unset
+// variable with no static fallback is a configuration error rather than a
+// silently missing credential.
+func ResolveExternalHeaders(headers, headersEnv map[string]string) (map[string]string, error) {
+	merged := cloneStrings(headers)
+	for header, envVar := range headersEnv {
+		name := strings.TrimSpace(envVar)
+		if strings.TrimSpace(header) == "" || name == "" {
+			return nil, fmt.Errorf("headers_env requires a header name and an environment variable name")
+		}
+		value, ok := os.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			if _, fallback := merged[header]; fallback {
+				continue
+			}
+			return nil, fmt.Errorf("environment variable %q for header %q is not set", name, header)
+		}
+		merged[header] = value
+	}
+	return merged, nil
+}
+
 type MCPServer interface {
 	Initialize(context.Context, string) error
 	ListTools(context.Context, ToolPolicy) ([]Tool, error)

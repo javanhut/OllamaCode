@@ -6,18 +6,50 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/javanhut/ollama_code/tui"
 )
 
 // cliFlags holds the command line. With no -p the TUI starts as before; -p
 // runs a single non-interactive agent turn (see docs/commands.md, "Headless
-// mode").
+// mode"). --resume restores a saved session on startup (TUI only).
 type cliFlags struct {
-	prompt   string
-	model    string
-	json     bool
-	maxSteps int
+	prompt    string
+	model     string
+	json      bool
+	maxSteps  int
+	resume    string // session name; "" with resumeSet = latest auto-save
+	resumeSet bool
+}
+
+// extractResume handles --resume before flag parsing: its value is optional
+// (bare --resume means "the last auto-saved session"), which flag.StringVar
+// cannot express. Both -resume/--resume and the =value form are accepted; a
+// separate token is consumed as the name only when it doesn't look like
+// another flag.
+func extractResume(args []string) (rest []string, id string, set bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-resume" || a == "--resume" {
+			set = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				id = args[i+1]
+				i++
+			}
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, "-resume="); ok {
+			id, set = v, true
+			continue
+		}
+		if v, ok := strings.CutPrefix(a, "--resume="); ok {
+			id, set = v, true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return rest, id, set
 }
 
 // parseFlags parses args (excluding argv[0]). -p and --prompt are the same
@@ -25,8 +57,14 @@ type cliFlags struct {
 // registered onto one variable so either spelling works.
 func parseFlags(args []string, stderr io.Writer) (cliFlags, error) {
 	var f cliFlags
+	args, f.resume, f.resumeSet = extractResume(args)
 	fs := flag.NewFlagSet("ocode", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: ocode [--resume [name]] [flags]")
+		fmt.Fprintln(stderr, "  --resume [name]  restore the last auto-saved session, or a named /save session")
+		fs.PrintDefaults()
+	}
 	fs.StringVar(&f.prompt, "p", "", "run one prompt non-interactively and print the final answer (shorthand for -prompt)")
 	fs.StringVar(&f.prompt, "prompt", "", "run one prompt non-interactively and print the final answer")
 	fs.StringVar(&f.model, "model", "", "model for the headless run (default: configured model); accepts provider:model")
@@ -34,6 +72,9 @@ func parseFlags(args []string, stderr io.Writer) (cliFlags, error) {
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "with -p, cap tool-call rounds (default: configured max_steps)")
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, err
+	}
+	if f.resumeSet && f.prompt != "" {
+		return cliFlags{}, fmt.Errorf("--resume cannot be combined with -p (headless runs start fresh)")
 	}
 	return f, nil
 }
@@ -44,6 +85,13 @@ func main() {
 		os.Exit(2)
 	}
 	if f.prompt == "" {
+		if f.resumeSet {
+			if err := tui.RunResume(f.resume); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if err := tui.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)

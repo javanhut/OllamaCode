@@ -20,6 +20,35 @@ applies: file tools are jailed to the workspace and `run_shell` goes through
 the OS sandbox. There is no approval prompt headless — running `ocode -p` is
 itself the trust decision.
 
+## Resuming sessions
+
+Every completed turn is auto-saved (history, mode, model, workspace, todos,
+session notes), so a session survives the process that ran it.
+
+| Flag | Effect |
+|---|---|
+| `--resume` | Start the TUI restored from the last auto-saved turn |
+| `--resume <name>` | Restore a named session written by `/save <name>` |
+
+- Granularity is the **completed turn**: a turn that was still streaming when
+  the process died is not saved; recovery picks up at the end of the last
+  finished turn.
+- If the previous run ended uncleanly (crash, kill, power loss), a plain
+  `ocode` start says so and points at `--resume`; `ocode --resume` then
+  restores the last completed turn and announces the recovery in a toast.
+- `--resume` with nothing saved starts fresh and says "nothing to resume" —
+  it never fails.
+- `/undo` survives restarts: the checkpoint stack is persisted per workspace
+  (capped at 25 turns, newest first), so after `--resume` you can still rewind
+  file changes made before the process exited.
+- `--resume` cannot be combined with `-p` — headless runs always start fresh.
+
+State lives under the user config dir (`~/.config/ollama_code/` on Linux,
+`~/Library/Application Support/ollama_code/` on macOS): `autosave.json` for
+the last turn, `sessions/<name>.json` for `/save` sessions, `running.lock` as
+the clean-exit marker, and `checkpoints/<workspace-hash>.json` for the undo
+stack. All writes are atomic (temp file + rename).
+
 ```sh
 # In a script: summarize the working tree as JSON for jq.
 ocode -p "summarize uncommitted changes in one line" -json | jq -r .output

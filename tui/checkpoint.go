@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -81,18 +82,104 @@ func (m *Model) snapshotBeforeMutate(paths []string) {
 }
 
 // finalizeCheckpoint pushes the current turn's snapshots onto the undo stack.
-// Called at turn end. No-op when nothing was mutated.
+// Called at turn end. The stack-only push is a no-op when nothing was mutated,
+// but the turn-end auto-save runs either way.
 func (m *Model) finalizeCheckpoint(label string) {
 	m.ckpt.mu.Lock()
-	defer m.ckpt.mu.Unlock()
-	if len(m.ckpt.pending) == 0 {
+	if len(m.ckpt.pending) > 0 {
+		m.ckpt.stack = append(m.ckpt.stack, turnCheckpoint{label: label, snaps: m.ckpt.pending})
+		if len(m.ckpt.stack) > maxUndoDepth {
+			m.ckpt.stack = m.ckpt.stack[len(m.ckpt.stack)-maxUndoDepth:]
+		}
+		m.ckpt.pending = nil
+		m.persistCheckpointsLocked()
+	}
+	m.ckpt.mu.Unlock()
+	m.autosaveSession()
+}
+
+// maxPersistedCheckpointBytes bounds the on-disk checkpoint file. Snapshots
+// hold whole file contents, so without a budget a rewrite-heavy session could
+// pile up hundreds of MB on disk; oldest checkpoints are dropped first, which
+// matches how the in-memory stack prunes.
+const maxPersistedCheckpointBytes = 32 << 20
+
+// persistedSnap / persistedTurn are the on-disk forms of fileSnap and
+// turnCheckpoint (the in-memory types have unexported fields).
+type persistedSnap struct {
+	Existed bool        `json:"existed"`
+	TooBig  bool        `json:"too_big,omitempty"`
+	Data    []byte      `json:"data,omitempty"`
+	Mode    os.FileMode `json:"mode,omitempty"`
+}
+
+type persistedTurn struct {
+	Label string                   `json:"label"`
+	Snaps map[string]persistedSnap `json:"snaps"`
+}
+
+// persistCheckpointsLocked writes the undo stack to its per-workspace file so
+// /undo survives a restart. Newest checkpoints win the size budget; the write
+// is atomic and best-effort. Callers must hold m.ckpt.mu.
+func (m *Model) persistCheckpointsLocked() {
+	if !sessionPersist.Load() {
 		return
 	}
-	m.ckpt.stack = append(m.ckpt.stack, turnCheckpoint{label: label, snaps: m.ckpt.pending})
-	if len(m.ckpt.stack) > maxUndoDepth {
-		m.ckpt.stack = m.ckpt.stack[len(m.ckpt.stack)-maxUndoDepth:]
+	keep := len(m.ckpt.stack)
+	total := 0
+	for i := len(m.ckpt.stack) - 1; i >= 0; i-- {
+		size := 0
+		for _, s := range m.ckpt.stack[i].snaps {
+			size += len(s.data)
+		}
+		if total+size > maxPersistedCheckpointBytes && keep < len(m.ckpt.stack) {
+			break
+		}
+		total += size
+		keep = i
 	}
-	m.ckpt.pending = nil
+	turns := make([]persistedTurn, 0, len(m.ckpt.stack)-keep)
+	for _, cp := range m.ckpt.stack[keep:] {
+		pt := persistedTurn{Label: cp.label, Snaps: make(map[string]persistedSnap, len(cp.snaps))}
+		for path, s := range cp.snaps {
+			pt.Snaps[path] = persistedSnap{Existed: s.existed, TooBig: s.tooBig, Data: s.data, Mode: s.mode}
+		}
+		turns = append(turns, pt)
+	}
+	data, err := json.Marshal(turns)
+	if err != nil {
+		return
+	}
+	_ = writeFileAtomic(checkpointPath(), data, 0o644)
+}
+
+// loadPersistedCheckpoints restores the undo stack written by a previous
+// process. Called on resume; a missing or corrupt file just means an empty
+// stack. In-memory data wins on shape mismatch: anything that fails to decode
+// is dropped rather than partially trusted.
+func (m *Model) loadPersistedCheckpoints() {
+	data, err := os.ReadFile(checkpointPath())
+	if err != nil {
+		return
+	}
+	var turns []persistedTurn
+	if err := json.Unmarshal(data, &turns); err != nil {
+		return
+	}
+	if len(turns) > maxUndoDepth {
+		turns = turns[len(turns)-maxUndoDepth:]
+	}
+	stack := make([]turnCheckpoint, 0, len(turns))
+	for _, pt := range turns {
+		cp := turnCheckpoint{label: pt.Label, snaps: make(map[string]fileSnap, len(pt.Snaps))}
+		for path, s := range pt.Snaps {
+			cp.snaps[path] = fileSnap{existed: s.Existed, tooBig: s.TooBig, data: s.Data, mode: s.Mode}
+		}
+		stack = append(stack, cp)
+	}
+	m.ckpt.mu.Lock()
+	m.ckpt.stack = stack
+	m.ckpt.mu.Unlock()
 }
 
 // undoLast restores the most recent turn's file changes. Returns a human summary
@@ -105,6 +192,7 @@ func (m *Model) undoLast() (string, []string) {
 	}
 	cp := m.ckpt.stack[len(m.ckpt.stack)-1]
 	m.ckpt.stack = m.ckpt.stack[:len(m.ckpt.stack)-1]
+	m.persistCheckpointsLocked() // keep the on-disk stack in sync with the pop
 
 	restored, deleted, skipped := 0, 0, 0
 	var touched []string

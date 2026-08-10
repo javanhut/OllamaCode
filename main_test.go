@@ -45,3 +45,46 @@ func TestParseFlagsUnknownFlagFails(t *testing.T) {
 		t.Fatal("expected an error for an unknown flag")
 	}
 }
+
+func TestParseFlagsResumeBare(t *testing.T) {
+	f, err := parseFlags([]string{"--resume"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.resumeSet || f.resume != "" {
+		t.Fatalf("bare --resume: set=%v id=%q", f.resumeSet, f.resume)
+	}
+}
+
+func TestParseFlagsResumeNamed(t *testing.T) {
+	for _, args := range [][]string{
+		{"--resume", "my-session"},
+		{"-resume", "my-session"},
+		{"--resume=my-session"},
+	} {
+		f, err := parseFlags(args, io.Discard)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if !f.resumeSet || f.resume != "my-session" {
+			t.Fatalf("%v: set=%v id=%q", args, f.resumeSet, f.resume)
+		}
+	}
+}
+
+func TestParseFlagsResumeDoesNotSwallowFlags(t *testing.T) {
+	// A flag-looking token after --resume is not its value.
+	f, err := parseFlags([]string{"--resume", "-model", "qwen3:8b"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.resumeSet || f.resume != "" || f.model != "qwen3:8b" {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestParseFlagsResumeRejectsHeadless(t *testing.T) {
+	if _, err := parseFlags([]string{"--resume", "-p", "hi"}, io.Discard); err == nil {
+		t.Fatal("--resume with -p should fail")
+	}
+}

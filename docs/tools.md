@@ -114,13 +114,26 @@ gets the result, you just see the natural-language acknowledgement.
 Delegates self-contained tasks to autonomous sub-agents with their own bounded
 loop (20 rounds each). Passing multiple tasks runs up to 4 in parallel.
 
+By default (`async: true`) the call is **non-blocking**: it returns immediately
+with a job id and the sub-agents run in the background. When the job finishes,
+its full report is injected into the conversation as a completion notification
+(`[SUB-AGENT JOB n COMPLETE] …`) — the parent is woken to react if it was idle,
+so results arrive without polling. Up to 4 background jobs may run at once; esc
+cancels them (mid-turn via the normal interrupt, or when idle). Pass
+`async: false` for the old blocking behavior: the call returns only once every
+sub-agent has reported, with the reports inline as the tool result.
+
 Sub-agents inherit the parent's mode, so they are read-only in explore and plan.
 They cannot recurse, switch modes, or prompt the user.
 
 Parallel sub-agents have **no cross-task conflict detection** — only
-parallelize work on independent files. Their file edits are checkpointed into
-the parent turn, so a single `/undo` rewinds the whole delegation (individual
-sub-agent edits are not separately undoable).
+parallelize work on independent files. Their file edits are checkpointed for
+`/undo`, so a single `/undo` rewinds a delegation (individual sub-agent edits
+are not separately undoable). Checkpointing caveat for background jobs: a
+synchronous spawn banks every edit into the spawning turn, but a background
+sub-agent that is still running when that turn ends banks its later edits into
+whichever turn checkpoint is open when each write happens — so `/undo` for
+those detached writes is attributed to the later turn, not the spawning one.
 
 ### `parallel_edit`
 

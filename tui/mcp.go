@@ -10,27 +10,34 @@ import (
 	"github.com/javanhut/ollama_code/tools"
 )
 
+// mcpServerConfig describes one external MCP server. Exactly one of command
+// (stdio subprocess) or url (Streamable HTTP endpoint) must be set; args,
+// work_dir and env_allow only apply to stdio, headers and headers_env only
+// to HTTP. Every other guardrail applies to both transports identically.
 type mcpServerConfig struct {
-	Command         string   `json:"command"`
-	Args            []string `json:"args,omitempty"`
-	ProtocolVersion string   `json:"protocol_version,omitempty"`
-	ReadOnly        bool     `json:"read_only,omitempty"`
-	SmallModelSafe  bool     `json:"small_model_safe,omitempty"`
-	Disabled        bool     `json:"disabled,omitempty"`
-	Trusted         bool     `json:"trusted,omitempty"`
-	WorkDir         string   `json:"work_dir,omitempty"`
-	EnvAllow        []string `json:"env_allow,omitempty"`
-	CallTimeoutSec  int      `json:"call_timeout_sec,omitempty"`
-	MaxResponseKB   int      `json:"max_response_kb,omitempty"`
+	Command         string            `json:"command,omitempty"`
+	URL             string            `json:"url,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	HeadersEnv      map[string]string `json:"headers_env,omitempty"`
+	Args            []string          `json:"args,omitempty"`
+	ProtocolVersion string            `json:"protocol_version,omitempty"`
+	ReadOnly        bool              `json:"read_only,omitempty"`
+	SmallModelSafe  bool              `json:"small_model_safe,omitempty"`
+	Disabled        bool              `json:"disabled,omitempty"`
+	Trusted         bool              `json:"trusted,omitempty"`
+	WorkDir         string            `json:"work_dir,omitempty"`
+	EnvAllow        []string          `json:"env_allow,omitempty"`
+	CallTimeoutSec  int               `json:"call_timeout_sec,omitempty"`
+	MaxResponseKB   int               `json:"max_response_kb,omitempty"`
 }
 
-func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Registry) ([]*tools.ExternalServer, []string) {
+func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Registry) ([]tools.MCPServer, []string) {
 	names := make([]string, 0, len(configs))
 	for name := range configs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var servers []*tools.ExternalServer
+	var servers []tools.MCPServer
 	var warnings []string
 	for _, name := range names {
 		cfg := configs[name]
@@ -42,10 +49,11 @@ func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Regis
 			continue
 		}
 		maxBytes := cfg.MaxResponseKB * 1024
-		server, err := tools.NewExternalServerWithOptions(tools.ExternalServerOptions{
+		server, err := tools.NewMCPServerFromSpec(tools.ExternalServerSpec{
 			Name: name, Command: cfg.Command, Args: cfg.Args, WorkDir: cfg.WorkDir,
-			EnvAllow: cfg.EnvAllow, MaxResponseBytes: maxBytes,
-			CallTimeout: time.Duration(cfg.CallTimeoutSec) * time.Second,
+			EnvAllow: cfg.EnvAllow, URL: cfg.URL, Headers: cfg.Headers, HeadersEnv: cfg.HeadersEnv,
+			MaxResponseBytes: maxBytes,
+			CallTimeout:      time.Duration(cfg.CallTimeoutSec) * time.Second,
 		})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("MCP %s: %v", name, err))
@@ -91,7 +99,7 @@ func connectMCPServers(configs map[string]mcpServerConfig, registry *tools.Regis
 			continue
 		}
 		servers = append(servers, server)
-		go func(server *tools.ExternalServer) {
+		go func(server tools.MCPServer) {
 			<-server.Done()
 			_ = registry.ReplacePrefix(server.Namespace(), nil)
 		}(server)

@@ -69,6 +69,8 @@ func (m *Model) statusText() (string, bool) {
 		return "DREAMING", true
 	case m.asleep:
 		return "ASLEEP", false
+	case m.runningSubagentJobs() > 0:
+		return fmt.Sprintf("SUB-AGENTS ×%d", m.runningSubagentJobs()), true
 	}
 	return "READY", false
 }

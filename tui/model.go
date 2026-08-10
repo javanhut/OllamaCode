@@ -18,6 +18,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/internal/calibration"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/memory"
@@ -145,7 +146,7 @@ type config struct {
 	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by model name
 	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
 	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
-	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP stdio servers
+	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
 }
 
 // providerConfig is one additional LLM endpoint beyond the default host. The
@@ -278,7 +279,7 @@ type Model struct {
 	cfg             config
 	host            api.OllamaHost
 	tools           *tools.Registry
-	mcpServers      []*tools.ExternalServer
+	mcpServers      []tools.MCPServer
 	trace           *tracepkg.Recorder
 	lastCalibration *calibration.Result
 	notes           *sessionNotes
@@ -393,6 +394,14 @@ type Model struct {
 	ragChanged   map[string]bool // paths changed since last reindex (hook-populated)
 
 	ckpt checkpointStore // per-turn file snapshots for /undo
+
+	// Background sub-agents (spawn_subagent with async=true, the default).
+	// Jobs live in the mutex-guarded store; completions reach the update loop
+	// over subagentEvents (see subagent_bg.go).
+	subagents      *subagentStore
+	subagentEvents chan *subagentJob
+	// agentRunner, when set, replaces agent.Run for sub-agent tasks (tests).
+	agentRunner func(ctx context.Context, task string, opts agent.Options) (agent.Result, error)
 
 	// Dream mode: idle-triggered background reflection.
 	lastActivity     time.Time
@@ -606,6 +615,8 @@ func New() *Model {
 		notesMd:      newMarkdownRenderer(),
 		faceMoodLen:  -1, // force first mood computation
 		expandTools:  false,
+		subagents:      newSubagentStore(),
+		subagentEvents: make(chan *subagentJob, 64),
 		lastActivity: time.Now(),
 		faceLastKey:  time.Now(),
 	}
@@ -659,6 +670,11 @@ func getGitBranch() string {
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.nextFaceTick()}
+	// Park one waiter on the background sub-agent event channel; the
+	// subagentDoneMsg handler re-arms it after each completion.
+	if cmd := m.awaitSubagentEvent(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// If no model is configured, try to load the first one we can find.
 	if strings.TrimSpace(m.modelName) == "" {
 		cmds = append(cmds, m.autoLoadModels())

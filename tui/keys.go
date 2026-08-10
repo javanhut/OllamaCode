@@ -714,10 +714,15 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			s := session.Session{
 				Name:      name,
 				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 				Model:     m.modelName,
 				Mode:      m.mode.String(),
 				Notes:     m.notes.get(),
+				Workspace: workspaceRoot(),
 				Messages:  append([]api.Message(nil), m.history...),
+			}
+			for _, it := range m.todos.get() {
+				s.Todos = append(s.Todos, session.Todo{Content: it.Content, Status: string(it.Status)})
 			}
 			if err := session.Save(s); err != nil {
 				m.toast = "save failed: " + err.Error()

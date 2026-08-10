@@ -244,6 +244,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mid-turn, ctrl+c interrupts the turn (like esc) instead of
 			// quitting; it only quits when idle.
 			if m.streaming {
+				m.cancelSubagents()
 				return m, m.interruptTurn()
 			}
 			return m, tea.Quit
@@ -259,7 +260,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Not at a permission prompt: there, esc means "deny this call" and is
 		// handled by updatePermission, not by cancelling the whole turn.
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil && m.state != statePermission {
+			m.cancelSubagents()
 			return m, m.interruptTurn()
+		}
+		// Idle esc with no menus open cancels running background sub-agents —
+		// the only thing still working when no turn is in flight.
+		if msg.String() == "esc" && !m.streaming && m.pending == nil && m.state == stateChat && m.runningSubagentJobs() > 0 {
+			m.cancelSubagents()
+			m.toast = "cancelled background sub-agents"
+			return m, nil
 		}
 		if msg.String() == "ctrl+t" && (m.state == stateChat || m.state == stateHelp || m.state == stateNotes) {
 			m.expandTools = !m.expandTools
@@ -634,10 +643,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.turnChangedPaths[filepath.Clean(path)] = true
 					}
 					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
-				} else if call.Function.Name == "spawn_subagent" && (m.mode == WriteMode || m.mode == AutoMode) {
-					// A delegated writer uses the same registry but is not checkpointed
-					// call-by-call. Conservatively run the repository-wide verification
-					// gate even when its final report says it only inspected files.
+				} else if call.Function.Name == "spawn_subagent" && !subagentCallIsAsync(call) && (m.mode == WriteMode || m.mode == AutoMode) {
+					// A synchronous delegated writer uses the same registry but is
+					// not checkpointed call-by-call. Conservatively run the
+					// repository-wide verification gate even when its final report
+					// says it only inspected files. (Background jobs arm the gate
+					// on completion instead — see subagentDoneMsg.)
 					m.turnTouchedFiles = true
 				}
 			}
@@ -661,6 +672,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+		}
+
+	case subagentDoneMsg:
+		// Re-arm the parked waiter first, so the next completion is picked up.
+		cmds = append(cmds, m.awaitSubagentEvent())
+		job := msg.job
+		if job == nil {
+			break
+		}
+		// Deliver the result: the notification carries the full report(s), so
+		// the parent collects results by reading the conversation, not by
+		// polling (a sub-agent report is bounded final text, unlike a bg shell
+		// job's unbounded stream, which is why shell_output exists but no
+		// subagent_result tool does).
+		m.history = append(m.history, api.Message{Role: "system", Content: job.notification()})
+		if job.wasInterrupted() {
+			m.toast = fmt.Sprintf("sub-agent job %d cancelled", job.id)
+		} else {
+			m.toast = fmt.Sprintf("sub-agent job %d finished", job.id)
+		}
+		// A background writer's edits land after its spawn tool result, so the
+		// conservative spawn-time mark can't see them. If the job mutated files
+		// (observed via the Before hook), arm the verification gate now.
+		if _, mutated, _ := job.snapshot(); mutated && (m.mode == WriteMode || m.mode == AutoMode) {
+			m.turnTouchedFiles = true
+		}
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		// Wake the parent when it is idle so it reacts to the report now
+		// instead of waiting for the user's next message. A user-interrupted
+		// job doesn't wake: esc meant stop.
+		if !job.wasInterrupted() && !m.streaming && m.pending == nil &&
+			!m.verifying && !m.retrieving && !m.compacting &&
+			m.state == stateChat && m.modelName != "" {
+			cmds = append(cmds, m.startStream())
+			m.refreshTranscript()
 		}
 
 	case chatDoneMsg:
