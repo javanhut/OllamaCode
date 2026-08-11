@@ -78,7 +78,14 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 	var marked *trajectory
 	groups := map[int]*trajectory{}
 	var groupOrder []int
+	// model_request payloads are deltas (see Recorder.RecordRequest), so the
+	// system prompt and the current user turn usually appear only in the first
+	// request that introduced them. Carry them forward as the replay advances.
+	session := &trajectory{}
 	err := Replay(path, func(ev Event) error {
+		if ev.Kind == "model_request" {
+			session.extractContext(ev)
+		}
 		switch {
 		case ev.Kind == "turn_start":
 			if marked != nil {
@@ -106,9 +113,11 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 				groupOrder = append(groupOrder, ev.Turn)
 			}
 			g.absorb(ev)
+			g.inherit(session)
 		default:
 			if marked != nil {
 				marked.absorb(ev)
+				marked.inherit(session)
 			}
 		}
 		return nil
@@ -155,19 +164,37 @@ func (t *trajectory) absorb(ev Event) {
 	}
 }
 
-// extractContext recovers the user prompt, system prompt, and visible tool
-// names from a recorded model_request payload (the full message list the model
-// was sent). The last user message in that list is the current turn's prompt;
-// earlier ones belong to previous turns.
-func (t *trajectory) extractContext(ev Event) {
+// inherit fills context the trajectory's own events never carried, from the
+// session-wide view of the replay: with delta payloads a turn's request may
+// contain nothing but tool results.
+func (t *trajectory) inherit(session *trajectory) {
+	if t.prompt == "" {
+		t.prompt = session.prompt
+	}
+	if t.system == "" {
+		t.system = session.system
+	}
 	if len(t.tools) == 0 {
-		t.tools = stringSlice(ev.Metadata["visible_tools"])
+		t.tools = session.tools
+	}
+}
+
+// extractContext recovers the user prompt, system prompt, and visible tool
+// names from a recorded model_request payload. The payload is the messages
+// added since the previous request, so it may hold no user message at all; the
+// last user message it does hold is the current turn's prompt.
+func (t *trajectory) extractContext(ev Event) {
+	if names := stringSlice(ev.Metadata["visible_tools"]); len(names) > 0 {
+		t.tools = names
 	}
 	var msgs []api.Message
 	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &msgs) != nil {
 		return
 	}
-	if t.system == "" && len(msgs) > 0 && msgs[0].Role == "system" {
+	// Only a payload that starts at message 0 can begin with the system prompt;
+	// a delta starting mid-conversation begins with an injected mode banner.
+	_, delta := ev.Metadata["payload_from"]
+	if !delta && t.system == "" && len(msgs) > 0 && msgs[0].Role == "system" {
 		t.system = msgs[0].Content
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {

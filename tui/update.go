@@ -39,10 +39,12 @@ type chatErrMsg struct {
 // gen guards against stale retries from a cancelled or replaced turn.
 type retryStreamMsg struct{ gen int }
 type chatToolCallsMsg struct {
-	gen      int
-	content  string
-	thinking string
-	calls    []tools.ToolCall
+	gen        int
+	content    string
+	thinking   string
+	calls      []tools.ToolCall
+	promptEval int
+	evalCount  int
 }
 
 type toolResultMsg struct {
@@ -615,7 +617,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		preamble := m.streamBuf.String() + msg.content
 		m.streamBuf.Reset()
-		m.recordModelResponse(msg.gen, preamble, msg.calls, 0, 0)
+		if msg.promptEval+msg.evalCount > 0 {
+			m.totalTokens = msg.promptEval + msg.evalCount
+		}
+		m.recordModelResponse(msg.gen, preamble, msg.calls, msg.promptEval, msg.evalCount)
 		calls := dedupeCalls(msg.calls)
 		if m.trace != nil && len(calls) != len(msg.calls) {
 			_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_deduplicated", Turn: msg.gen, Model: m.modelName,

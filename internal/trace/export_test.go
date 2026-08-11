@@ -246,3 +246,39 @@ func TestExportPreservesRoundBoundaries(t *testing.T) {
 		t.Fatalf("got %d assistant rounds and %d results, want 2 and 2: %#v", assistantCalls, toolResults, records[0].Messages)
 	}
 }
+
+func TestExportRecoversContextFromDeltaPayloads(t *testing.T) {
+	first, _ := json.Marshal([]api.Message{
+		{Role: "system", Content: "you are ocode"},
+		{Role: "user", Content: "count the go files"},
+	})
+	// A later turn's request payload holds only what was appended since the
+	// previous one — no user message, and a mode banner where the system
+	// prompt used to sit.
+	delta, _ := json.Marshal([]api.Message{
+		{Role: "tool", Content: `{"ok":true}`},
+		{Role: "system", Content: "Current mode: explore"},
+	})
+	envelope := `{"ok":true,"summary":"list_directory completed"}`
+	path := writeTrace(t,
+		Event{Kind: "model_request", Turn: 1, Payload: first, Metadata: map[string]any{"visible_tools": []any{"list_directory"}}},
+		Event{Kind: "tool", Turn: 1, Tool: "list_directory", Arguments: json.RawMessage(`{"path":"."}`), Result: envelope},
+		Event{Kind: "model_request", Turn: 2, Payload: delta, Metadata: map[string]any{"payload_from": 2, "visible_tools": []any{"grep"}}},
+		Event{Kind: "tool", Turn: 2, Tool: "grep", Arguments: json.RawMessage(`{"pattern":"func"}`), Result: envelope},
+	)
+	records, stats, err := Export(path, ExportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("kept %d records, want 2 (dropped: %v)", len(records), stats.Dropped)
+	}
+	for i, rec := range records {
+		if rec.System != "you are ocode" {
+			t.Fatalf("record %d system = %q", i, rec.System)
+		}
+		if rec.Messages[0].Content != "count the go files" {
+			t.Fatalf("record %d prompt = %q", i, rec.Messages[0].Content)
+		}
+	}
+}

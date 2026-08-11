@@ -222,12 +222,14 @@ func (m *Model) waitForStream() tea.Cmd {
 				}
 			}
 			if len(chunk.Message.ToolCalls) > 0 {
-				return chatToolCallsMsg{
+				out := chatToolCallsMsg{
 					gen:      s.gen,
 					content:  chunk.Message.Content,
 					thinking: chunk.Message.Thinking,
 					calls:    chunk.Message.ToolCalls,
 				}
+				drainToolCallStream(s.resp, &out, chunk)
+				return out
 			}
 			if chunk.Done {
 				return chatDoneMsg{
@@ -255,6 +257,30 @@ func (m *Model) waitForStream() tea.Cmd {
 			return chatErrMsg{gen: s.gen, err: err}
 		}
 	}
+}
+
+// drainToolCallStream reads the rest of a stream that just produced tool calls.
+// Ollama puts the token counts on the final done chunk, which normally arrives
+// after the tool-call chunk — returning on the tool calls alone left every
+// tool-using turn unmetered (prompt/eval counts nil in the trace, token gauge
+// frozen). The done chunk is already generated, so this is a read, not a wait;
+// the timeout only covers a provider that never closes the turn.
+func drainToolCallStream(resp <-chan api.ChatResponse, out *chatToolCallsMsg, chunk api.ChatResponse) {
+	for !chunk.Done {
+		select {
+		case next, ok := <-resp:
+			if !ok {
+				return
+			}
+			chunk = next
+			out.content += next.Message.Content
+			out.thinking += next.Message.Thinking
+			out.calls = append(out.calls, next.Message.ToolCalls...)
+		case <-time.After(toolCallDrainTimeout):
+			return
+		}
+	}
+	out.promptEval, out.evalCount = chunk.PromptEval, chunk.EvalCount
 }
 
 func (m *Model) recordModelResponse(gen int, content string, calls []tools.ToolCall, promptTokens, completionTokens int) {
@@ -385,14 +411,13 @@ func (m *Model) startStream() tea.Cmd {
 		for _, definition := range tools {
 			names = append(names, definition.Function.Name)
 		}
-		payload, _ := json.Marshal(msgs)
-		_ = m.trace.Record(tracepkg.Event{Kind: "model_request", Turn: m.turnGen, Model: m.modelName, Payload: payload,
+		_ = m.trace.RecordRequest(tracepkg.Event{Turn: m.turnGen, Model: m.modelName,
 			Metadata: map[string]any{
-				"mode": m.mode.String(), "visible_tools": names, "message_count": len(msgs),
+				"mode": m.mode.String(), "visible_tools": names,
 				"rag_bytes": len(m.lastRagBlock), "mention_bytes": len(m.mentionBlock),
-				"tool_definitions": tools, "options": req.Options, "constrained": constrained,
+				"options": req.Options, "constrained": constrained,
 				"format": string(req.Format), "thinking_requested": think != nil,
-			}})
+			}}, msgs, tools)
 	}
 	respCh, errCh := m.host.ContinuousChat(ctx, req)
 	source := "local"

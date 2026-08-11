@@ -272,6 +272,7 @@ var (
 	longRunningToolTimeout   = 10 * time.Minute
 	shellToolTimeoutGrace    = 5 * time.Second
 	modelStreamIdleTimeout   = 3 * time.Minute
+	toolCallDrainTimeout     = 2 * time.Second
 	pullIdleTimeout          = 5 * time.Minute
 )
 

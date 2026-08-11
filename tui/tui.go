@@ -60,7 +60,7 @@ func (m *Model) enableDebug(path, surface string) error {
 	m.trace = recorder
 	cwd, _ := os.Getwd()
 	if err := recorder.Record(tracepkg.Event{Kind: "session_start", Metadata: map[string]any{
-		"surface": surface, "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 1,
+		"surface": surface, "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 2,
 	}}); err != nil {
 		_ = recorder.Close()
 		m.trace = nil

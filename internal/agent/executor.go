@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ type ExecutionEvent struct {
 	ArgumentFailure bool
 	RepairAttempted bool
 	RepairSucceeded bool
+	ExitCode        int // nonzero when a command ran and failed; Err stays nil
 	Duration        time.Duration
 }
 
@@ -62,6 +64,24 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 				event.RepairSucceeded = true
 			}
 		}
+	}
+	// A command that ran and exited nonzero is not a tool error: the output is
+	// real evidence the model must read, and Err stays nil so failure counters
+	// and dataset export keep meaning "the tool itself broke". Only the
+	// envelope's ok flag reports the command's verdict.
+	var cmdFail *tools.CommandFailure
+	if errors.As(err, &cmdFail) {
+		event.ExitCode = cmdFail.ExitCode
+		if e.StructuredResults == nil || *e.StructuredResults {
+			event.Result = tools.EncodeCommandFailure(call.Function.Name, cmdFail.Output, cmdFail.ExitCode)
+		} else {
+			event.Result = cmdFail.Output
+		}
+		if e.Observe != nil {
+			event.Duration = time.Since(started)
+			e.Observe(event)
+		}
+		return event
 	}
 	event.Err = err
 	structured := e.StructuredResults == nil || *e.StructuredResults

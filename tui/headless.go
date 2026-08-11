@@ -60,7 +60,7 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 		}
 		cwd, _ := os.Getwd()
 		_ = recorder.Record(tracepkg.Event{Kind: "session_start", Metadata: map[string]any{
-			"surface": "headless", "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 1,
+			"surface": "headless", "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 2,
 		}})
 		defer func() {
 			metadata := map[string]any{"reason": "clean_exit"}

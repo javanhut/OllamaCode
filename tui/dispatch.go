@@ -55,10 +55,14 @@ func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message
 			if event.Err != nil {
 				errText = event.Err.Error()
 			}
+			meta := map[string]any{"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}
+			if event.ExitCode != 0 {
+				meta["exit_code"] = event.ExitCode
+			}
 			_ = m.trace.Record(tracepkg.Event{Kind: "tool", Turn: m.turnGen, Model: m.modelName,
 				Tool: event.Call.Function.Name, Arguments: event.Call.Function.Arguments,
 				Result: event.Result, Error: errText, DurationMS: event.Duration.Milliseconds(),
-				Metadata: map[string]any{"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}})
+				Metadata: meta})
 		},
 	}
 	event := executor.Execute(ctx, call)

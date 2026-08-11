@@ -106,7 +106,8 @@ func shellCommandResult(raw string, err error) (string, error) {
 	text := strings.TrimRight(raw, "\n")
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return fmt.Sprintf("%s\n[exit %d]", text, exitErr.ExitCode()), nil
+			code := exitErr.ExitCode()
+			return "", &CommandFailure{Output: fmt.Sprintf("%s\n[exit %d]", text, code), ExitCode: code}
 		}
 		return "", err
 	}

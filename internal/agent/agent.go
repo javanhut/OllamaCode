@@ -109,10 +109,13 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			if event.Err != nil {
 				errText = event.Err.Error()
 			}
+			meta := map[string]any{"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}
+			if event.ExitCode != 0 {
+				meta["exit_code"] = event.ExitCode
+			}
 			_ = opts.Trace.Record(tracepkg.Event{Kind: "tool", Model: opts.Model, Tool: event.Call.Function.Name,
 				Arguments: event.Call.Function.Arguments, Result: event.Result, Error: errText,
-				DurationMS: event.Duration.Milliseconds(), Metadata: map[string]any{
-					"argument_failure": event.ArgumentFailure, "repair_attempted": event.RepairAttempted, "repair_succeeded": event.RepairSucceeded}})
+				DurationMS: event.Duration.Milliseconds(), Metadata: meta})
 		},
 	}
 	fpCount := map[string]int{} // call fingerprint -> times dispatched
@@ -291,13 +294,13 @@ func recordModelRequest(recorder *tracepkg.Recorder, model string, req api.ChatR
 	if recorder == nil {
 		return
 	}
-	payload, _ := json.Marshal(req.Messages)
 	names := make([]string, 0, len(req.Tools))
 	for _, definition := range req.Tools {
 		names = append(names, definition.Function.Name)
 	}
-	_ = recorder.Record(tracepkg.Event{Kind: "model_request", Model: model, Payload: payload,
-		Metadata: map[string]any{"visible_tools": names, "tool_definitions": req.Tools, "constrained": constrained, "format": string(req.Format), "options": req.Options}})
+	_ = recorder.RecordRequest(tracepkg.Event{Model: model,
+		Metadata: map[string]any{"visible_tools": names, "constrained": constrained, "format": string(req.Format), "options": req.Options}},
+		req.Messages, req.Tools)
 }
 
 func filterTools(all []tools.Tool, f func(string) bool) []tools.Tool {

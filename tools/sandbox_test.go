@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -263,9 +264,15 @@ func TestRunShellSandboxConfinement(t *testing.T) {
 	t.Chdir(root)
 	ctx := context.Background()
 	shell := RunShellTool()
+	// A nonzero exit comes back as *CommandFailure carrying the output, so the
+	// helper reports the command's own output either way.
 	run := func(args map[string]string) string {
 		t.Helper()
 		out, err := shell.Handler(ctx, jailArgs(t, args))
+		var failed *CommandFailure
+		if errors.As(err, &failed) {
+			return failed.Output
+		}
 		if err != nil {
 			t.Fatalf("run_shell %v: %v", args, err)
 		}
