@@ -61,6 +61,69 @@ func (t *todoList) openCount() int {
 	return n
 }
 
+// completeOpen closes stale checklist entries after the model has repeatedly
+// reported completion without issuing the final todo_write update. The caller
+// decides whether the turn genuinely reached a successful terminal state.
+func (t *todoList) completeOpen() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	changed := 0
+	for i := range t.items {
+		if t.items[i].Status != todoCompleted {
+			t.items[i].Status = todoCompleted
+			changed++
+		}
+	}
+	return changed
+}
+
+// reconcileTodosAtTurnEnd is the final safety net for weak models that ignore
+// the todo_write reminder. We only close entries after all reminder attempts,
+// while still under the step budget, and never for an explicitly blocked or
+// verification-failed turn.
+func (m *Model) reconcileTodosAtTurnEnd() int {
+	if m.todos == nil || m.todos.openCount() == 0 || m.autoContinues < maxAutoContinues {
+		return 0
+	}
+	limit := m.turnStepLimit()
+	if m.mode == AutoMode {
+		limit = 100
+	}
+	if m.stepCount >= limit || (m.verifyAttempts >= maxVerifyAttempts && m.lastVerification == "") {
+		return 0
+	}
+	if responseReportsBlocker(m.latestAssistantContent()) {
+		return 0
+	}
+	return m.todos.completeOpen()
+}
+
+func (m *Model) latestAssistantContent() string {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "assistant" && strings.TrimSpace(m.history[i].Content) != "" {
+			return m.history[i].Content
+		}
+	}
+	return ""
+}
+
+func responseReportsBlocker(s string) bool {
+	s = strings.ToLower(s)
+	for _, marker := range []string{
+		"[blocked]", "i am blocked", "i'm blocked", "blocked by",
+		"unable to complete", "cannot complete", "can't complete", "could not complete", "couldn't complete",
+		"unable to finish", "cannot finish", "can't finish", "could not finish", "couldn't finish",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // openSummary lists the not-yet-completed items, one per line, for the
 // keep-going nudge.
 func (t *todoList) openSummary() string {

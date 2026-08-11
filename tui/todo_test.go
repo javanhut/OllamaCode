@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/javanhut/ollama_code/api"
 )
 
 func TestTodoWriteTool(t *testing.T) {
@@ -76,5 +78,51 @@ func TestTodoReadTool(t *testing.T) {
 	}
 	if items := list.get(); len(items) != 2 || items[0].Content != "a" {
 		t.Fatalf("round-trip items = %+v", items)
+	}
+}
+
+func TestReconcileTodosAtSuccessfulTurnEnd(t *testing.T) {
+	m := &Model{
+		mode:          WriteMode,
+		maxSteps:      40,
+		autoContinues: maxAutoContinues,
+		todos:         &todoList{},
+		history:       []api.Message{{Role: "assistant", Content: "Implemented and verified the fix."}},
+	}
+	m.todos.set([]todoItem{
+		{Content: "implement fix", Status: todoInProgress},
+		{Content: "run tests", Status: todoPending},
+	})
+
+	if changed := m.reconcileTodosAtTurnEnd(); changed != 2 {
+		t.Fatalf("reconciled %d todos, want 2", changed)
+	}
+	if open := m.todos.openCount(); open != 0 {
+		t.Fatalf("successful turn left %d todos open", open)
+	}
+}
+
+func TestReconcileTodosPreservesBlockedOrBudgetStoppedWork(t *testing.T) {
+	newModel := func(answer string) *Model {
+		m := &Model{
+			mode:          WriteMode,
+			maxSteps:      40,
+			autoContinues: maxAutoContinues,
+			todos:         &todoList{},
+			history:       []api.Message{{Role: "assistant", Content: answer}},
+		}
+		m.todos.set([]todoItem{{Content: "finish work", Status: todoInProgress}})
+		return m
+	}
+
+	blocked := newModel("I am blocked by missing credentials.")
+	if changed := blocked.reconcileTodosAtTurnEnd(); changed != 0 || blocked.todos.openCount() != 1 {
+		t.Fatal("explicitly blocked work was marked completed")
+	}
+
+	budgetStopped := newModel("Work stopped at the step limit.")
+	budgetStopped.stepCount = budgetStopped.turnStepLimit()
+	if changed := budgetStopped.reconcileTodosAtTurnEnd(); changed != 0 || budgetStopped.todos.openCount() != 1 {
+		t.Fatal("budget-stopped work was marked completed")
 	}
 }

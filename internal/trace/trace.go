@@ -45,14 +45,32 @@ type PromotedCall struct {
 }
 
 func Open(path string) (*Recorder, error) {
+	return open(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY)
+}
+
+// OpenFresh creates a private trace file for one debug session, replacing any
+// previous file at the same path. A single-session log is much easier to hand
+// to another model than an append-only mixture of unrelated runs.
+func OpenFresh(path string) (*Recorder, error) {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to replace symlinked trace path %s", path)
+	}
+	return open(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY)
+}
+
+func open(path string, flags int) (*Recorder, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("trace path is empty")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	return &Recorder{file: f, enc: json.NewEncoder(f)}, nil
@@ -89,6 +107,8 @@ func (r *Recorder) Close() error {
 
 var secretKey = regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|cookie)`)
 var bearer = regexp.MustCompile(`(?i)bearer\s+[a-z0-9._~+/-]+`)
+var secretAssignment = regexp.MustCompile(`(?im)\b([a-z0-9_]*(?:api[_-]?key|token|secret|password|authorization|cookie)[a-z0-9_]*)\s*(?::=|=|:)\s*([^\s,;]+)`)
+var commonSecret = regexp.MustCompile(`\b(?:sk-[a-zA-Z0-9_-]{16,}|ghp_[a-zA-Z0-9]{16,}|github_pat_[a-zA-Z0-9_]{16,})\b`)
 
 func RedactJSON(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
@@ -123,7 +143,11 @@ func redactValue(value any) any {
 	return value
 }
 
-func RedactText(value string) string { return bearer.ReplaceAllString(value, "Bearer [REDACTED]") }
+func RedactText(value string) string {
+	value = bearer.ReplaceAllString(value, "Bearer [REDACTED]")
+	value = secretAssignment.ReplaceAllString(value, "$1=[REDACTED]")
+	return commonSecret.ReplaceAllString(value, "[REDACTED]")
+}
 
 func strconvQuote(value string) string {
 	b, _ := json.Marshal(value)

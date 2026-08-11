@@ -119,6 +119,13 @@ func (m *Model) dequeueNext() tea.Cmd {
 // oldest queued message next when one is waiting. Shared by the esc/ctrl+s
 // cancel and ctrl+c mid-turn so both paths behave identically.
 func (m *Model) interruptTurn() tea.Cmd {
+	if m.trace != nil {
+		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
+			Metadata: map[string]any{
+				"reason": "interrupted", "steps": m.stepCount, "open_todos": m.todos.openCount(),
+				"partial_content": m.streamBuf.String(), "partial_thinking": m.streamThinking.String(),
+			}})
+	}
 	if m.stream != nil && m.stream.cancel != nil {
 		m.stream.cancel()
 	}
@@ -216,15 +223,17 @@ func (m *Model) waitForStream() tea.Cmd {
 			}
 			if len(chunk.Message.ToolCalls) > 0 {
 				return chatToolCallsMsg{
-					gen:     s.gen,
-					content: chunk.Message.Content,
-					calls:   chunk.Message.ToolCalls,
+					gen:      s.gen,
+					content:  chunk.Message.Content,
+					thinking: chunk.Message.Thinking,
+					calls:    chunk.Message.ToolCalls,
 				}
 			}
 			if chunk.Done {
 				return chatDoneMsg{
 					gen:        s.gen,
 					content:    chunk.Message.Content,
+					thinking:   chunk.Message.Thinking,
 					promptEval: chunk.PromptEval,
 					evalCount:  chunk.EvalCount,
 				}
@@ -246,6 +255,26 @@ func (m *Model) waitForStream() tea.Cmd {
 			return chatErrMsg{gen: s.gen, err: err}
 		}
 	}
+}
+
+func (m *Model) recordModelResponse(gen int, content string, calls []tools.ToolCall, promptTokens, completionTokens int) {
+	if m.trace == nil {
+		return
+	}
+	payload, _ := json.Marshal(api.ChatResponse{
+		Model: m.modelName,
+		Message: api.Message{
+			Role:      "assistant",
+			Content:   content,
+			Thinking:  m.streamThinking.String(),
+			ToolCalls: calls,
+		},
+		Done:       len(calls) == 0,
+		PromptEval: promptTokens,
+		EvalCount:  completionTokens,
+	})
+	_ = m.trace.Record(tracepkg.Event{Kind: "model_response", Turn: gen, Model: m.modelName, Payload: payload,
+		Metadata: map[string]any{"prompt_tokens": promptTokens, "completion_tokens": completionTokens, "content_bytes": len(content), "tool_calls": len(calls)}})
 }
 
 // buildDynamicContext renders the volatile, per-turn system message that is
@@ -320,15 +349,6 @@ func (m *Model) startStream() tea.Cmd {
 	if m.profile.SupportsTools && !m.suppressToolsOnce {
 		tools = m.toolsForMode()
 	}
-	if m.trace != nil {
-		names := make([]string, 0, len(tools))
-		for _, definition := range tools {
-			names = append(names, definition.Function.Name)
-		}
-		payload, _ := json.Marshal(msgs)
-		_ = m.trace.Record(tracepkg.Event{Kind: "model_request", Turn: m.turnGen + 1, Model: m.modelName, Payload: payload,
-			Metadata: map[string]any{"mode": m.mode.String(), "visible_tools": names, "message_count": len(msgs), "rag_bytes": len(m.lastRagBlock), "mention_bytes": len(m.mentionBlock)}})
-	}
 	m.suppressToolsOnce = false
 	// A replaced stream must not linger holding its HTTP connection (nor keep
 	// generating server-side); its in-flight messages are dropped by gen anyway.
@@ -360,6 +380,20 @@ func (m *Model) startStream() tea.Cmd {
 		req.Format = format
 		constrained = true
 	}
+	if m.trace != nil {
+		names := make([]string, 0, len(tools))
+		for _, definition := range tools {
+			names = append(names, definition.Function.Name)
+		}
+		payload, _ := json.Marshal(msgs)
+		_ = m.trace.Record(tracepkg.Event{Kind: "model_request", Turn: m.turnGen, Model: m.modelName, Payload: payload,
+			Metadata: map[string]any{
+				"mode": m.mode.String(), "visible_tools": names, "message_count": len(msgs),
+				"rag_bytes": len(m.lastRagBlock), "mention_bytes": len(m.mentionBlock),
+				"tool_definitions": tools, "options": req.Options, "constrained": constrained,
+				"format": string(req.Format), "thinking_requested": think != nil,
+			}})
+	}
 	respCh, errCh := m.host.ContinuousChat(ctx, req)
 	source := "local"
 	if strings.Contains(m.host.URL(), "ollama.com") {
@@ -369,6 +403,7 @@ func (m *Model) startStream() tea.Cmd {
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.thinkTail = ""
+	m.streamThinking.Reset()
 	m.lastRenderTime = time.Time{}
 	m.renderQueued = false
 	m.busySince = time.Now()

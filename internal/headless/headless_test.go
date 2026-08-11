@@ -3,11 +3,13 @@ package headless
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/agent"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -75,6 +77,36 @@ func TestRunCustomSystem(t *testing.T) {
 	}
 	if got := host.requests[0].Messages[0].Content; got != "custom" {
 		t.Fatalf("system prompt = %q", got)
+	}
+}
+
+func TestRunWritesDebugModelAndToolLifecycle(t *testing.T) {
+	var seen string
+	host := &fakeChat{responses: []api.ChatResponse{
+		{Message: api.Message{ToolCalls: []tools.ToolCall{{Function: tools.ToolCallFunction{Name: "echo", Arguments: json.RawMessage(`{"text":"hi"}`)}}}}},
+		{Message: api.Message{Content: "all done"}},
+	}}
+	path := filepath.Join(t.TempDir(), "ocode.log")
+	recorder, err := tracepkg.OpenFresh(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(context.Background(), host, echoRegistry(&seen), "do it", Options{Model: "m", Trace: recorder}); err != nil {
+		t.Fatal(err)
+	}
+	_ = recorder.Close()
+
+	kinds := map[string]int{}
+	if err := tracepkg.Replay(path, func(event tracepkg.Event) error {
+		kinds[event.Kind]++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"turn_start", "model_request", "model_response", "tool", "turn_end"} {
+		if kinds[kind] == 0 {
+			t.Fatalf("debug log missing %q event: %#v", kind, kinds)
+		}
 	}
 }
 

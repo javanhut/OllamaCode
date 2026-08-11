@@ -441,13 +441,14 @@ type Model struct {
 
 	// Per-turn record, keyed by the index of the user message that started the
 	// turn, so each answer can report what it cost and what it was thinking.
-	turnRecords   map[int]turnRecord
-	turnAnchor    int
-	turnStart     time.Time
-	turnToolStart time.Time
-	turnToolTime  time.Duration
-	turnToolCalls int
-	turnThinking  strings.Builder
+	turnRecords    map[int]turnRecord
+	turnAnchor     int
+	turnStart      time.Time
+	turnToolStart  time.Time
+	turnToolTime   time.Duration
+	turnToolCalls  int
+	turnThinking   strings.Builder
+	streamThinking strings.Builder // reasoning for only the current model request (debug trace payload)
 
 	turnCache      map[uint64]string // rendered sealed turns, keyed by content hash
 	turnCacheStamp string            // render settings the cache was built under

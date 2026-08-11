@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/javanhut/ollama_code/internal/headless"
 	"github.com/javanhut/ollama_code/internal/memory"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -32,10 +34,11 @@ func baseRegistry(notes *sessionNotes, todos *todoList, mem *memory.Store) *tool
 
 // HeadlessOptions configures a one-shot, non-interactive run (ocode -p).
 type HeadlessOptions struct {
-	Prompt   string
-	Model    string // overrides the configured default model; accepts provider:model
-	MaxSteps int    // tool-call rounds; 0 = configured max_steps, else the default
-	JSON     bool   // emit a single JSON object instead of plain text
+	Prompt    string
+	Model     string // overrides the configured default model; accepts provider:model
+	MaxSteps  int    // tool-call rounds; 0 = configured max_steps, else the default
+	JSON      bool   // emit a single JSON object instead of plain text
+	DebugPath string // fresh redacted JSONL trace; empty disables debug logging
 }
 
 // RunHeadless executes one agent turn without the TUI and writes the final
@@ -46,8 +49,29 @@ type HeadlessOptions struct {
 // does not exist headless is the TUI's permission prompt, so a headless run is
 // the equivalent of auto mode with approval pre-granted — confined to the
 // workspace, but non-interactive by design.
-func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) error {
+func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (runErr error) {
 	cfg := loadConfig()
+	var recorder *tracepkg.Recorder
+	if opts.DebugPath != "" {
+		var err error
+		recorder, err = tracepkg.OpenFresh(opts.DebugPath)
+		if err != nil {
+			return fmt.Errorf("open debug log %s: %w", opts.DebugPath, err)
+		}
+		cwd, _ := os.Getwd()
+		_ = recorder.Record(tracepkg.Event{Kind: "session_start", Metadata: map[string]any{
+			"surface": "headless", "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 1,
+		}})
+		defer func() {
+			metadata := map[string]any{"reason": "clean_exit"}
+			if runErr != nil {
+				metadata["reason"] = "error"
+				metadata["error"] = runErr.Error()
+			}
+			_ = recorder.Record(tracepkg.Event{Kind: "session_end", Metadata: metadata})
+			_ = recorder.Close()
+		}()
+	}
 	// Same confinement pins as New(): order matters, tools must be jailed
 	// before any of them can run.
 	tools.SetWorkspaceRoot(workspaceRoot())
@@ -77,6 +101,7 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) er
 	res, err := headless.Run(ctx, host, registry, opts.Prompt, headless.Options{
 		Model:    model,
 		MaxSteps: maxSteps,
+		Trace:    recorder,
 	})
 	if err != nil {
 		return err

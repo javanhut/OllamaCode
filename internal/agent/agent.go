@@ -142,15 +142,20 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		if constraints != nil {
 			req.Format, constrained = constraints.Format(constraintKey, defs)
 		}
+		recordModelRequest(opts.Trace, opts.Model, req, constrained)
 		resp, err := host.ChatOnce(ctx, req)
 		// A host that rejects the schema (400 from the grammar conversion) gets
 		// an immediate retry at the next-weaker rung; the cache starts later
 		// requests at the working rung, so the probe cost is paid once.
 		for err != nil && constrained && IsFormatRejection(err) && constraints.Downgrade(constraintKey) {
 			req.Format, constrained = constraints.Format(constraintKey, defs)
+			recordModelRequest(opts.Trace, opts.Model, req, constrained)
 			resp, err = host.ChatOnce(ctx, req)
 		}
 		if err != nil {
+			if opts.Trace != nil {
+				_ = opts.Trace.Record(tracepkg.Event{Kind: "model_error", Model: opts.Model, Error: err.Error()})
+			}
 			return res, err
 		}
 		if opts.Trace != nil {
@@ -162,6 +167,10 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		calls := resp.Message.ToolCalls
 		if len(calls) == 0 {
 			calls = reg.ParseToolCallsFromContent(resp.Message.Content)
+			if len(calls) > 0 && opts.Trace != nil {
+				_ = opts.Trace.Record(tracepkg.Event{Kind: "tool_calls_parsed_from_content", Model: opts.Model,
+					Metadata: map[string]any{"received": len(calls), "calls": calls}})
+			}
 		}
 		if len(calls) == 0 {
 			output := resp.Message.Content
@@ -178,7 +187,12 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			}
 			return res, nil
 		}
-		calls = tools.DedupeCalls(calls)
+		rawCalls := calls
+		calls = tools.DedupeCalls(rawCalls)
+		if len(calls) != len(rawCalls) && opts.Trace != nil {
+			_ = opts.Trace.Record(tracepkg.Event{Kind: "tool_calls_deduplicated", Model: opts.Model,
+				Metadata: map[string]any{"received": len(rawCalls), "kept": len(calls), "calls": rawCalls}})
+		}
 		res.ToolCalls += len(calls)
 
 		res.Steps++
@@ -253,12 +267,17 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 // gathered. Passing no tools forces a prose answer rather than another tool call.
 func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, int, int) {
 	msgs = append(msgs, api.Message{Role: "user", Content: "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."})
-	resp, err := host.ChatOnce(ctx, api.ChatRequest{
+	req := api.ChatRequest{
 		Model:    opts.Model,
 		Messages: msgs,
 		Options:  options,
-	})
+	}
+	recordModelRequest(opts.Trace, opts.Model, req, false)
+	resp, err := host.ChatOnce(ctx, req)
 	if err != nil || strings.TrimSpace(resp.Message.Content) == "" {
+		if err != nil && opts.Trace != nil {
+			_ = opts.Trace.Record(tracepkg.Event{Kind: "model_error", Model: opts.Model, Error: err.Error(), Metadata: map[string]any{"finalize": true}})
+		}
 		return "(sub-agent stopped without a final answer)", 0, 0
 	}
 	if opts.Trace != nil {
@@ -266,6 +285,19 @@ func finalize(ctx context.Context, host ChatClient, opts Options, options map[st
 		_ = opts.Trace.Record(tracepkg.Event{Kind: "model_response", Model: opts.Model, Payload: payload})
 	}
 	return resp.Message.Content, resp.PromptEval, resp.EvalCount
+}
+
+func recordModelRequest(recorder *tracepkg.Recorder, model string, req api.ChatRequest, constrained bool) {
+	if recorder == nil {
+		return
+	}
+	payload, _ := json.Marshal(req.Messages)
+	names := make([]string, 0, len(req.Tools))
+	for _, definition := range req.Tools {
+		names = append(names, definition.Function.Name)
+	}
+	_ = recorder.Record(tracepkg.Event{Kind: "model_request", Model: model, Payload: payload,
+		Metadata: map[string]any{"visible_tools": names, "tool_definitions": req.Tools, "constrained": constrained, "format": string(req.Format), "options": req.Options}})
 }
 
 func filterTools(all []tools.Tool, f func(string) bool) []tools.Tool {

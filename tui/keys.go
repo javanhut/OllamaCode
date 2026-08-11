@@ -353,16 +353,23 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "y", "enter":
 		i := m.pending.index
 		call := m.pending.calls[i]
+		m.recordPermission(call, "allowed_once")
 		m.pending.started[i] = true
 		m.state = stateChat
 		return m, m.invokeToolCmd(m.pending.gen, i, call)
 	case "a":
+		for i, call := range m.pending.calls {
+			if !m.pending.started[i] {
+				m.recordPermission(call, "allowed_for_batch")
+			}
+		}
 		m.pending.allowAll = true
 		m.state = stateChat
 		return m, m.processPendingTools()
 	case "n", "esc":
 		i := m.pending.index
 		call := m.pending.calls[i]
+		m.recordPermission(call, "denied")
 		// Count the denial as a failure of this exact call so the identical-call
 		// short-circuit in processPendingTools fires on a retry. The finalized
 		// call+result outcome also feeds state-aware oscillation detection.

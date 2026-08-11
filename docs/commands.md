@@ -2,6 +2,29 @@
 
 Type `/` in the input to get an autocomplete menu of every command.
 
+## Debug logging
+
+Start either the TUI or a headless run with `--debug` to create a fresh
+`ocode.log` in the directory where ocode was launched:
+
+```sh
+ocode --debug
+ocode --debug -p "diagnose why this tool call fails"
+```
+
+The file is newline-delimited JSON designed to be attached to an LLM for
+debugging. It records the redacted model/tool lifecycle: message arrays sent to
+the model, visible tools and decoding options, model content/reasoning/tool
+calls, permission decisions, tool arguments/results and repair attempts,
+verification, retries/errors, and turn/session completion. Each launch replaces
+the previous `ocode.log`, so one file represents one run.
+
+Common credential shapes and secret-bearing JSON/environment fields are
+redacted, and the file is created with owner-only permissions. It can still
+contain prompts, source code, file contents, command output, and uncommon secret
+formats; inspect it before sharing. Add `ocode.log` to the target project's
+`.gitignore` if you do not want Git to report it as untracked.
+
 ## Headless mode
 
 `ocode -p "..."` runs a single prompt non-interactively and prints the final
@@ -14,6 +37,7 @@ answer to stdout — no TUI, for scripts, git hooks, and CI. Without `-p`,
 | `-json` | Emit a single JSON object instead of plain text (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, token counts) |
 | `-model` | Model for the run (default: the configured model); accepts `provider:model` |
 | `-max-steps` | Cap tool-call rounds (default: configured `max_steps`) |
+| `--debug` | Replace `./ocode.log` with a redacted model/tool execution trace |
 
 Errors go to stderr with a non-zero exit code. The same confinement as the TUI
 applies: file tools are jailed to the workspace and `run_shell` goes through

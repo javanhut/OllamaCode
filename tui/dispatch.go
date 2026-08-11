@@ -69,6 +69,14 @@ func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message
 	}
 }
 
+func (m *Model) recordPermission(call tools.ToolCall, decision string) {
+	if m.trace == nil {
+		return
+	}
+	_ = m.trace.Record(tracepkg.Event{Kind: "permission", Turn: m.turnGen, Model: m.modelName,
+		Tool: call.Function.Name, Arguments: call.Function.Arguments, Metadata: map[string]any{"decision": decision}})
+}
+
 func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		var req *modeSwitchRequest

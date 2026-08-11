@@ -12,6 +12,7 @@ will sometimes get it wrong.
 ```sh
 make build          # ./ocode
 ./ocode
+./ocode --debug      # fresh redacted model/tool trace in ./ocode.log
 ```
 
 You start in **explore** mode (read-only). `shift+tab` cycles to **plan**, then

@@ -26,6 +26,7 @@ type streamRenderMsg struct{ gen int }
 type chatDoneMsg struct {
 	gen        int
 	content    string
+	thinking   string
 	promptEval int
 	evalCount  int
 }
@@ -38,9 +39,10 @@ type chatErrMsg struct {
 // gen guards against stale retries from a cancelled or replaced turn.
 type retryStreamMsg struct{ gen int }
 type chatToolCallsMsg struct {
-	gen     int
-	content string
-	calls   []tools.ToolCall
+	gen      int
+	content  string
+	thinking string
+	calls    []tools.ToolCall
 }
 
 type toolResultMsg struct {
@@ -558,6 +560,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.thinkTail = m.thinkTail[len(m.thinkTail)-400:]
 			}
 			m.recordThinking(msg.thinking)
+			m.streamThinking.WriteString(msg.thinking)
 		}
 		if msg.content != "" {
 			m.thinkTail = "" // answer started; drop the ticker
@@ -606,9 +609,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamRetries = 0 // stream delivered — retry budget refreshes per step
 		wasAtBottom := m.viewport.AtBottom()
-		preamble := m.streamBuf.String()
+		if msg.thinking != "" {
+			m.recordThinking(msg.thinking)
+			m.streamThinking.WriteString(msg.thinking)
+		}
+		preamble := m.streamBuf.String() + msg.content
 		m.streamBuf.Reset()
+		m.recordModelResponse(msg.gen, preamble, msg.calls, 0, 0)
 		calls := dedupeCalls(msg.calls)
+		if m.trace != nil && len(calls) != len(msg.calls) {
+			_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_deduplicated", Turn: msg.gen, Model: m.modelName,
+				Metadata: map[string]any{"received": len(msg.calls), "kept": len(calls), "calls": msg.calls}})
+		}
 		m.history = append(m.history, api.Message{
 			Role:      "assistant",
 			Content:   preamble,
@@ -737,10 +749,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatDoneMsg:
-		if m.trace != nil {
-			_ = m.trace.Record(tracepkg.Event{Kind: "model_response", Turn: msg.gen, Model: m.modelName,
-				Metadata: map[string]any{"prompt_tokens": msg.promptEval, "completion_tokens": msg.evalCount, "content_bytes": len(msg.content)}})
-		}
 		if msg.gen != m.turnGen {
 			break // stale completion from a cancelled/replaced stream
 		}
@@ -752,10 +760,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.totalTokens = msg.promptEval + msg.evalCount
 		wasAtBottom := m.viewport.AtBottom()
+		if msg.thinking != "" {
+			m.recordThinking(msg.thinking)
+			m.streamThinking.WriteString(msg.thinking)
+		}
 		if msg.content != "" {
 			m.streamBuf.WriteString(msg.content)
 		}
 		finalAssistant := m.streamBuf.String()
+		m.recordModelResponse(msg.gen, finalAssistant, nil, msg.promptEval, msg.evalCount)
 		m.streamBuf.Reset()
 		// Remember whether this stream was schema-constrained before clearing
 		// the stream state: a constrained reply that isn't a tool call is the
@@ -774,7 +787,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == AutoMode {
 			limit = 100
 		}
-		if parsed := dedupeCalls(m.tools.ParseToolCallsFromContent(finalAssistant)); len(parsed) > 0 && m.stepCount < limit {
+		parsedRaw := m.tools.ParseToolCallsFromContent(finalAssistant)
+		parsed := dedupeCalls(parsedRaw)
+		if len(parsed) > 0 && m.stepCount < limit {
+			if m.trace != nil {
+				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_parsed_from_content", Turn: msg.gen, Model: m.modelName,
+					Metadata: map[string]any{"received": len(parsedRaw), "kept": len(parsed), "calls": parsedRaw}})
+			}
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
 				Content:   finalAssistant,
@@ -905,6 +924,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.turnGen {
 			break // stale error (e.g. "context canceled" from an esc'd stream)
 		}
+		if m.trace != nil {
+			metadata := map[string]any{
+				"retry": m.streamRetries, "steps": m.stepCount,
+				"partial_content": m.streamBuf.String(), "partial_thinking": m.streamThinking.String(),
+			}
+			if m.stream != nil {
+				metadata["constrained"] = m.stream.constrained
+				metadata["source"] = m.stream.modelSource
+			}
+			_ = m.trace.Record(tracepkg.Event{Kind: "stream_error", Turn: msg.gen, Model: m.modelName, Error: msg.err.Error(), Metadata: metadata})
+		}
 		// A 400 against a schema-constrained request is the host refusing the
 		// format, not a transient failure: step down the fallback ladder and
 		// retry immediately rather than burning a stream retry (and its backoff)
@@ -944,6 +974,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busySince = time.Time{}
 		m.finishTurnClock()
 		m.finalizeCheckpoint(m.lastUserMessage())
+		if m.trace != nil {
+			_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: msg.gen, Model: m.modelName,
+				Metadata: map[string]any{"reason": "error", "steps": m.stepCount, "open_todos": m.todos.openCount()}})
+		}
 		m.refreshTranscript()
 		m.viewport.GotoBottom()
 

@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/javanhut/ollama_code/internal/agent"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -22,6 +23,7 @@ type Options struct {
 	Model    string
 	System   string // DefaultSystem when empty
 	MaxSteps int    // tool-call rounds; 0 = agent default
+	Trace    *tracepkg.Recorder
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -51,6 +53,7 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 		Model:    opts.Model,
 		System:   opts.System,
 		MaxSteps: opts.MaxSteps,
+		Trace:    opts.Trace,
 	})
 }
 

@@ -3,6 +3,7 @@ package trace
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +32,67 @@ func TestRecorderRedactsAndReplays(t *testing.T) {
 	}
 	if !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("missing redaction: %s", text)
+	}
+}
+
+func TestOpenFreshReplacesPriorDebugSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ocode.log")
+	first, err := OpenFresh(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Record(Event{Kind: "old_session"})
+	_ = first.Close()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := OpenFresh(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = second.Record(Event{Kind: "new_session"})
+	_ = second.Close()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "old_session") || !strings.Contains(string(data), "new_session") {
+		t.Fatalf("fresh debug log was not replaced: %s", data)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("debug log permissions = %v, %v; want 0600", info, err)
+	}
+}
+
+func TestOpenFreshRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "ocode.log")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if recorder, err := OpenFresh(link); err == nil {
+		_ = recorder.Close()
+		t.Fatal("OpenFresh followed a symlink")
+	}
+	data, _ := os.ReadFile(target)
+	if string(data) != "keep" {
+		t.Fatalf("symlink target was modified: %q", data)
+	}
+}
+
+func TestRedactTextCoversLogShapedSecrets(t *testing.T) {
+	in := "OPENAI_API_KEY=super-secret-value\npassword: hunter2\ntoken=abc123\ntoken := go-secret\nsk-1234567890abcdefghijklmnop\nghp_1234567890abcdefghijklmnop"
+	got := RedactText(in)
+	for _, secret := range []string{"super-secret-value", "hunter2", "abc123", "go-secret", "sk-1234567890abcdefghijklmnop", "ghp_1234567890abcdefghijklmnop"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("secret %q leaked in %q", secret, got)
+		}
 	}
 }
 

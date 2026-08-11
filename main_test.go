@@ -40,6 +40,16 @@ func TestParseFlagsNoArgsStartsTUI(t *testing.T) {
 	}
 }
 
+func TestParseFlagsDebug(t *testing.T) {
+	f, err := parseFlags([]string{"--debug"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.debug || f.prompt != "" {
+		t.Fatalf("unexpected debug flags: %+v", f)
+	}
+}
+
 func TestParseFlagsUnknownFlagFails(t *testing.T) {
 	if _, err := parseFlags([]string{"-nope"}, io.Discard); err == nil {
 		t.Fatal("expected an error for an unknown flag")

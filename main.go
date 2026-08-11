@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/javanhut/ollama_code/tui"
@@ -19,6 +20,7 @@ type cliFlags struct {
 	model     string
 	json      bool
 	maxSteps  int
+	debug     bool
 	resume    string // session name; "" with resumeSet = latest auto-save
 	resumeSet bool
 }
@@ -70,6 +72,7 @@ func parseFlags(args []string, stderr io.Writer) (cliFlags, error) {
 	fs.StringVar(&f.model, "model", "", "model for the headless run (default: configured model); accepts provider:model")
 	fs.BoolVar(&f.json, "json", false, "with -p, emit a single JSON object instead of plain text")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "with -p, cap tool-call rounds (default: configured max_steps)")
+	fs.BoolVar(&f.debug, "debug", false, "write a fresh redacted model/tool trace to ./ocode.log")
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, err
 	}
@@ -84,25 +87,35 @@ func main() {
 	if err != nil {
 		os.Exit(2)
 	}
+	debugPath := ""
+	if f.debug {
+		debugPath, err = filepath.Abs("ocode.log")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: resolve debug log:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "debug log:", debugPath)
+	}
 	if f.prompt == "" {
 		if f.resumeSet {
-			if err := tui.RunResume(f.resume); err != nil {
+			if err := tui.RunResumeWithDebug(f.resume, debugPath); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
 				os.Exit(1)
 			}
 			return
 		}
-		if err := tui.Run(); err != nil {
+		if err := tui.RunWithDebug(debugPath); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
 		return
 	}
 	err = tui.RunHeadless(context.Background(), tui.HeadlessOptions{
-		Prompt:   f.prompt,
-		Model:    f.model,
-		MaxSteps: f.maxSteps,
-		JSON:     f.json,
+		Prompt:    f.prompt,
+		Model:     f.model,
+		MaxSteps:  f.maxSteps,
+		JSON:      f.json,
+		DebugPath: debugPath,
 	}, os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

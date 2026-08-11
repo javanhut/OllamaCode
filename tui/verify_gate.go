@@ -136,6 +136,16 @@ func repairDetail(output, lint string) string {
 // move on while the build is still broken).
 func (m *Model) endTurnTail() []tea.Cmd {
 	var cmds []tea.Cmd
+	// If the model ignored every final todo_write reminder but the turn still
+	// reached a successful terminal state, make the accepted completion visible
+	// in the sidebar and persisted session instead of leaving stale open tasks.
+	if m.reconcileTodosAtTurnEnd() > 0 {
+		m.autosaveSession()
+	}
+	if m.trace != nil {
+		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
+			Metadata: map[string]any{"reason": "completed", "steps": m.stepCount, "open_todos": m.todos.openCount(), "verification": m.lastVerification}})
+	}
 	// Bank the turn's timing, then re-render: the caller already refreshed the
 	// transcript before this point, so without a second pass the ⏱ footer (and
 	// the /show_thinking block) wouldn't appear until the next redraw.
