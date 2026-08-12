@@ -123,6 +123,8 @@ func (m *Model) applyModeTransition(target Mode, reason string) bool {
 	m.mode = target
 	if target == PlanMode {
 		m.planNotesMark = strings.TrimSpace(m.notes.get())
+		m.planReviewRequested = ""
+		m.planReviewed = ""
 	}
 	m.toast = fmt.Sprintf("mode: %s (%s)", m.mode, m.mode.hint())
 	if strings.TrimSpace(reason) != "" {
@@ -151,10 +153,9 @@ func (m *Model) applyModeTransition(target Mode, reason string) bool {
 	return true
 }
 
-// handOffOffloadedPlan completes a turn whose planning was offloaded to a
-// tool-less provider: it records the plan the provider had no tools to write,
-// switches to write mode (which routes back to the local model and injects the
-// plan), and reports that the turn should continue rather than end.
+// handOffOffloadedPlan records a plan produced by a tool-less provider and
+// creates the same user-review boundary ask_user would create for a native
+// tool-capable planner. Execution is deliberately deferred to the next turn.
 //
 // Narrow on purpose: plan mode only, tool-less providers only, non-empty answers
 // only. A model that can call update_session_notes and switch_mode does both
@@ -177,40 +178,71 @@ func (m *Model) handOffOffloadedPlan(answer string) bool {
 		return false
 	}
 	m.notes.set(answer)
+	m.planReviewRequested = answer
+	m.history = append(m.history, api.Message{
+		Role:    "assistant",
+		Content: fmt.Sprintf("I recorded %s's plan. Does it match what you want? Reply `approve` to execute it, or describe one change for the planner to revise.", planner),
+	})
+	m.toast = "waiting for plan approval"
+	return true
+}
 
-	if !m.applyModeTransition(WriteMode, "executing plan from "+planner) {
+// approveOffloadedPlan recognizes an explicit approval reply and performs the
+// deferred route back to the writing model. Anything else goes to the planner
+// as revision feedback instead of being guessed to mean yes.
+func (m *Model) approveOffloadedPlan(reply string) bool {
+	if m.mode != PlanMode || m.profile.SupportsTools || m.planReviewed == "" ||
+		m.planReviewed != strings.TrimSpace(m.notes.get()) || !explicitPlanApproval(reply) {
 		return false
 	}
-
-	// Arm the read-before-edit gate for the files the plan claimed.
+	planner := m.modelName
+	check := checkPlan(m.planReviewed)
+	if !check.actionable() || !m.applyModeTransition(WriteMode, "approved plan from "+planner) {
+		return false
+	}
 	m.planNeedsVerify = true
 	m.planPaths = make(map[string]bool, len(check.named))
 	for _, p := range check.named {
 		m.planPaths[p] = true
 	}
-
-	// This renders in the transcript, so it doubles as the visible marker that
-	// planning was offloaded and execution has come back to the local model.
 	m.history = append(m.history, api.Message{
 		Role: "system",
 		Content: fmt.Sprintf(
-			"[PLAN HANDOFF] %s planned this; %s is executing it. The planner cannot see this conversation or the outcome, so treat the plan as a proposal to verify, not an instruction to follow. %s If the code contradicts the plan, trust the code, say so, and adjust.",
+			"[PLAN HANDOFF] %s planned this; %s is executing the user-approved plan. The planner cannot see this conversation or the outcome, so verify the proposal against live code. %s If the code contradicts the plan, trust the code, say so, and adjust.",
 			planner, m.modelName, check.findings()),
 	})
 	return true
 }
 
-// planGateBlocks reports whether a mode switch must be refused because the plan
-// hasn't been written to notes yet. Only plan → write is gated: retreating to
-// explore hands nothing off, so there is nothing to lose.
+func explicitPlanApproval(reply string) bool {
+	reply = strings.ToLower(strings.TrimSpace(reply))
+	reply = strings.Trim(reply, " .!\t\r\n")
+	switch reply {
+	case "approve", "approved", "yes", "y", "yes proceed", "go ahead", "looks good", "proceed":
+		return true
+	default:
+		return false
+	}
+}
+
+// planGateBlocks refuses plan → write until the current notes contain a new plan
+// and the user has replied to a review question about that exact version.
+// Retreating to explore hands nothing off, so it is never gated.
 func (m *Model) planGateBlocks(target Mode) bool {
-	return m.mode == PlanMode && target == WriteMode && !m.planRecorded()
+	if m.mode != PlanMode || target != WriteMode {
+		return false
+	}
+	notes := strings.TrimSpace(m.notes.get())
+	return !m.planRecorded() || m.planReviewed != notes
 }
 
 // planGateMessage is what the model is told when the gate refuses it: an
 // instruction it can act on, not just a rejection.
 func (m *Model) planGateMessage() string {
-	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks — then call switch_mode("write", ...) again.`
+	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks.`
+	if m.planRecorded() {
+		msg = `error: the current plan has not been reviewed by the user. Summarize the concrete plan and call ask_user with one focused confirmation question. Stop and wait for their reply before requesting write mode. If their reply changes the plan, update the notes and ask for confirmation again.`
+	}
 	if next := m.modelForMode(WriteMode); next != "" && !m.routeIsLoaded(next) {
 		msg += fmt.Sprintf(" Write mode runs on %s, a different model that will see your notes but not this conversation.", next)
 	}
@@ -230,7 +262,7 @@ func (m *Model) switchModeTool() tools.Tool {
 		Type: "function",
 		Function: tools.Function{
 			Name:        "switch_mode",
-			Description: "Request a transition to a different mode (explore, plan, write). Use this when you have finished exploration and are ready to plan, or when your plan is approved and you need to perform write operations.",
+			Description: "Request a transition to a different mode (explore, plan, write). Use this when you have finished exploration and are ready to plan, or after the user has reviewed the recorded plan and you need write mode. Never retry a denied transition or advance a changed plan without asking the user again.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
@@ -309,7 +341,7 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 	}
 	core := map[string]int{
 		"switch_mode": 100, "read_file": 99, "grep": 98, "find_files": 96,
-		"list_directory": 95, "edit_file": 94, "run_shell": 93,
+		"ask_user": 97, "list_directory": 95, "edit_file": 94, "run_shell": 93,
 		"write_file": 92, "todo_write": 91, "todo_read": 90, "get_project_tree": 88, "file_info": 85,
 		"web_search": 82, "web_fetch": 81, "git_status": 80, "git_diff": 79,
 		"shell_output": 78,

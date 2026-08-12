@@ -69,6 +69,10 @@ func (m *Model) submit() tea.Cmd {
 	m.logActivity("Message: " + value)
 	m.lastError = ""
 	m.resetTurnGuards()
+	if m.planReviewRequested != "" {
+		m.planReviewed = m.planReviewRequested
+		m.planReviewRequested = ""
+	}
 	// The first message after a denial is feedback about that decision. Keep the
 	// rejected tool out of that response even if a small model ignores the chat
 	// history and tries the same request again. A later user turn starts clean.
@@ -76,6 +80,7 @@ func (m *Model) submit() tea.Cmd {
 		m.bannedTools[m.denialFeedbackTool] = true
 		m.denialFeedbackTool = ""
 	}
+	approvedOffloadedPlan := m.approveOffloadedPlan(value)
 
 	m.input.Reset()
 	m.input.SetHeight(minInputLines)
@@ -95,12 +100,14 @@ func (m *Model) submit() tea.Cmd {
 	// running, but it isn't running yet. Offer the plan-mode model before a small
 	// local one burns a turn on work it can't do, and hold the message until the
 	// user answers.
-	if offer, reasons := m.shouldOfferEscalation(value); offer {
-		m.routeAsk, m.routeReasons = value, reasons
-		m.state = stateRouteConfirm
-		m.refreshTranscript()
-		m.viewport.GotoBottom()
-		return tea.Batch(cmds...)
+	if !approvedOffloadedPlan {
+		if offer, reasons := m.shouldOfferEscalation(value); offer {
+			m.routeAsk, m.routeReasons = value, reasons
+			m.state = stateRouteConfirm
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return tea.Batch(cmds...)
+		}
 	}
 
 	// Auto-RAG: when the index is ready, embed the query and inject relevant
@@ -345,7 +352,7 @@ func (m *Model) buildDynamicContext(ragBlock string) string {
 	case ExploreMode:
 		dynamicContext.WriteString("EXPLORE: investigate the codebase. You may read files, search the web (web_search, web_fetch, web_crawl), and call run_shell, but run_shell is restricted to a read-only allowlist (ls, cat, head, tail, grep/rg, find/fd, tree, wc, file, stat, du/df, ps, env, which, sort/uniq/cut/tr, basename/dirname/realpath, plus git status/log/diff/show/branch/remote/blame and go version/env/list/doc/vet). Output redirection (>, >>) and command substitution ($(...), backticks) are blocked. Anything that mutates state — write, edit, install, rm, mv, cp, sudo — will be rejected here. When you have enough context to act, call switch_mode(\"plan\", ...) with a one-line rationale.\nCITATIONS (enforced): every claim you make about the code must carry an inline path:line citation, e.g. `tui/mode.go:42` or `api/api.go:120-135`. Cite only files you actually opened, with line numbers you actually saw in a tool result — never guess. The harness resolves each citation against the workspace and sends your answer back if a file or line does not check out. Explanations that make no claims about this codebase do not need citations.\n")
 	case PlanMode:
-		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Use this mode to outline the change: scope, files to touch, risks, the exact diff strategy. Do NOT call run_shell — it is unavailable here. Before leaving this mode you MUST call update_session_notes with the complete plan — it is the only thing that survives into write mode, which may run on a different model that never sees this conversation. A switch_mode(\"write\", ...) call is rejected until the plan is in notes.\n")
+		dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Resolve material ambiguity incrementally: state the current assumption and call ask_user with ONE focused question, then stop for the answer. Do not ask about trivial choices already settled by the request. Record the complete plan in notes: scope, files, exact changes, risks, acceptance criteria, and verification. Then summarize that plan and call ask_user for confirmation. Do not request write mode until the user replies. A changed plan requires a new confirmation.\n")
 	case WriteMode:
 		dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Work from the plan in your session notes, but verify each step against the ACTUAL code as you execute it — don't assume the note is still accurate. If the code contradicts the plan or notes, trust the code, say so, and adjust. You can switch_mode back to 'plan' or 'explore' if you discover the plan is wrong.\n")
 	case AutoMode:
@@ -515,6 +522,7 @@ TOOL RULES:
 
 WORK STYLE:
 - For multi-step tasks, call todo_write first with a short checklist; mark items completed as you go. Don't stop while items are open.
+- Resolve material uncertainty incrementally with ask_user: state one assumption or proposed decision, ask one focused question, then stop for the user's answer. Before executing a multi-step plan, present it and get confirmation; do not repeatedly revise or advance modes without a user checkpoint.
 - When the task is done, stop calling tools and give a short plain-text summary of what changed.
 - If you are blocked, say exactly what is blocking you. Never invent file contents or command output.`
 
@@ -539,6 +547,7 @@ const systemPrompt = `You are Layla, a high-agency coding partner. Be direct, te
 
 OPERATING RULES:
 - Treat the user's clear request as authorization to investigate and perform safe work within the active mode. Ask only when a missing choice would materially change the outcome or authorization.
+- When clarification is necessary, ask one focused question at a time with ask_user and stop for the answer. Before advancing a multi-step plan to execution, summarize the concrete plan and ask for confirmation. Do not loop on revised thoughts, plans, or mode requests without a user checkpoint.
 - Verify claims against live code, tool results, and command output. Notes, memory, plans, retrieved context, and your own prior conclusions are fallible hypotheses.
 - State uncertainty plainly. Never invent file contents, command output, test results, citations, tool availability, or completion.
 - Use the exact AVAILABLE TOOLS THIS TURN list in the latest system context as ground truth. Prefer dedicated tools over shell equivalents.

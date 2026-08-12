@@ -206,8 +206,8 @@ protocol, so three things differ:
   prose.
 - **It gets a short planning prompt**, not the full tool-protocol system prompt,
   which would be instruction it cannot use and would only imitate.
-- **It cannot write its own notes or call `switch_mode`**, so OllamaCode does
-  both for it — see the handoff below.
+- **It cannot write its own notes or call `ask_user`**, so OllamaCode records an
+  actionable plan and creates the approval checkpoint for it — see below.
 
 ## The full loop
 
@@ -221,7 +221,10 @@ you: "refactor the auth layer across all the handlers"
   │
   ├─ plan verified ──▶ does it name real files?
   │     no  → stays in plan mode; your reply goes back to the planner
-  │     yes → plan → session notes, mode → write, model → back to local
+  │     yes → plan → session notes, then waits for your approve/revise reply
+  │
+  ├─ approve → mode → write, model → back to local
+  │  revise  → stays in plan mode; feedback goes back to the planner
   │
   └─ Layla executes: each planned file must be read before it is edited,
      every write behind an approval prompt
@@ -240,13 +243,13 @@ write     ollama code   Layla · qwen3-coder:30b
 A bare name means the default host; a prefixed one means that provider. The
 mode-switch toast names the model too.
 
-The handoff itself is written into the transcript, naming both models and what
-the plan claimed:
+After you explicitly approve, the handoff is written into the transcript,
+naming both models and what the plan claimed:
 
 ```
 [PLAN HANDOFF] claude-opus-5-thinking-high planned this; qwen3-coder:30b is
-executing it. The planner cannot see this conversation or the outcome, so treat
-the plan as a proposal to verify, not an instruction to follow. Files the plan
+executing the user-approved plan. The planner cannot see this conversation or
+the outcome, so verify the proposal against live code. Files the plan
 names: tui/route.go, tui/mode.go. Read each file you are about to change before
 changing it.
 ```

@@ -78,9 +78,9 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 		}},
 	}
 	m.tools.Register(m.switchModeTool())
-	// Leaving plan mode requires a plan in notes; without one the gate refuses
-	// the switch and the batch never reaches the permission prompt.
+	// Leaving plan mode requires both recorded notes and a user-review checkpoint.
 	m.notes.set("1. write example.txt")
+	m.planReviewed = strings.TrimSpace(m.notes.get())
 	m.pending = &pendingBatch{
 		calls:   m.history[0].ToolCalls,
 		results: make([]api.Message, 2),

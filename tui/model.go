@@ -478,6 +478,10 @@ type Model struct {
 	// write mode can tell a plan that was actually written from one left over
 	// from an earlier task.
 	planNotesMark string
+	// The model must show a recorded plan to the user and wait for a reply before
+	// requesting write mode. Editing the notes after that reply invalidates it.
+	planReviewRequested string
+	planReviewed        string
 
 	// Set when a turn is executing a plan produced by an offloaded planner:
 	// the paths that plan named, gated so each is read before it is edited.

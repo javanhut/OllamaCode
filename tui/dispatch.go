@@ -169,6 +169,31 @@ func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending == nil {
 		return nil
 	}
+	// A question is a conversation boundary, not one operation in a parallel
+	// batch. Run only the first ask_user call and cancel every other call that has
+	// not started, so nothing can continue behind the user's back while the model
+	// claims to be waiting for an answer.
+	questionIndex := -1
+	for i, call := range m.pending.calls {
+		if call.Function.Name == "ask_user" {
+			questionIndex = i
+			break
+		}
+	}
+	if questionIndex >= 0 {
+		for i, call := range m.pending.calls {
+			if i == questionIndex || m.pending.started[i] {
+				continue
+			}
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  "not run because ask_user requires the model to stop and wait for the user's answer.",
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+		}
+	}
 
 	if m.pending.done >= len(m.pending.calls) {
 		batchCalls := m.pending.calls
@@ -189,6 +214,18 @@ func (m *Model) processPendingTools() tea.Cmd {
 				Content: fmt.Sprintf("I stopped after you denied %s. What should I change, or why did you want that call denied? I won't request it again while handling your reply.", deniedTool),
 			})
 			m.toast = "stopped after denial — waiting for your feedback"
+			m.finalizeCheckpoint(m.lastUserMessage())
+			m.finishTurnClock()
+			m.lastActivity = time.Now()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return nil
+		}
+		if questionIndex >= 0 {
+			if m.mode == PlanMode && m.planRecorded() {
+				m.planReviewRequested = strings.TrimSpace(m.notes.get())
+			}
+			m.toast = "waiting for your answer"
 			m.finalizeCheckpoint(m.lastUserMessage())
 			m.finishTurnClock()
 			m.lastActivity = time.Now()

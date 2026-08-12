@@ -95,9 +95,13 @@ gets truncated away as the context fills, and when routing is configured the
 executing model may be a different model entirely that never saw the planning
 conversation.
 
-The refusal is deliberately not counted as a failed call, because the intended
-recovery is to write the notes and retry that same call. A model that ignores
-the instruction and just retries is caught by the repeated-action guard instead.
+After recording the plan, the model must present it through `ask_user` and wait
+for a reply. The reviewed notes must still match the current notes; changing the
+plan invalidates the checkpoint and requires another focused confirmation.
+
+`ask_user` is enforced as a turn boundary. If a model batches a question with
+other calls, unstarted companion calls are cancelled and no new model response
+begins until the user answers.
 
 Forcing the switch with `shift+tab` still works — that's your call — but the
 toast says `write mode — no plan in notes, nothing was handed off`.

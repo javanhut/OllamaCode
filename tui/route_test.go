@@ -465,18 +465,33 @@ func TestPlanGate(t *testing.T) {
 		}
 	})
 
-	t.Run("a plan written this session passes", func(t *testing.T) {
+	t.Run("a reviewed plan written this session passes", func(t *testing.T) {
 		m := routedModel(nil, "small")
 		m.applyModeTransition(PlanMode, "")
 		m.notes.set("1. edit tui/route.go\n2. add a test")
+		if !m.planGateBlocks(WriteMode) {
+			t.Fatal("an unreviewed plan was allowed into write mode")
+		}
+		m.planReviewed = strings.TrimSpace(m.notes.get())
 		if m.planGateBlocks(WriteMode) {
-			t.Fatal("a freshly written plan was blocked")
+			t.Fatal("a reviewed plan was blocked")
 		}
 
 		m.applyModeTransition(WriteMode, "plan approved")
 		last := m.history[len(m.history)-1].Content
 		if !strings.Contains(last, "Plan Summary from Session Notes") {
 			t.Errorf("plan was not handed off; last message = %q", last)
+		}
+	})
+
+	t.Run("changing a reviewed plan requires another review", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		m.notes.set("1. edit tui/route.go")
+		m.planReviewed = strings.TrimSpace(m.notes.get())
+		m.notes.set("1. edit tui/route.go\n2. change tui/mode.go")
+		if !m.planGateBlocks(WriteMode) {
+			t.Fatal("a changed plan reused stale user review")
 		}
 	})
 
@@ -537,9 +552,8 @@ func TestCursorProviderRouting(t *testing.T) {
 	}
 }
 
-// The whole point of offloading: cursor plans, and Layla picks it up without the
-// user touching anything. The planner has no tools, so it can neither record the
-// plan nor call switch_mode — both have to happen for it.
+// A tool-less planner cannot call ask_user itself, so the harness records its
+// plan, pauses for review, and only routes to the writer after explicit approval.
 func TestOffloadedPlanHandsOffToLocalModel(t *testing.T) {
 	m := routedModel(map[string]string{"plan": "big", "write": "small"}, "small")
 	m.applyModeTransition(PlanMode, "")
@@ -557,11 +571,23 @@ func TestOffloadedPlanHandsOffToLocalModel(t *testing.T) {
 	if m.notes.get() != plan {
 		t.Error("plan was not recorded; write mode receives nothing")
 	}
-	if m.mode != WriteMode {
-		t.Errorf("mode = %s, want write — the turn would dead-end waiting for shift+tab", m.mode)
+	if m.mode != PlanMode {
+		t.Errorf("mode = %s, want plan while awaiting approval", m.mode)
 	}
-	if m.modelName != "small" {
-		t.Errorf("model = %q, want the local model executing", m.modelName)
+	if m.planReviewRequested != plan {
+		t.Errorf("review checkpoint = %q, want plan", m.planReviewRequested)
+	}
+	if !strings.Contains(m.history[len(m.history)-1].Content, "Reply `approve`") {
+		t.Fatal("offloaded plan did not ask for explicit approval")
+	}
+
+	m.planReviewed = plan
+	m.planReviewRequested = ""
+	if !m.approveOffloadedPlan("approve") {
+		t.Fatal("explicit approval did not hand off the plan")
+	}
+	if m.mode != WriteMode || m.modelName != "small" {
+		t.Errorf("mode/model = %s/%q, want write/small", m.mode, m.modelName)
 	}
 
 	var summary, handoff bool
@@ -578,6 +604,22 @@ func TestOffloadedPlanHandsOffToLocalModel(t *testing.T) {
 	}
 	if !handoff {
 		t.Error("no handoff directive — nothing tells the executor to verify the plan")
+	}
+}
+
+func TestOffloadedPlanRejectsAmbiguousApproval(t *testing.T) {
+	m := routedModel(map[string]string{"plan": "big", "write": "small"}, "small")
+	m.applyModeTransition(PlanMode, "")
+	m.profile = ModelProfile{SupportsTools: false}
+	plan := "1. edit tui/route.go"
+	m.notes.set(plan)
+	m.planReviewed = plan
+
+	if m.approveOffloadedPlan("change the second step") {
+		t.Fatal("revision feedback was guessed to mean approval")
+	}
+	if m.mode != PlanMode {
+		t.Fatalf("mode = %s, want plan", m.mode)
 	}
 }
 

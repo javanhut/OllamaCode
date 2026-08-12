@@ -915,14 +915,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 
-			// An offloaded planner speaks no tool protocol, so it can neither
-			// record its plan nor call switch_mode. Do both for it and hand
-			// straight over to the local model — otherwise the turn dead-ends in
-			// plan mode waiting for a shift+tab.
+			// A tool-less planner cannot call update_session_notes or ask_user, so
+			// record an actionable plan and create the review checkpoint for it.
 			if m.handOffOffloadedPlan(finalAssistant) {
-				cmds = append(cmds, m.startStream())
 				m.refreshTranscript()
 				m.viewport.GotoBottom()
+				cmds = append(cmds, m.endTurnTail()...)
 				break
 			}
 

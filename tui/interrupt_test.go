@@ -207,3 +207,60 @@ func TestRepeatedFailedCallStillShortCircuits(t *testing.T) {
 		m.stream.cancel()
 	}
 }
+
+func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
+	m := interruptTestModel()
+	m.mode = PlanMode
+	m.notes.set("1. edit tui/mode.go\n2. run go test ./...")
+	call := tc("ask_user", `{"question":"Does this plan match what you want?","options":"approve|revise"}`)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: []api.Message{{Role: "tool", ToolName: "ask_user", Content: "QUESTION: Does this plan match what you want?"}},
+		started: []bool{true},
+		done:    1,
+	}
+
+	if cmd := m.processPendingTools(); cmd != nil {
+		t.Fatal("ask_user must stop instead of automatically continuing the model")
+	}
+	if m.planReviewRequested != strings.TrimSpace(m.notes.get()) {
+		t.Fatalf("plan review checkpoint = %q, want current notes", m.planReviewRequested)
+	}
+	if m.toast != "waiting for your answer" {
+		t.Fatalf("toast = %q", m.toast)
+	}
+
+	m.input = textarea.New()
+	m.input.SetValue("approve")
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("expected the user's answer to start a new model response")
+	}
+	if m.planReviewed != strings.TrimSpace(m.notes.get()) || m.planReviewRequested != "" {
+		t.Fatalf("review was not consumed: reviewed=%q requested=%q", m.planReviewed, m.planReviewRequested)
+	}
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+}
+
+func TestAskUserCancelsOtherUnstartedCallsInBatch(t *testing.T) {
+	m := interruptTestModel()
+	question := tc("ask_user", `{"question":"Which approach?"}`)
+	write := tc("write_file", `{"path":"a.txt","content":"x"}`)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{question, write},
+		results: make([]api.Message, 2),
+		started: make([]bool, 2),
+	}
+
+	cmd := m.processPendingTools()
+	if cmd == nil {
+		t.Fatal("expected ask_user to run")
+	}
+	if !m.pending.started[1] || !strings.Contains(m.pending.results[1].Content, "stop and wait") {
+		t.Fatalf("call beside ask_user was not cancelled: %#v", m.pending.results[1])
+	}
+	if m.state == statePermission {
+		t.Fatal("write call beside ask_user reached a permission prompt")
+	}
+}
