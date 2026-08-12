@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -207,11 +208,37 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 					entry.hasResult = true
 				}
 				t.segments = append(t.segments, turnSegment{tool: &entry})
+				// ask_user's result is the assistant's actual question, not merely
+				// diagnostic tool output. Keep the call collapsible, but always render
+				// the question itself so the user knows what the paused turn awaits.
+				if call.Function.Name == "ask_user" {
+					if question := visibleAskUserQuestion(call); question != "" {
+						t.segments = append(t.segments, turnSegment{text: question})
+					}
+				}
 			}
 		}
 		i++
 	}
 	return t, i
+}
+
+func visibleAskUserQuestion(call tools.ToolCall) string {
+	var args struct {
+		Question string `json:"question"`
+		Options  string `json:"options"`
+	}
+	if json.Unmarshal(call.Function.Arguments, &args) != nil {
+		return ""
+	}
+	question := strings.TrimSpace(args.Question)
+	if question == "" {
+		return ""
+	}
+	if options := strings.TrimSpace(args.Options); options != "" {
+		question += "\n\nOptions: " + strings.Join(strings.Split(options, "|"), " · ")
+	}
+	return question
 }
 
 // writeAssistantTurn renders a turn as a single Layla block: header, then the

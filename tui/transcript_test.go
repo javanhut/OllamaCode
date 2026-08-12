@@ -91,3 +91,32 @@ func TestWriteAssistantTurn_CollapsedGroupsConsecutiveTools(t *testing.T) {
 		t.Fatalf("summary not positioned between the surrounding text:\n%s", out)
 	}
 }
+
+func TestAskUserQuestionVisibleWhenToolCollapsed(t *testing.T) {
+	for _, expand := range []bool{false, true} {
+		m := &Model{
+			history: []api.Message{
+				{Role: "assistant", ToolCalls: []tools.ToolCall{{Function: tools.ToolCallFunction{
+					Name:      "ask_user",
+					Arguments: json.RawMessage(`{"question":"What task would you like me to work on?","options":"describe task|cancel"}`),
+				}}}},
+				{Role: "tool", ToolName: "ask_user", Content: "QUESTION: What task would you like me to work on?"},
+			},
+			md:      newMarkdownRenderer(),
+			notesMd: newMarkdownRenderer(),
+		}
+		m.expandTools = expand
+		m.viewport.SetWidth(80)
+
+		turn, _ := m.collectAssistantTurn(0)
+		var b strings.Builder
+		m.writeAssistantTurn(&b, &turn, false)
+		out := ansi.Strip(b.String())
+		if !strings.Contains(out, "What task would you like me to work on?") {
+			t.Fatalf("expand=%v: question hidden with tool call:\n%s", expand, out)
+		}
+		if !strings.Contains(out, "describe task · cancel") {
+			t.Fatalf("expand=%v: answer options not visible:\n%s", expand, out)
+		}
+	}
+}
