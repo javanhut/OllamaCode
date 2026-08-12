@@ -132,52 +132,64 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	if res.Role != "tool" || !strings.Contains(res.Content, "Do NOT retry") {
 		t.Fatalf("denial result missing anti-retry guidance: %#v", res)
 	}
-	if cmd == nil {
-		t.Fatal("expected the turn to continue after denial")
+	if cmd != nil {
+		t.Fatal("denial must not continue the model turn")
+	}
+	if m.denialFeedbackTool != "write_file" {
+		t.Fatalf("expected denied tool to be held for feedback, got %q", m.denialFeedbackTool)
+	}
+	if len(m.history) < 2 || m.history[len(m.history)-1].Role != "assistant" || !strings.Contains(m.history[len(m.history)-1].Content, "What should I change") {
+		t.Fatalf("expected a feedback question after denial, history=%#v", m.history)
 	}
 	if m.stream != nil {
 		m.stream.cancel()
 	}
 }
 
-func TestDeniedCallShortCircuitsOnThirdAttempt(t *testing.T) {
+func TestDeniedCallStopsImmediatelyAndBlocksFeedbackTurn(t *testing.T) {
 	call := tc("write_file", `{"path":"a.txt","content":"x"}`)
 	m := interruptTestModel()
 	m.mode = WriteMode
 	m.state = statePermission
 
-	deny := func() {
-		m.pending = &pendingBatch{
-			calls:   []tools.ToolCall{call},
-			results: make([]api.Message, 1),
-			started: make([]bool, 1),
-		}
-		m.updatePermission(tea.KeyPressMsg{Code: 'n', Text: "n"})
-		if m.stream != nil {
-			m.stream.cancel()
-			m.stream = nil
-		}
-		m.streaming = false
-		m.state = statePermission
-		m.history = m.history[:0]
-	}
-	deny()
-	deny()
-
-	// Third identical call: no permission prompt — the failedCalls
-	// short-circuit rejects it synchronously with a "do not repeat" message.
-	m.state = stateChat
 	m.pending = &pendingBatch{
 		calls:   []tools.ToolCall{call},
 		results: make([]api.Message, 1),
 		started: make([]bool, 1),
 	}
-	cmd := m.processPendingTools()
+	m.updatePermission(tea.KeyPressMsg{Code: 'n', Text: "n"})
+
+	m.input = textarea.New()
+	m.input.SetValue("because that file belongs to me")
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("expected feedback to start a model response")
+	}
+	if !m.bannedTools["write_file"] {
+		t.Fatal("denied tool must stay blocked while the model handles feedback")
+	}
+	if m.denialFeedbackTool != "" {
+		t.Fatal("feedback hold should be consumed by the next user message")
+	}
 	if m.stream != nil {
 		m.stream.cancel()
 	}
+}
+
+func TestRepeatedFailedCallStillShortCircuits(t *testing.T) {
+	call := tc("write_file", `{"path":"a.txt","content":"x"}`)
+	m := interruptTestModel()
+	m.mode = WriteMode
+	m.failedCalls[tools.CallFingerprint(call)] = maxSameCallFailures
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: make([]api.Message, 1),
+		started: make([]bool, 1),
+	}
+
+	cmd := m.processPendingTools()
 	if m.state == statePermission {
-		t.Fatal("third identical attempt should not re-prompt for permission")
+		t.Fatal("repeated failed call should not prompt for permission")
 	}
 	if cmd == nil {
 		t.Fatal("expected the rejected batch to advance to the next model stream")
@@ -189,6 +201,9 @@ func TestDeniedCallShortCircuitsOnThirdAttempt(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected the identical-call short-circuit message, history=%#v", m.history)
+		t.Fatalf("expected identical-call short-circuit message, history=%#v", m.history)
+	}
+	if m.stream != nil {
+		m.stream.cancel()
 	}
 }

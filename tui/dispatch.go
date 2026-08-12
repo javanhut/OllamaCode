@@ -32,14 +32,15 @@ var webContentTools = map[string]bool{
 }
 
 type pendingBatch struct {
-	calls    []tools.ToolCall
-	results  []api.Message
-	started  []bool
-	done     int
-	index    int
-	allowAll bool
-	preview  string
-	gen      int // turn generation this batch belongs to
+	calls      []tools.ToolCall
+	results    []api.Message
+	started    []bool
+	done       int
+	index      int
+	allowAll   bool
+	preview    string
+	gen        int    // turn generation this batch belongs to
+	deniedTool string // non-empty means the user ended this tool round
 }
 
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
@@ -172,10 +173,29 @@ func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending.done >= len(m.pending.calls) {
 		batchCalls := m.pending.calls
 		batchResults := m.pending.results
+		deniedTool := m.pending.deniedTool
 		m.history = append(m.history, batchResults...)
 		m.noteFetchedContent(batchCalls, batchResults)
 		m.pending = nil
 		m.markToolsDone()
+
+		// A denial is a user decision, not another recoverable tool failure. End
+		// the turn here instead of handing the result back to the model and giving
+		// it an opportunity to rephrase and re-request the same action.
+		if deniedTool != "" {
+			m.denialFeedbackTool = deniedTool
+			m.history = append(m.history, api.Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("I stopped after you denied %s. What should I change, or why did you want that call denied? I won't request it again while handling your reply.", deniedTool),
+			})
+			m.toast = "stopped after denial — waiting for your feedback"
+			m.finalizeCheckpoint(m.lastUserMessage())
+			m.finishTurnClock()
+			m.lastActivity = time.Now()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return nil
+		}
 
 		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
 		warnStagnant, stopStagnant := m.observeStagnation(madeProgress)

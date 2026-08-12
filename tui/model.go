@@ -313,6 +313,11 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// denialFeedbackTool is set when the user rejects a permission prompt. The
+	// next message is treated as feedback about that denial, and the rejected
+	// tool stays unavailable for that turn so the model cannot immediately ask
+	// for the same action again.
+	denialFeedbackTool string
 
 	history    []api.Message
 	transcript *strings.Builder

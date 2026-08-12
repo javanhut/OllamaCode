@@ -23,9 +23,11 @@ a           allow every pending call this turn
 n / Esc     deny
 ```
 
-Denial is recorded as a failure of that exact call, so an immediate identical
-retry is short-circuited and the reject-retry loop shows up to the oscillation
-detector.
+Denial ends the current model turn immediately. Calls in the same batch that
+have not started are cancelled, Ocode asks what should change or why the call
+was denied, and the rejected tool is unavailable while the model handles that
+reply. This makes a denial a control boundary instead of another tool error the
+model can retry or rephrase.
 
 In auto mode, prompts are suppressed only for paths **inside the working
 directory**. Anything outside still asks.

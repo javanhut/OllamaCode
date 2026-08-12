@@ -69,6 +69,13 @@ func (m *Model) submit() tea.Cmd {
 	m.logActivity("Message: " + value)
 	m.lastError = ""
 	m.resetTurnGuards()
+	// The first message after a denial is feedback about that decision. Keep the
+	// rejected tool out of that response even if a small model ignores the chat
+	// history and tries the same request again. A later user turn starts clean.
+	if m.denialFeedbackTool != "" {
+		m.bannedTools[m.denialFeedbackTool] = true
+		m.denialFeedbackTool = ""
+	}
 
 	m.input.Reset()
 	m.input.SetHeight(minInputLines)

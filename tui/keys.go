@@ -364,18 +364,31 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		i := m.pending.index
 		call := m.pending.calls[i]
 		m.recordPermission(call, "denied")
-		// Count the denial as a failure of this exact call so the identical-call
-		// short-circuit in processPendingTools fires on a retry. The finalized
-		// call+result outcome also feeds state-aware oscillation detection.
+		// A denial ends this tool round. Count it as a failure for diagnostics,
+		// cancel every call that has not started, and let any already-running calls
+		// drain before processPendingTools finalizes the turn and asks for feedback.
 		fp := tools.CallFingerprint(call)
 		m.failedCalls[fp]++
+		m.pending.deniedTool = call.Function.Name
 		m.pending.results[i] = api.Message{
 			Role:     "tool",
 			ToolName: call.Function.Name,
-			Content:  "denied by user. Do NOT retry this call or a minor variant of it — the user rejected it. Take a different approach, or ask the user how to proceed in plain text.",
+			Content:  "denied by user. The turn has stopped. Do NOT retry this call or a minor variant unless the user explicitly requests it later.",
 		}
 		m.pending.started[i] = true
 		m.pending.done++
+		for j, pendingCall := range m.pending.calls {
+			if m.pending.started[j] {
+				continue
+			}
+			m.pending.results[j] = api.Message{
+				Role:     "tool",
+				ToolName: pendingCall.Function.Name,
+				Content:  "not run because the user denied another call in this batch and ended the turn.",
+			}
+			m.pending.started[j] = true
+			m.pending.done++
+		}
 		m.state = stateChat
 		cmd := m.processPendingTools()
 		m.refreshTranscript()
