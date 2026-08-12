@@ -83,7 +83,7 @@ func FormatLintDiagnostics(out string, changed []string) string {
 	}
 	var lines []string
 	extra := 0
-	for _, ln := range strings.Split(out, "\n") {
+	for ln := range strings.SplitSeq(out, "\n") {
 		ln = strings.TrimRight(ln, "\r")
 		if !lintDiagLine.MatchString(ln) {
 			continue

@@ -23,6 +23,12 @@ type streamState struct {
 	modelSource string // "local" or "cloud" — set at stream start for error diagnosis
 	gen         int    // turn generation this stream belongs to
 	constrained bool   // request carried a small-tier constrained-decoding format
+	// toolsSuppressed records that this request's tools were withheld by
+	// suppressToolsOnce (a loop guard or the step budget), not merely absent.
+	// The reply is read back against it: a tool call in a reply to a request we
+	// deliberately disarmed must be dropped, or "tools are disabled for your
+	// next message" is a message the model can ignore for free.
+	toolsSuppressed bool
 }
 
 // A 30 Hz terminal paint is quick enough to look continuous while leaving
@@ -311,7 +317,10 @@ func (m *Model) recordModelResponse(gen int, content string, calls []tools.ToolC
 func (m *Model) buildDynamicContext(ragBlock string) string {
 	var dynamicContext strings.Builder
 	dynamicContext.WriteString(fmt.Sprintf("Current mode: %s — %s.\n", m.mode, m.mode.hint()))
-	if m.profile.SupportsTools && m.tools != nil {
+	// Don't advertise a toolbox the request won't carry: on a suppressed turn
+	// this list was the model's own evidence that tools were still available,
+	// which is half of why it kept emitting calls after being told they were off.
+	if m.profile.SupportsTools && m.tools != nil && !m.suppressToolsOnce {
 		available := m.toolsForMode()
 		names := make([]string, 0, len(available))
 		for _, tool := range available {
@@ -372,6 +381,10 @@ func (m *Model) startStream() tea.Cmd {
 	msgs := m.assembleMessages(m.ragBlockForTurn())
 
 	var tools []tools.Tool
+	// Why this request has no tools matters downstream. A profile that never
+	// supports tools is a capability fact; suppression is a decision the reply
+	// has to honor, and only the latter makes a tool call in the reply illegitimate.
+	suppressed := m.profile.SupportsTools && m.suppressToolsOnce
 	if m.profile.SupportsTools && !m.suppressToolsOnce {
 		tools = m.toolsForMode()
 	}
@@ -424,7 +437,7 @@ func (m *Model) startStream() tea.Cmd {
 	if strings.Contains(m.host.URL(), "ollama.com") {
 		source = "cloud"
 	}
-	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen, constrained: constrained}
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen, constrained: constrained, toolsSuppressed: suppressed}
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.thinkTail = ""

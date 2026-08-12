@@ -91,7 +91,7 @@ func TestSlashMenuIsWindowed(t *testing.T) {
 		t.Errorf("menu drew %d rows, want %d", rows, want)
 	}
 	// The highlight has to stay inside the window as it moves past the cap.
-	for i := 0; i < slashMenuRows+3; i++ {
+	for range slashMenuRows + 3 {
 		m = press(t, m, tea.KeyDown, 0)
 	}
 	view := stripANSI(m.slashSuggestionsView())

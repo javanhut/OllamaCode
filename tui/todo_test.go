@@ -72,12 +72,44 @@ func TestTodoReadTool(t *testing.T) {
 	}
 
 	// Read-modify-write: the read output must feed straight back into
-	// todo_write and reproduce the same list.
-	if _, err := write.Handler(context.Background(), []byte(out)); err != nil {
+	// todo_write. Flip a status first — an unmodified rewrite is refused on
+	// purpose (TestTodoWriteRejectsUnchangedList).
+	modified := strings.Replace(out, `"in_progress"`, `"completed"`, 1)
+	if _, err := write.Handler(context.Background(), []byte(modified)); err != nil {
 		t.Fatalf("read output must be valid todo_write input: %v", err)
 	}
-	if items := list.get(); len(items) != 2 || items[0].Content != "a" {
+	if items := list.get(); len(items) != 2 || items[0].Content != "a" || items[1].Status != todoCompleted {
 		t.Fatalf("round-trip items = %+v", items)
+	}
+}
+
+// A byte-identical rewrite must fail. The success receipt for a no-op is what
+// let a model re-send the same checklist for dozens of rounds while the loop
+// guard counted each one as work.
+func TestTodoWriteRejectsUnchangedList(t *testing.T) {
+	list := &todoList{}
+	write := todoWriteTool(list)
+	args := []byte(`{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"pending"}]}`)
+	if _, err := write.Handler(context.Background(), args); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	out, err := write.Handler(context.Background(), args)
+	if err == nil {
+		t.Fatalf("identical rewrite reported success: %q", out)
+	}
+	if !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("error must tell the model nothing changed: %v", err)
+	}
+	if items := list.get(); len(items) != 2 || items[0].Status != todoInProgress {
+		t.Fatalf("refused rewrite still mutated the list: %+v", items)
+	}
+
+	// A status flip on the same items is real progress and must still write.
+	if _, err := write.Handler(context.Background(), []byte(`{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}`)); err != nil {
+		t.Fatalf("changed list rejected: %v", err)
+	}
+	if items := list.get(); items[0].Status != todoCompleted {
+		t.Fatalf("items = %+v", items)
 	}
 }
 

@@ -91,6 +91,19 @@ type pullDoneMsg struct {
 	err   error
 }
 
+// droppedToolCallNotice tells the model a call it made on a deliberately
+// tool-less request was not executed, so it stops waiting for a result that is
+// never coming. Shared by both channels a call can arrive through — native and
+// parsed-from-text — because a withholding enforced on only one of them is a
+// suggestion on the other.
+func droppedToolCallNotice(calls []tools.ToolCall) string {
+	name := batchSingleTool(calls)
+	if name == "" {
+		name = "tool"
+	}
+	return fmt.Sprintf("[TOOL CALL DROPPED] Tools were disabled for that message, so your %s call was NOT executed — nothing ran and no result is coming. Reply in plain text: answer with what you already know, or state your blocker.", name)
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -620,6 +633,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.promptEval+msg.evalCount > 0 {
 			m.totalTokens = msg.promptEval + msg.evalCount
 		}
+		// Tools withheld by a loop guard stay withheld on this channel too. Native
+		// Ollama doesn't parse calls a request never advertised, but a provider that
+		// parses them regardless would walk straight past the text-form drop below
+		// and keep a stopped turn running. Hand the reply to the normal end-of-turn
+		// path with the calls gone, so the answer still reaches the user.
+		if m.stream != nil && m.stream.toolsSuppressed {
+			m.history = append(m.history, api.Message{Role: "system", Content: droppedToolCallNotice(msg.calls)})
+			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount})
+		}
 		m.recordModelResponse(msg.gen, preamble, msg.calls, msg.promptEval, msg.evalCount)
 		calls := dedupeCalls(msg.calls)
 		if m.trace != nil && len(calls) != len(msg.calls) {
@@ -749,6 +771,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !job.wasInterrupted() && !m.streaming && m.pending == nil &&
 			!m.verifying && !m.retrieving && !m.compacting &&
 			m.state == stateChat && m.modelName != "" {
+			// The user's turn already ended, so this reply is a new one: it must not
+			// inherit that turn's bans, forced ending, or spent step budget — the
+			// woken model never ran the loop that earned them. The verification arm
+			// above is about the sub-agent's own edits and survives the reset.
+			touchedFiles := m.turnTouchedFiles
+			m.resetTurnGuards()
+			m.turnTouchedFiles = touchedFiles
 			cmds = append(cmds, m.startStream())
 			m.refreshTranscript()
 		}
@@ -779,6 +808,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the stream state: a constrained reply that isn't a tool call is the
 		// prose escape envelope and gets unwrapped below.
 		constrained := m.stream != nil && m.stream.constrained
+		suppressed := m.stream != nil && m.stream.toolsSuppressed
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
@@ -794,6 +824,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		parsedRaw := m.tools.ParseToolCallsFromContent(finalAssistant)
 		parsed := dedupeCalls(parsedRaw)
+		// Tools withheld by a loop guard stay withheld. Executing a call parsed
+		// back out of the reply's TEXT made every "tools are disabled for your
+		// next message" a suggestion — five rounds of the 40-round burn went out
+		// with zero tools and ran todo_write anyway. Drop the call, keep its JSON
+		// out of the transcript (it is not an answer), and tell the model nothing
+		// ran so it stops waiting on a result. Deliberately no re-invoke here:
+		// the end-of-turn path below already owns every bounded retry there is
+		// (open-todo nudge, citation gate, verify gate), so the drop can never
+		// become a loop of its own.
+		dropped := suppressed && len(parsed) > 0
+		if dropped {
+			if m.trace != nil {
+				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_dropped_suppressed", Turn: msg.gen, Model: m.modelName,
+					Metadata: map[string]any{"dropped": len(parsed), "calls": parsedRaw}})
+			}
+			m.history = append(m.history, api.Message{Role: "system", Content: droppedToolCallNotice(parsed)})
+			// Drop the call, keep the answer that came with it. A reply is often a
+			// finished answer plus one self-check call, and blanking the whole
+			// message discarded the corrected answer the citation gate asked for.
+			parsed, finalAssistant = nil, tools.StripToolCalls(finalAssistant)
+		}
 		if len(parsed) > 0 && m.stepCount < limit {
 			if m.trace != nil {
 				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_parsed_from_content", Turn: msg.gen, Model: m.modelName,
@@ -832,7 +883,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Role:    "assistant",
 					Content: finalAssistant,
 				})
-			} else {
+			} else if !dropped {
+				// A dropped tool call is not an interrupted stream: the reply
+				// arrived intact, it just wasn't allowed to be a tool call, and
+				// the system message above already says so in the transcript.
 				m.lastError = "model returned empty response — stream may have been interrupted"
 				m.logActivity("WARNING: empty model response (stream ended with no content)")
 			}
@@ -847,7 +901,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Persistent loop: don't let the turn end while the model still has
 			// open todos — nudge it to keep going. Bounded by maxAutoContinues (and
 			// the step budget) so a model that won't finish can't spin forever.
-			if m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
+			// Exempt: a turn stopped for stagnation. Open todos are precisely what
+			// the stalled model kept rewriting, so nudging it there re-opens the loop.
+			if !m.endTurnAfterReply && m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
 				m.autoContinues++
 				m.history = append(m.history, api.Message{
 					Role: "system",

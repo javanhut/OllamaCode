@@ -22,7 +22,7 @@ type Todo struct {
 type Session struct {
 	Name      string        `json:"name"`
 	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at,omitempty"`
+	UpdatedAt time.Time     `json:"updated_at"`
 	Model     string        `json:"model"`
 	Mode      string        `json:"mode"`
 	Notes     string        `json:"notes"`

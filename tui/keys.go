@@ -51,10 +51,7 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if msg.String() == "left" {
 				step = -1
 			}
-			i := slices.Index(providerKinds, m.settingsKind)
-			if i < 0 {
-				i = 0
-			}
+			i := max(slices.Index(providerKinds, m.settingsKind), 0)
 			m.settingsKind = providerKinds[(i+step+len(providerKinds))%len(providerKinds)]
 			// The Trust row only exists for the cursor kind; cycling away from it
 			// would otherwise strand focus on a row that is no longer rendered.
@@ -135,10 +132,7 @@ func (m *Model) focusSettingsField(f settingsField) {
 // cycleSettingsFocus walks the rows the selected endpoint actually has.
 func (m *Model) cycleSettingsFocus(step int) {
 	fields := m.settingsFields()
-	i := slices.Index(fields, m.settingsFocus)
-	if i < 0 {
-		i = 0
-	}
+	i := max(slices.Index(fields, m.settingsFocus), 0)
 	m.focusSettingsField(fields[(i+step+len(fields))%len(fields)])
 }
 

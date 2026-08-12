@@ -285,13 +285,13 @@ func TestStyleCitations(t *testing.T) {
 		reset := "\x1b[0m"
 		in := bold + "see a.go:5 for details" + reset
 		out := styleCitations(in)
-		idx := strings.Index(out, "for details")
-		if idx < 0 {
+		before, _, ok := strings.Cut(out, "for details")
+		if !ok {
 			t.Fatalf("lost trailing text: %q", out)
 		}
 		// The text after the citation must re-open the bold attribute that
 		// the citation's own reset would otherwise kill.
-		if !strings.Contains(out[:idx], "\x1b[1m") {
+		if !strings.Contains(before, "\x1b[1m") {
 			t.Errorf("bold style not restored before trailing text: %q", out)
 		}
 		if stripped := ansi.Strip(out); stripped != ansi.Strip(in) {

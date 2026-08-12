@@ -46,8 +46,8 @@ func mentionPath(word string) (string, bool) {
 		return "", false
 	}
 	p := strings.TrimRight(word[1:], ",;:!?)\"']")
-	if strings.HasSuffix(p, ".") {
-		if t := strings.TrimSuffix(p, "."); strings.ContainsAny(t, "/.") {
+	if before, ok := strings.CutSuffix(p, "."); ok {
+		if t := before; strings.ContainsAny(t, "/.") {
 			p = t
 		}
 	}
@@ -61,7 +61,7 @@ func mentionPath(word string) (string, bool) {
 func findMentions(text string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, word := range strings.Fields(text) {
+	for word := range strings.FieldsSeq(text) {
 		p, ok := mentionPath(word)
 		if !ok || seen[p] {
 			continue

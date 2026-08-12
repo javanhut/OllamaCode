@@ -129,7 +129,7 @@ func renderThinkingBlock(thinking string, width int, live bool) string {
 	}
 	b.WriteString(hintStyle.Render(heading))
 	b.WriteString("\n")
-	for _, line := range strings.Split(ansi.Wordwrap(thinking, max(width-4, 20), " -"), "\n") {
+	for line := range strings.SplitSeq(ansi.Wordwrap(thinking, max(width-4, 20), " -"), "\n") {
 		b.WriteString(hintStyle.Render("│ " + line))
 		b.WriteString("\n")
 	}

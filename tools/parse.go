@@ -65,6 +65,25 @@ func (r *Registry) ParseToolCallsFromContent(content string) []ToolCall {
 	return nil
 }
 
+// StripToolCalls removes the spans ParseToolCallsFromContent would have
+// executed and returns whatever prose surrounded them. A reply that is a real
+// answer PLUS a trailing tool call must lose only the call: recognizer 1 matches
+// a tag anywhere in the message, so blanking the whole reply threw away the very
+// answer a gate had re-invoked the model to get.
+func StripToolCalls(content string) string {
+	out := toolCallTagRe.ReplaceAllString(content, "")
+	out = functionTagRe.ReplaceAllString(out, "")
+	out = jsonFenceRe.ReplaceAllString(out, "")
+	out = strings.TrimSpace(out)
+	// Recognizers 3 and 4 only accept calls that dominate the message, so what is
+	// left of one of those is noise, not an answer.
+	if (strings.HasPrefix(out, "{") && strings.HasSuffix(out, "}")) ||
+		(strings.HasPrefix(out, "[") && strings.HasSuffix(out, "]")) {
+		return ""
+	}
+	return out
+}
+
 // parseCallObjects parses s as a tool-call object or array of them.
 func (r *Registry) parseCallObjects(s string) []ToolCall {
 	s = strings.TrimSpace(s)

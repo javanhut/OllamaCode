@@ -335,7 +335,7 @@ func (o OllamaHost) modelsCursor() (*ModelListResponse, error) {
 	}
 
 	var list ModelListResponse
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		id, _, ok := strings.Cut(strings.TrimSpace(line), " - ")
 		if !ok {
 			continue // header and blank lines have no separator

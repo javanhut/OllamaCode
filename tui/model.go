@@ -361,14 +361,16 @@ type Model struct {
 	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
 	seenOutcomes        map[string]bool // evidence already observed this turn
 	oscillationStreak   int             // consecutive round endings that still form A/B alternation
-	stagnantRounds      int             // repeated no-evidence rounds for mixed-tool batches
+	stagnantRounds      int             // consecutive rounds that produced no evidence this turn had not already seen
 	failedCalls         map[string]int  // fingerprint -> consecutive failure count
 	oscillationWarned   bool            // corrective nudge emitted once per turn
 	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
+	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
 	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
 	sameToolStreak      int             // consecutive steps repeating that identity
 	sameToolWarned      bool            // early repeat warning emitted this user turn
-	sameToolStopWarned  bool            // hard-stop explanation emitted this user turn
+	stopWarnedTool      string          // tool the hard-stop already fired for this turn
+	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
 	fetchedContent      bool            // untrusted web content entered the conversation this turn
@@ -590,38 +592,38 @@ func New() *Model {
 	s.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &Model{
-		cfg:          cfg,
-		host:         host,
-		tools:        registry,
-		notes:        notes,
-		todos:        todos,
-		mode:         ExploreMode,
-		state:        stateChat,
-		urlInput:     ti,
-		keyInput:     ki,
-		nameInput:    ni,
-		envInput:     ei,
-		pullInput:    pi,
-		input:        ta,
-		modelName:    cfg.Model,
-		spinner:      s,
-		gitBranch:    getGitBranch(),
-		transcript:   &strings.Builder{},
-		streamBuf:    &strings.Builder{},
-		contextLimit: defaultContextLimit,
-		profile:      ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
-		maxSteps:     maxStepsFromConfig(cfg),
-		failedCalls:  make(map[string]int),
-		kvStore:      kv,
-		memory:       mem,
-		md:           newMarkdownRenderer(),
-		notesMd:      newMarkdownRenderer(),
-		faceMoodLen:  -1, // force first mood computation
-		expandTools:  false,
+		cfg:            cfg,
+		host:           host,
+		tools:          registry,
+		notes:          notes,
+		todos:          todos,
+		mode:           ExploreMode,
+		state:          stateChat,
+		urlInput:       ti,
+		keyInput:       ki,
+		nameInput:      ni,
+		envInput:       ei,
+		pullInput:      pi,
+		input:          ta,
+		modelName:      cfg.Model,
+		spinner:        s,
+		gitBranch:      getGitBranch(),
+		transcript:     &strings.Builder{},
+		streamBuf:      &strings.Builder{},
+		contextLimit:   defaultContextLimit,
+		profile:        ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
+		maxSteps:       maxStepsFromConfig(cfg),
+		failedCalls:    make(map[string]int),
+		kvStore:        kv,
+		memory:         mem,
+		md:             newMarkdownRenderer(),
+		notesMd:        newMarkdownRenderer(),
+		faceMoodLen:    -1, // force first mood computation
+		expandTools:    false,
 		subagents:      newSubagentStore(),
 		subagentEvents: make(chan *subagentJob, 64),
-		lastActivity: time.Now(),
-		faceLastKey:  time.Now(),
+		lastActivity:   time.Now(),
+		faceLastKey:    time.Now(),
 	}
 	if cfg.Trace {
 		tracePath := strings.TrimSpace(cfg.TracePath)

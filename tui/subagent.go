@@ -57,7 +57,7 @@ func (m *Model) spawnSubagentTool() tools.Tool {
 	return tools.Tool{
 		Type: "function",
 		Function: tools.Function{
-			Name: "spawn_subagent",
+			Name:        "spawn_subagent",
 			Description: "Delegate self-contained task(s) to autonomous sub-agents. By default (async=true) the sub-agents run in the BACKGROUND: this call returns immediately with a job id, and you are notified with their full reports when they finish — keep working on other things in the meantime, and do not repeat the spawn while you wait. Pass async=false to block until every sub-agent reports back inline. Each sub-agent has its own bounded loop and full capability within your current mode (always read/search; in write mode also edit/write files and run shell). Pass MULTIPLE tasks to run them in PARALLEL — ideal for independent work, e.g. investigate three modules at once, or apply an unrelated change in each of several files. WARNING: parallel sub-agents run concurrently with NO cross-task conflict detection — only parallelize tasks that touch INDEPENDENT files. Sub-agent file edits are checkpointed for /undo, so one /undo rewinds a delegation (they are not individually undoable); a background sub-agent that outlives this turn banks its edits into whichever turn checkpoint is open when the write happens. Give each task enough context to work without seeing this conversation.",
 			Parameters: tools.Schema{
 				Type: "object",

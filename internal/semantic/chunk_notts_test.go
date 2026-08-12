@@ -13,9 +13,9 @@ import (
 func goFuncFile(n, bodyLines int) string {
 	var b strings.Builder
 	b.WriteString("package x\n")
-	for i := 0; i < n; i++ {
+	for i := range n {
 		fmt.Fprintf(&b, "\n// F%02d does things.\nfunc F%02d() int {\n", i, i)
-		for j := 0; j < bodyLines; j++ {
+		for j := range bodyLines {
 			fmt.Fprintf(&b, "\tx += %d\n", j)
 		}
 		b.WriteString("\treturn x\n}\n")

@@ -138,7 +138,6 @@ func measureCharsPerToken(ctx context.Context, client Client, model string) (rat
 func calibrationRegistry() *tools.Registry {
 	r := tools.NewRegistry()
 	for _, definition := range []struct{ name, arg string }{{"inspect_file", "path"}, {"web_lookup", "query"}} {
-		definition := definition
 		r.Register(tools.Tool{Function: tools.Function{Name: definition.name, Description: "Calibration tool.", Parameters: tools.Schema{
 			Type: "object", Properties: map[string]tools.Property{definition.arg: {Type: "string"}}, Required: []string{definition.arg},
 		}}, Handler: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }})
@@ -147,7 +146,7 @@ func calibrationRegistry() *tools.Registry {
 }
 
 func CacheKey(model, provider, runtime, digest string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%s", SuiteVersion, model, provider, runtime, digest)))
+	sum := sha256.Sum256(fmt.Appendf(nil, "%d\x00%s\x00%s\x00%s\x00%s", SuiteVersion, model, provider, runtime, digest))
 	return fmt.Sprintf("%x", sum[:12])
 }
 

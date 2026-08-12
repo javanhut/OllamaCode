@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,9 +63,7 @@ func NewHTTPExternalServer(opts HTTPExternalServerOptions) (*HTTPExternalServer,
 
 func cloneStrings(input map[string]string) map[string]string {
 	out := make(map[string]string, len(input))
-	for key, value := range input {
-		out[key] = value
-	}
+	maps.Copy(out, input)
 	return out
 }
 
@@ -203,9 +202,9 @@ func readBounded(reader io.Reader, limit int) ([]byte, error) {
 
 func lastSSEData(data []byte) (json.RawMessage, error) {
 	var last string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "data:") {
-			last = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if after, ok := strings.CutPrefix(line, "data:"); ok {
+			last = strings.TrimSpace(after)
 		}
 	}
 	if last == "" {
@@ -306,7 +305,6 @@ func (s *HTTPExternalServer) ListTools(ctx context.Context, policy ToolPolicy) (
 			return nil, err
 		}
 		for _, remote := range result.Tools {
-			remote := remote
 			fn, err := functionFromMCPSchema(externalToolName(s.name, remote.Name), remote.Description, remote.InputSchema)
 			if err != nil {
 				return nil, fmt.Errorf("MCP tool %s/%s: %w", s.name, remote.Name, err)
