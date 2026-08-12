@@ -147,8 +147,8 @@ func needsTaskClarification(value string) bool {
 		return true
 	}
 	for _, greeting := range []string{"hello", "hi", "hey"} {
-		if strings.HasPrefix(s, greeting) {
-			rest := strings.TrimSpace(strings.TrimLeft(strings.TrimPrefix(s, greeting), ",:;-"))
+		if after, ok := strings.CutPrefix(s, greeting); ok {
+			rest := strings.TrimSpace(strings.TrimLeft(after, ",:;-"))
 			return rest == "" || genericTaskIntroduction(rest)
 		}
 	}
