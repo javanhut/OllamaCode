@@ -292,6 +292,14 @@ func (m *Model) switchModeTool() tools.Tool {
 
 func (m *Model) toolsForMode() []tools.Tool {
 	all := m.tools.Definitions()
+	if m.clarificationOnly {
+		for _, tool := range all {
+			if tool.Function.Name == "ask_user" {
+				return []tools.Tool{tool}
+			}
+		}
+		return nil
+	}
 	lean := m.profile.smallModel()
 	out := make([]tools.Tool, 0, len(all))
 	for _, t := range all {

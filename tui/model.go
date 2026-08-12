@@ -318,6 +318,10 @@ type Model struct {
 	// tool stays unavailable for that turn so the model cannot immediately ask
 	// for the same action again.
 	denialFeedbackTool string
+	// clarificationOnly is set for greetings/help offers that announce a task
+	// without stating it. Only ask_user is exposed for that turn, preventing
+	// stale notes or memory from being mistaken for the current assignment.
+	clarificationOnly bool
 
 	history    []api.Message
 	transcript *strings.Builder

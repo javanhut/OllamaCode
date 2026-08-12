@@ -103,6 +103,11 @@ plan invalidates the checkpoint and requires another focused confirmation.
 other calls, unstarted companion calls are cancelled and no new model response
 begins until the user answers.
 
+A greeting or generic introduction such as “I have a task for you” is not an
+actionable request. On that turn, only `ask_user` is exposed, and the model is
+explicitly forbidden from inferring the current task from old memory, session
+notes, filenames, or repository contents.
+
 Forcing the switch with `shift+tab` still works — that's your call — but the
 toast says `write mode — no plan in notes, nothing was handed off`.
 

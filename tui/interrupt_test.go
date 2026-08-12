@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -109,6 +110,9 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	m := interruptTestModel()
 	m.mode = WriteMode
 	m.state = statePermission
+	m.streaming = true
+	m.stream = &streamState{cancel: func() {}}
+	m.busySince = time.Now()
 	m.pending = &pendingBatch{
 		calls:   []tools.ToolCall{call},
 		results: make([]api.Message, 1),
@@ -123,6 +127,9 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	}
 	if m.state != stateChat {
 		t.Fatalf("expected stateChat after denial, got %v", m.state)
+	}
+	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+		t.Fatal("denial left the UI thinking, so the user's feedback would be queued")
 	}
 	// The batch finalizes into history once every call is done.
 	if len(m.history) == 0 {
@@ -212,6 +219,9 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	m := interruptTestModel()
 	m.mode = PlanMode
 	m.notes.set("1. edit tui/mode.go\n2. run go test ./...")
+	m.streaming = true
+	m.stream = &streamState{cancel: func() {}}
+	m.busySince = time.Now()
 	call := tc("ask_user", `{"question":"Does this plan match what you want?","options":"approve|revise"}`)
 	m.pending = &pendingBatch{
 		calls:   []tools.ToolCall{call},
@@ -228,6 +238,9 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	}
 	if m.toast != "waiting for your answer" {
 		t.Fatalf("toast = %q", m.toast)
+	}
+	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+		t.Fatal("ask_user left the UI thinking, so the user's answer would be queued")
 	}
 
 	m.input = textarea.New()
@@ -263,4 +276,47 @@ func TestAskUserCancelsOtherUnstartedCallsInBatch(t *testing.T) {
 	if m.state == statePermission {
 		t.Fatal("write call beside ask_user reached a permission prompt")
 	}
+}
+
+func TestTaskIntroductionOnlyExposesAskUser(t *testing.T) {
+	if !needsTaskClarification("Hello i have a task for you") {
+		t.Fatal("test phrase should require task clarification")
+	}
+	m := interruptTestModel()
+	m.profile = ModelProfile{SupportsTools: true}
+	m.input = textarea.New()
+	m.input.SetValue("Hello i have a task for you")
+
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("expected clarification turn to start")
+	}
+	if !m.clarificationOnly {
+		t.Fatal("generic task introduction was treated as an actionable request")
+	}
+	visible := m.toolsForMode()
+	if len(visible) != 1 || visible[0].Function.Name != "ask_user" {
+		t.Fatalf("visible tools = %v, want only ask_user", toolNames(visible))
+	}
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+}
+
+func TestConcreteTaskDoesNotTriggerClarificationOnly(t *testing.T) {
+	for _, request := range []string{
+		"I have a task: add a primary indicator to AssetDetailsHeader",
+		"Can you help me fix the failing auth test?",
+	} {
+		if needsTaskClarification(request) {
+			t.Errorf("concrete request was treated as missing: %q", request)
+		}
+	}
+}
+
+func toolNames(defs []tools.Tool) []string {
+	names := make([]string, len(defs))
+	for i, def := range defs {
+		names[i] = def.Function.Name
+	}
+	return names
 }

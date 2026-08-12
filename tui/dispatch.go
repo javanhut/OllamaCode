@@ -43,6 +43,25 @@ type pendingBatch struct {
 	deniedTool string // non-empty means the user ended this tool round
 }
 
+// pauseForUser closes the model-side activity state when a tool round ends at a
+// human checkpoint. Native tool-call messages arrive before the stream state is
+// cleared by chatDoneMsg, so without this the UI keeps showing THINKING and the
+// user's answer is silently put in the queue with nothing left to drain it.
+func (m *Model) pauseForUser(toast, reason string) {
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	if m.trace != nil {
+		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
+			Metadata: map[string]any{"reason": reason, "steps": m.stepCount, "open_todos": m.todos.openCount()}})
+	}
+	m.streaming = false
+	m.stream = nil
+	m.busySince = time.Time{}
+	m.toast = toast
+	m.lastActivity = time.Now()
+}
+
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
 	executor := agent.Executor{
@@ -213,10 +232,9 @@ func (m *Model) processPendingTools() tea.Cmd {
 				Role:    "assistant",
 				Content: fmt.Sprintf("I stopped after you denied %s. What should I change, or why did you want that call denied? I won't request it again while handling your reply.", deniedTool),
 			})
-			m.toast = "stopped after denial — waiting for your feedback"
+			m.pauseForUser("stopped after denial — waiting for your feedback", "permission_denied")
 			m.finalizeCheckpoint(m.lastUserMessage())
 			m.finishTurnClock()
-			m.lastActivity = time.Now()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			return nil
@@ -225,10 +243,9 @@ func (m *Model) processPendingTools() tea.Cmd {
 			if m.mode == PlanMode && m.planRecorded() {
 				m.planReviewRequested = strings.TrimSpace(m.notes.get())
 			}
-			m.toast = "waiting for your answer"
+			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
 			m.finalizeCheckpoint(m.lastUserMessage())
 			m.finishTurnClock()
-			m.lastActivity = time.Now()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			return nil
