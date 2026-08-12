@@ -15,6 +15,10 @@ That's the whole setup. An unbound mode falls back to your default model, so
 explore and write stay local automatically. Don't bind explore — it does the
 bulk file reading and you'd pay for every `read_file`.
 
+For the same setup interactively, open `/models`, highlight the local Ollama
+model, press `c`, then choose the Cursor planning model. This saves the two as a
+single workflow pair: Ollama for explore/write and Cursor for plan.
+
 ```
 /route                      # show the table, * marks the current mode
 /route write qwen3-coder:30b

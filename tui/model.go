@@ -298,6 +298,9 @@ type Model struct {
 	models          []string
 	modelsFrom      string // provider the model list came from; "" = default host
 	picker          int
+	pickerPurpose   string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
+	pairLocalModel  string
+	pairCursor      string
 	modelName       string
 
 	// Model pulling (from the model picker). pullInput captures the name to

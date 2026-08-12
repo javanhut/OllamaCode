@@ -187,15 +187,41 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.statusMsg = "refreshing…"
 		m.statusErr = false
+		if m.pickerPurpose == "cursor_pair" && m.pairCursor != "" {
+			return m, m.fetchModelsFrom(m.providerHost(m.pairCursor), m.pairCursor)
+		}
 		return m, m.fetchModels()
 	case "p":
+		if m.pickerPurpose == "cursor_pair" {
+			return m, nil
+		}
 		m.pullErr = ""
 		return m, m.pullInput.Focus()
+	case "c":
+		if m.pickerPurpose == "cursor_pair" || m.modelsFrom != "" || len(m.models) == 0 {
+			return m, nil
+		}
+		provider := m.cursorPlanProvider()
+		if provider == "" {
+			m.toast = "no Cursor provider configured — add one with /provider new"
+			return m, nil
+		}
+		m.pairLocalModel = m.models[m.picker]
+		m.pairCursor = provider
+		m.pickerPurpose = "cursor_pair"
+		m.statusMsg = "loading Cursor planning models…"
+		m.statusErr = false
+		return m, m.fetchModelsFrom(m.providerHost(provider), provider)
 	case "enter":
 		if len(m.models) == 0 {
 			return m, nil
 		}
-		m.selectModel(m.models[m.picker], m.modelsFrom)
+		if m.pickerPurpose == "cursor_pair" {
+			m.configureCursorPair(m.pairLocalModel, m.pairCursor, m.models[m.picker])
+		} else {
+			m.selectModel(m.models[m.picker], m.modelsFrom)
+		}
+		m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
 		m.state = stateChat
 		m.input.Focus()
 		m.layout()
@@ -502,6 +528,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		case "/models":
 			m.input.Reset()
+			m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
 			m.statusMsg = "refreshing…"
 			m.statusErr = false
 			return m, m.fetchModels()

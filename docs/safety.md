@@ -90,6 +90,10 @@ Leaving plan mode for write mode requires a plan in session notes. The model's
 `switch_mode` call is refused until the notes have changed since plan mode was
 entered — stale notes from an earlier task don't count.
 
+Plan mode is also the only model-controlled entrance to write mode. An
+explore-mode `switch_mode("write", ...)` call is rejected mechanically and sent
+to plan instead; `/mode` and `shift+tab` remain explicit user overrides.
+
 The notes are the handoff: they are re-injected every turn while chat history
 gets truncated away as the context fills, and when routing is configured the
 executing model may be a different model entirely that never saw the planning

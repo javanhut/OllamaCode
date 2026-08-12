@@ -192,11 +192,20 @@ func (m *Model) pickerModal() string {
 	w := m.modalWidth()
 	innerW := m.modalInner()
 	var b strings.Builder
-	b.WriteString(m.modalHeader("Select model", "esc", innerW))
+	title := "Select model"
+	if m.pickerPurpose == "cursor_pair" {
+		title = "Pair Cursor planning model"
+	}
+	b.WriteString(m.modalHeader(title, "esc", innerW))
 	b.WriteString("\n\n")
 
 	host := strings.TrimPrefix(strings.TrimPrefix(m.cfg.Host, "http://"), "https://")
-	b.WriteString(modalMutedStyle.Render(truncatePlain(fmt.Sprintf("on %s", host), innerW)))
+	if m.pickerPurpose == "cursor_pair" {
+		host = fmt.Sprintf("%s for explore/write + %s for plan", m.pairLocalModel, m.pairCursor)
+	} else {
+		host = "on " + host
+	}
+	b.WriteString(modalMutedStyle.Render(truncatePlain(host, innerW)))
 	b.WriteString("\n\n")
 
 	// Pull-in-progress view takes over the modal body.
@@ -275,10 +284,19 @@ func (m *Model) pickerModal() string {
 	}
 
 	b.WriteString("\n")
+	enterAction := "chat"
+	if m.pickerPurpose == "cursor_pair" {
+		enterAction = "save pair"
+	}
 	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("chat") +
-		modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render(enterAction) +
 		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
+	if m.pickerPurpose != "cursor_pair" {
+		if cursor := m.cursorPlanProvider(); cursor != "" && m.modelsFrom == "" {
+			hint += modalMutedStyle.Render("   c ") + modalBodyStyle.Render("pair Cursor plan")
+		}
+		hint += modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull")
+	}
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
 }

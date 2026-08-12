@@ -64,6 +64,51 @@ func TestModelForMode(t *testing.T) {
 	}
 }
 
+func TestConfigureCursorPairKeepsOllamaLocalAndRoutesPlan(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	m := routedModel(map[string]string{
+		"explore": "stale-explore",
+		"write":   "stale-write",
+		"auto":    "keep-auto",
+	}, "small")
+	m.cfg.Providers = map[string]providerConfig{
+		"cursor": {Kind: api.ProviderCursor},
+	}
+
+	m.configureCursorPair("qwen3-coder:30b", "cursor", "claude-opus-5-thinking-high")
+
+	if got := m.cfg.Model; got != "qwen3-coder:30b" {
+		t.Errorf("default = %q, want local Ollama model", got)
+	}
+	if got := m.cfg.Routes["plan"]; got != "cursor:claude-opus-5-thinking-high" {
+		t.Errorf("plan route = %q", got)
+	}
+	if _, ok := m.cfg.Routes["explore"]; ok {
+		t.Error("stale explore route survived paired setup")
+	}
+	if _, ok := m.cfg.Routes["write"]; ok {
+		t.Error("stale write route survived paired setup")
+	}
+	if got := m.cfg.Routes["auto"]; got != "keep-auto" {
+		t.Errorf("unrelated auto route = %q", got)
+	}
+	if m.modelName != "qwen3-coder:30b" {
+		t.Errorf("active explore model = %q, want local model", m.modelName)
+	}
+}
+
+func TestCursorPlanProviderPrefersExistingBinding(t *testing.T) {
+	m := routedModel(map[string]string{"plan": "zeta:opus"}, "small")
+	m.cfg.Providers = map[string]providerConfig{
+		"alpha": {Kind: api.ProviderCursor},
+		"zeta":  {Kind: api.ProviderCursor},
+	}
+	if got := m.cursorPlanProvider(); got != "zeta" {
+		t.Errorf("provider = %q, want existing plan provider zeta", got)
+	}
+}
+
 // The trap this whole feature exists to avoid: swapping the model without
 // swapping its context window, so a 128k prompt gets assembled for an 8k model.
 func TestApplyRouteSwapsProfileWithModel(t *testing.T) {
@@ -495,15 +540,18 @@ func TestPlanGate(t *testing.T) {
 		}
 	})
 
-	t.Run("only plan to write is gated", func(t *testing.T) {
+	t.Run("explore cannot bypass plan", func(t *testing.T) {
 		m := routedModel(nil, "small")
 		m.applyModeTransition(PlanMode, "")
 		if m.planGateBlocks(ExploreMode) {
 			t.Error("retreating to explore was blocked; it hands nothing off")
 		}
 		m.applyModeTransition(ExploreMode, "")
-		if m.planGateBlocks(WriteMode) {
-			t.Error("gated a switch that did not start in plan mode")
+		if !m.planGateBlocks(WriteMode) {
+			t.Error("explore was allowed to bypass plan and request write")
+		}
+		if msg := m.planGateMessage(); !strings.Contains(msg, `switch_mode("plan"`) {
+			t.Errorf("gate did not direct explore to plan: %q", msg)
 		}
 	})
 

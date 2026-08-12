@@ -150,6 +150,51 @@ func (m *Model) selectModel(name, from string) {
 	m.resolveProfile()
 }
 
+// cursorPlanProvider returns the Cursor endpoint used by the paired-model
+// picker. Prefer an existing plan binding, then the first configured Cursor
+// provider, so reopening /models edits the current pair predictably.
+func (m *Model) cursorPlanProvider() string {
+	if provider, _ := m.splitRouteSpec(strings.TrimSpace(m.cfg.Routes[PlanMode.String()])); provider != "" &&
+		m.cfg.Providers[provider].Kind == api.ProviderCursor {
+		return provider
+	}
+	var names []string
+	for name, provider := range m.cfg.Providers {
+		if provider.Kind == api.ProviderCursor {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+// configureCursorPair stores one coherent workflow choice: local Ollama for
+// explore/write, Cursor for plan. Removing explicit explore/write bindings is
+// important; otherwise stale routes would silently defeat the selected pair.
+func (m *Model) configureCursorPair(localModel, cursorProvider, planModel string) {
+	localModel = strings.TrimSpace(localModel)
+	cursorProvider = strings.TrimSpace(cursorProvider)
+	planModel = strings.TrimSpace(planModel)
+	if localModel == "" || cursorProvider == "" || planModel == "" {
+		return
+	}
+	if m.cfg.Routes == nil {
+		m.cfg.Routes = map[string]string{}
+	}
+	m.cfg.Model = localModel
+	delete(m.cfg.Routes, ExploreMode.String())
+	delete(m.cfg.Routes, WriteMode.String())
+	m.cfg.Routes[PlanMode.String()] = cursorProvider + ":" + planModel
+	saveConfig(m.cfg)
+	m.host, m.modelName = m.hostForSpec(localModel)
+	m.applyRoute(m.mode)
+	m.resolveProfile()
+	m.toast = fmt.Sprintf("paired: %s for explore/write + %s:%s for plan", localModel, cursorProvider, planModel)
+}
+
 // reloadActiveHost rebuilds the live client from config without changing which
 // model is loaded. Needed after an endpoint's URL or key is edited: applyRoute
 // would see the same model on the same URL and skip, leaving the old key in use.

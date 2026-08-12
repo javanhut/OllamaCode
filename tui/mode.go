@@ -225,12 +225,16 @@ func explicitPlanApproval(reply string) bool {
 	}
 }
 
-// planGateBlocks refuses plan → write until the current notes contain a new plan
-// and the user has replied to a review question about that exact version.
-// Retreating to explore hands nothing off, so it is never gated.
+// planGateBlocks makes plan mode the only model-controlled route into write.
+// Explore must hand off to plan first; plan must then contain a new plan that
+// the user reviewed at exactly its current version. User keyboard commands can
+// still force a mode directly because they do not pass through this tool gate.
 func (m *Model) planGateBlocks(target Mode) bool {
-	if m.mode != PlanMode || target != WriteMode {
+	if target != WriteMode || m.mode == WriteMode {
 		return false
+	}
+	if m.mode != PlanMode {
+		return true
 	}
 	notes := strings.TrimSpace(m.notes.get())
 	return !m.planRecorded() || m.planReviewed != notes
@@ -239,6 +243,9 @@ func (m *Model) planGateBlocks(target Mode) bool {
 // planGateMessage is what the model is told when the gate refuses it: an
 // instruction it can act on, not just a rejection.
 func (m *Model) planGateMessage() string {
+	if m.mode != PlanMode {
+		return `error: write mode can only be requested from plan mode. Do not plan or request execution from explore. Call switch_mode("plan", ...) and let the plan-mode model produce a concrete plan for user review.`
+	}
 	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks.`
 	if m.planRecorded() {
 		msg = `error: the current plan has not been reviewed by the user. Summarize the concrete plan and call ask_user with one focused confirmation question. Stop and wait for their reply before requesting write mode. If their reply changes the plan, update the notes and ask for confirmation again.`

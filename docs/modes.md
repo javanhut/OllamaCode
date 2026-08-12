@@ -72,6 +72,10 @@ current version:
 Staleness counts: notes left over from an earlier task do not satisfy the gate,
 because they describe the wrong work. See [Safety](safety.md#the-plan-gate).
 
+Model tool calls cannot jump directly from explore to write. The harness rejects
+that transition and requires explore → plan → reviewed plan → write. A user can
+still force a mode with `/mode` or `shift+tab`.
+
 ## write — full toolset
 
 Everything. Every destructive call surfaces a permission prompt showing a diff
