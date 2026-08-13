@@ -120,3 +120,25 @@ func TestAskUserQuestionVisibleWhenToolCollapsed(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordedAskUserQuestionIsNotRenderedTwice(t *testing.T) {
+	call := tools.ToolCall{Function: tools.ToolCallFunction{
+		Name: "ask_user", Arguments: json.RawMessage(`{"message":"Apply the plan now?"}`),
+	}}
+	m := &Model{
+		history: []api.Message{
+			{Role: "assistant", ToolCalls: []tools.ToolCall{call}},
+			{Role: "tool", ToolName: "ask_user", Content: "QUESTION: Apply the plan now?"},
+			{Role: "assistant", Content: "Apply the plan now?"},
+		},
+		md: newMarkdownRenderer(), notesMd: newMarkdownRenderer(),
+	}
+	m.viewport.SetWidth(80)
+	turn, _ := m.collectAssistantTurn(0)
+	var b strings.Builder
+	m.writeAssistantTurn(&b, &turn, false)
+	out := ansi.Strip(b.String())
+	if got := strings.Count(out, "Apply the plan now?"); got != 1 {
+		t.Fatalf("question rendered %d times, want once:\n%s", got, out)
+	}
+}

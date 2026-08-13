@@ -213,7 +213,15 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 				// the question itself so the user knows what the paused turn awaits.
 				if call.Function.Name == "ask_user" {
 					if question := visibleAskUserQuestion(call); question != "" {
-						t.segments = append(t.segments, turnSegment{text: question})
+						// New sessions record the question as a normal assistant
+						// message before pausing. Keep this fallback for older saved
+						// sessions, but do not render the same question twice.
+						questionFollows := resultIdx >= 0 && resultIdx+1 < len(m.history) &&
+							m.history[resultIdx+1].Role == "assistant" &&
+							strings.TrimSpace(m.history[resultIdx+1].Content) == strings.TrimSpace(question)
+						if !questionFollows {
+							t.segments = append(t.segments, turnSegment{text: question})
+						}
 					}
 				}
 			}
@@ -226,12 +234,20 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 func visibleAskUserQuestion(call tools.ToolCall) string {
 	var args struct {
 		Question string `json:"question"`
+		Message  string `json:"message"`
+		Prompt   string `json:"prompt"`
 		Options  string `json:"options"`
 	}
 	if json.Unmarshal(call.Function.Arguments, &args) != nil {
 		return ""
 	}
 	question := strings.TrimSpace(args.Question)
+	if question == "" {
+		question = strings.TrimSpace(args.Message)
+	}
+	if question == "" {
+		question = strings.TrimSpace(args.Prompt)
+	}
 	if question == "" {
 		return ""
 	}

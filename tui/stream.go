@@ -26,6 +26,10 @@ type streamState struct {
 	tools       bool   // request exposed tool schemas
 	visibility  bool   // first non-whitespace content classified for live rendering
 	hideContent bool   // structured transport is buffered until completion
+	// advertisedTools is the exact per-request capability boundary. A nil map is
+	// reserved for legacy/test stream states; production requests always set it,
+	// including an empty map when no tools were attached.
+	advertisedTools map[string]bool
 	// toolsSuppressed records that this request's tools were withheld by
 	// suppressToolsOnce (a loop guard or the step budget), not merely absent.
 	// The reply is read back against it: a tool call in a reply to a request we
@@ -451,7 +455,11 @@ func (m *Model) startStream() tea.Cmd {
 	}
 	m.suppressToolsOnce = false
 	if m.degradedStreamRetry && len(tools) > 8 {
-		tools = selectRelevantTools(tools, m.latestUserRequest(), 8)
+		tools = selectRelevantTools(tools, m.latestUserRequest(), 8, pinnedToolNames(m.mode))
+	}
+	advertisedTools := make(map[string]bool, len(tools))
+	for _, definition := range tools {
+		advertisedTools[definition.Function.Name] = true
 	}
 	// Token-budgeted assembly: static prompt + newest-fitting history + volatile
 	// tail (including the auto-RAG block). Keep the advertised tools identical to
@@ -506,7 +514,7 @@ func (m *Model) startStream() tea.Cmd {
 	if strings.Contains(m.host.URL(), "ollama.com") {
 		source = "cloud"
 	}
-	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen, constrained: constrained, tools: len(tools) > 0, toolsSuppressed: suppressed}
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen, constrained: constrained, tools: len(tools) > 0, advertisedTools: advertisedTools, toolsSuppressed: suppressed}
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.thinkTail = ""

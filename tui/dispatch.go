@@ -240,6 +240,13 @@ func (m *Model) processPendingTools() tea.Cmd {
 			return nil
 		}
 		if questionIndex >= 0 {
+			// Record the prompt as ordinary assistant text before clearing the
+			// activity state. This keeps the question visible even when the model
+			// supplied a prose-wrapped/malformed call whose JSON transport was
+			// intentionally hidden from the transcript.
+			if question := visibleAskUserQuestion(batchCalls[questionIndex]); question != "" {
+				m.history = append(m.history, api.Message{Role: "assistant", Content: question})
+			}
 			if m.mode == PlanMode && m.planRecorded() {
 				m.planReviewRequested = strings.TrimSpace(m.notes.get())
 			}

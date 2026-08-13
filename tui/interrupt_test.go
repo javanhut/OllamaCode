@@ -242,6 +242,10 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
 		t.Fatal("ask_user left the UI thinking, so the user's answer would be queued")
 	}
+	last := m.history[len(m.history)-1]
+	if last.Role != "assistant" || !strings.Contains(last.Content, "Does this plan match what you want?") {
+		t.Fatalf("ask_user question was not recorded as visible assistant text: %#v", m.history)
+	}
 
 	m.input = textarea.New()
 	m.input.SetValue("approve")
@@ -253,6 +257,30 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	}
 	if m.stream != nil {
 		m.stream.cancel()
+	}
+}
+
+func TestAskUserMessageAliasRemainsVisibleAfterArgumentRepair(t *testing.T) {
+	call := tc("ask_user", `{"message":"Apply the plan now?","mode":"write"}`)
+	if got := visibleAskUserQuestion(call); got != "Apply the plan now?" {
+		t.Fatalf("visible question = %q, want repaired-call message", got)
+	}
+
+	m := interruptTestModel()
+	m.streaming = true
+	m.stream = &streamState{cancel: func() {}}
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: []api.Message{{Role: "tool", ToolName: "ask_user", Content: "QUESTION: Apply the plan now?"}},
+		started: []bool{true},
+		done:    1,
+	}
+	if cmd := m.processPendingTools(); cmd != nil {
+		t.Fatal("ask_user must pause after displaying the repaired question")
+	}
+	last := m.history[len(m.history)-1]
+	if last.Role != "assistant" || last.Content != "Apply the plan now?" {
+		t.Fatalf("repaired ask_user question not made visible: %#v", m.history)
 	}
 }
 

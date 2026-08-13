@@ -308,9 +308,13 @@ func (m *Model) toolsForMode() []tools.Tool {
 		return nil
 	}
 	lean := m.profile.smallModel()
+	pinned := pinnedToolNames(m.mode)
 	out := make([]tools.Tool, 0, len(all))
 	for _, t := range all {
-		if lean && !t.Policy.SmallModelSafe {
+		// Workflow-critical tools must survive both the small-model filter and
+		// the schema cap. Otherwise Plan mode can instruct the model to record a
+		// plan and ask for approval while omitting the only tools that can do so.
+		if lean && !t.Policy.SmallModelSafe && !pinned[t.Function.Name] {
 			continue
 		}
 		if t.Function.Name == "spawn_subagent" && !m.profile.canDelegate() {
@@ -339,9 +343,23 @@ func (m *Model) toolsForMode() []tools.Tool {
 		}
 	}
 	if maxVisible > 0 && len(out) > maxVisible {
-		out = selectRelevantTools(out, m.latestUserRequest(), maxVisible)
+		out = selectRelevantTools(out, m.latestUserRequest(), maxVisible, pinned)
 	}
 	return out
+}
+
+// pinnedToolNames returns the tools that make each mode's state machine
+// usable. These names are still subject to registry, mode-policy, and repeat-
+// guard filtering; pinning only prevents schema-budget pruning.
+func pinnedToolNames(mode Mode) map[string]bool {
+	pinned := map[string]bool{"switch_mode": true}
+	if mode == PlanMode {
+		pinned["ask_user"] = true
+		pinned["read_session_notes"] = true
+		pinned["update_session_notes"] = true
+		pinned["append_session_notes"] = true
+	}
+	return pinned
 }
 
 // conversationalOnlyRequest recognizes deliberately narrow, exact small-talk
@@ -372,7 +390,7 @@ func (m *Model) latestUserRequest() string {
 // selectRelevantTools keeps the small-model schema budget focused while
 // preserving the core inspect/edit workflow. Strong profiles normally leave
 // MaxVisibleTools unset and receive every mode-allowed tool.
-func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool {
+func selectRelevantTools(all []tools.Tool, query string, limit int, pinned map[string]bool) []tools.Tool {
 	type ranked struct {
 		tool  tools.Tool
 		score int
@@ -428,9 +446,34 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 		}
 		return rankedTools[i].score > rankedTools[j].score
 	})
+	availablePinned := 0
+	for _, item := range rankedTools {
+		if pinned[item.tool.Function.Name] {
+			availablePinned++
+		}
+	}
+	if limit < availablePinned {
+		limit = availablePinned
+	}
+	if limit > len(rankedTools) {
+		limit = len(rankedTools)
+	}
 	out := make([]tools.Tool, 0, limit)
-	for _, item := range rankedTools[:limit] {
-		out = append(out, item.tool)
+	selected := make(map[string]bool, limit)
+	for _, item := range rankedTools {
+		if pinned[item.tool.Function.Name] {
+			out = append(out, item.tool)
+			selected[item.tool.Function.Name] = true
+		}
+	}
+	for _, item := range rankedTools {
+		if len(out) >= limit {
+			break
+		}
+		if !selected[item.tool.Function.Name] {
+			out = append(out, item.tool)
+			selected[item.tool.Function.Name] = true
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
 	return out

@@ -98,6 +98,33 @@ func TestRelevantToolSelectionHonorsProfileCap(t *testing.T) {
 	}
 }
 
+func TestPlanModePinsWorkflowToolsThroughLeanCap(t *testing.T) {
+	registry := tools.DefaultRegistry()
+	m := &Model{
+		mode:    PlanMode,
+		tools:   registry,
+		notes:   &sessionNotes{},
+		profile: ModelProfile{CapabilityTier: "small", MaxVisibleTools: 8},
+		history: []api.Message{{Role: "user", Content: "plan the change"}},
+	}
+	registry.Register(readNotesTool(m.notes))
+	registry.Register(updateNotesTool(m.notes))
+	registry.Register(appendNotesTool(m.notes))
+	registry.Register(m.switchModeTool())
+	names := map[string]bool{}
+	for _, tool := range m.toolsForMode() {
+		names[tool.Function.Name] = true
+	}
+	for _, want := range []string{
+		"switch_mode", "ask_user", "read_session_notes",
+		"update_session_notes", "append_session_notes",
+	} {
+		if !names[want] {
+			t.Errorf("plan toolset omitted pinned workflow tool %q: %v", want, names)
+		}
+	}
+}
+
 func TestCapableModelsGetBoundedToolSchemasByDefault(t *testing.T) {
 	m := &Model{
 		mode:    ExploreMode,

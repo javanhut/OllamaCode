@@ -689,3 +689,48 @@ func TestSuppressedRequestDropsTextToolCall(t *testing.T) {
 		t.Fatal("text-form tool calls must still run when tools were not withheld")
 	}
 }
+
+func TestRequestRejectsToolNotInAdvertisedSchemas(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Tool{Function: tools.Function{Name: "todo_write",
+		Parameters: tools.Schema{Type: "object"}}})
+	model := func(advertised map[string]bool) *Model {
+		m := &Model{
+			mode: ExploreMode, turnGen: 1, maxSteps: defaultMaxSteps,
+			tools: registry, notes: &sessionNotes{}, failedCalls: map[string]int{},
+			transcript: &strings.Builder{}, streamBuf: &strings.Builder{},
+			md: newMarkdownRenderer(), notesMd: newMarkdownRenderer(),
+			stream: &streamState{gen: 1, advertisedTools: advertised},
+		}
+		m.viewport.SetWidth(80)
+		return m
+	}
+	const content = `{"name":"todo_write","arguments":{"todos":[]}}`
+
+	next, _ := model(map[string]bool{"read_file": true}).Update(chatDoneMsg{gen: 1, content: content})
+	m := next.(*Model)
+	if m.pending != nil {
+		t.Fatal("text-form call executed even though its schema was not advertised")
+	}
+	foundRejection := false
+	for _, msg := range m.history {
+		if msg.Role == "system" && strings.Contains(msg.Content, "not available on that model request") {
+			foundRejection = true
+		}
+	}
+	if !foundRejection {
+		t.Fatalf("missing unadvertised-call rejection: %#v", m.history)
+	}
+
+	next, _ = model(map[string]bool{"read_file": true}).Update(chatToolCallsMsg{
+		gen: 1, calls: []tools.ToolCall{tc("todo_write", `{"todos":[]}`)},
+	})
+	if next.(*Model).pending != nil {
+		t.Fatal("native call executed even though its schema was not advertised")
+	}
+
+	next, _ = model(map[string]bool{"todo_write": true}).Update(chatDoneMsg{gen: 1, content: content})
+	if next.(*Model).pending == nil {
+		t.Fatal("advertised text-form tool call was rejected")
+	}
+}

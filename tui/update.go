@@ -25,11 +25,12 @@ type chatChunkMsg struct {
 }
 type streamRenderMsg struct{ gen int }
 type chatDoneMsg struct {
-	gen        int
-	content    string
-	thinking   string
-	promptEval int
-	evalCount  int
+	gen              int
+	content          string
+	thinking         string
+	promptEval       int
+	evalCount        int
+	toolCallsDropped bool // native calls were rejected before this completion path
 }
 type chatErrMsg struct {
 	gen int
@@ -103,6 +104,31 @@ func droppedToolCallNotice(calls []tools.ToolCall) string {
 		name = "tool"
 	}
 	return fmt.Sprintf("[TOOL CALL DROPPED] Tools were disabled for that message, so your %s call was NOT executed — nothing ran and no result is coming. Reply in plain text: answer with what you already know, or state your blocker.", name)
+}
+
+// filterAdvertisedToolCalls enforces the exact schemas attached to the model
+// request. A nil allowlist is accepted only for legacy/test stream states;
+// production startStream always records a non-nil map, even when it is empty.
+func filterAdvertisedToolCalls(calls []tools.ToolCall, advertised map[string]bool) (allowed, rejected []tools.ToolCall) {
+	if advertised == nil {
+		return calls, nil
+	}
+	for _, call := range calls {
+		if advertised[call.Function.Name] {
+			allowed = append(allowed, call)
+		} else {
+			rejected = append(rejected, call)
+		}
+	}
+	return allowed, rejected
+}
+
+func unadvertisedToolCallNotice(calls []tools.ToolCall) string {
+	name := batchSingleTool(calls)
+	if name == "" {
+		name = "tool"
+	}
+	return fmt.Sprintf("[TOOL CALL REJECTED] The %s tool was not available on that model request, so it was NOT executed. Use only the tools listed in AVAILABLE TOOLS THIS TURN, or explain the blocker in plain text.", name)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -656,13 +682,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// path with the calls gone, so the answer still reaches the user.
 		if m.stream != nil && m.stream.toolsSuppressed {
 			m.history = append(m.history, api.Message{Role: "system", Content: droppedToolCallNotice(msg.calls)})
-			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount})
+			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount, toolCallsDropped: true})
 		}
 		m.recordModelResponse(msg.gen, preamble, msg.calls, msg.promptEval, msg.evalCount)
 		calls := dedupeCalls(msg.calls)
 		if m.trace != nil && len(calls) != len(msg.calls) {
 			_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_deduplicated", Turn: msg.gen, Model: m.modelName,
 				Metadata: map[string]any{"received": len(msg.calls), "kept": len(calls), "calls": msg.calls}})
+		}
+		var rejected []tools.ToolCall
+		if m.stream != nil {
+			calls, rejected = filterAdvertisedToolCalls(calls, m.stream.advertisedTools)
+		}
+		if len(rejected) > 0 {
+			m.history = append(m.history, api.Message{Role: "system", Content: unadvertisedToolCallNotice(rejected)})
+			if m.trace != nil {
+				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_rejected_unadvertised", Turn: msg.gen, Model: m.modelName,
+					Metadata: map[string]any{"rejected": len(rejected), "calls": rejected}})
+			}
+		}
+		if len(calls) == 0 {
+			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount, toolCallsDropped: true})
 		}
 		m.history = append(m.history, api.Message{
 			Role:      "assistant",
@@ -831,6 +871,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			structuredOutput = likelyStructuredOutput(finalAssistant)
 		}
 		suppressed := m.stream != nil && m.stream.toolsSuppressed
+		var advertised map[string]bool
+		if m.stream != nil {
+			advertised = m.stream.advertisedTools
+		}
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
@@ -855,8 +899,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the end-of-turn path below already owns every bounded retry there is
 		// (open-todo nudge, citation gate, verify gate), so the drop can never
 		// become a loop of its own.
-		dropped := suppressed && len(parsed) > 0
-		if dropped {
+		dropped := msg.toolCallsDropped
+		if suppressed && len(parsed) > 0 {
+			dropped = true
 			if m.trace != nil {
 				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_dropped_suppressed", Turn: msg.gen, Model: m.modelName,
 					Metadata: map[string]any{"dropped": len(parsed), "calls": parsedRaw}})
@@ -866,6 +911,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// finished answer plus one self-check call, and blanking the whole
 			// message discarded the corrected answer the citation gate asked for.
 			parsed, finalAssistant = nil, tools.StripToolCalls(finalAssistant)
+		} else if len(parsed) > 0 {
+			var rejected []tools.ToolCall
+			parsed, rejected = filterAdvertisedToolCalls(parsed, advertised)
+			if len(rejected) > 0 {
+				dropped = true
+				m.history = append(m.history, api.Message{Role: "system", Content: unadvertisedToolCallNotice(rejected)})
+				if m.trace != nil {
+					_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_rejected_unadvertised", Turn: msg.gen, Model: m.modelName,
+						Metadata: map[string]any{"rejected": len(rejected), "calls": rejected}})
+				}
+				// Remove transport JSON for rejected calls from visible prose. Any
+				// accepted calls remain represented structurally in history below.
+				finalAssistant = tools.StripToolCalls(finalAssistant)
+			}
 		}
 		if len(parsed) > 0 && m.stepCount < limit {
 			if m.trace != nil {
