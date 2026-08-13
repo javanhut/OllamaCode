@@ -57,6 +57,7 @@ override.
 "profiles": {
   "qwen3-coder:30b": {
     "num_ctx": 32768,
+    "num_ctx_explicit": true,
     "supports_tools": true,
     "supports_thinking": false,
     "params_b": 30.5,
@@ -71,12 +72,13 @@ override.
 
 | Field | Meaning |
 |---|---|
-| `num_ctx` | Context window. Capped at 131072 regardless of what the model reports |
+| `num_ctx` | Context window. Local auto-discovery is capped at 32768 to avoid oversized KV caches; an explicit `/model ctx` value may use up to 131072 |
+| `num_ctx_explicit` | Written by `/model ctx`; distinguishes a deliberate override from an older auto-discovered value |
 | `supports_tools` | Whether tools are sent at all |
 | `supports_thinking` | Whether the reasoning stream is requested |
 | `params_b` | Parameter count in billions. Under 15 triggers the small-model tier: compact prompt, lean toolset, temperature 0 on tool-capable turns and 0.2 on tool-less prose turns. `0` means unknown and is treated as large |
 | `capability_tier` | Optional `small`, `capable`, or `strong` override for size-based tiering |
-| `max_visible_tools` | Optional cap used by task-aware tool selection |
+| `max_visible_tools` | Optional cap used by task-aware tool selection; defaults to 12 for small models and 16 otherwise |
 | profile `max_steps` | Per-model tool-round budget, overriding the top-level default |
 | `parallel_tool_calls` | Override whether the model is instructed to batch independent calls |
 | `max_parallel_tools` | Maximum tool calls executed concurrently; defaults to 1 for small models and 4 otherwise |
@@ -87,6 +89,19 @@ override.
 | `temperature`, `top_p`, `num_predict` | Sampling overrides; omit to use the model's defaults |
 
 `/model ctx` and `/model temp` write here.
+
+Obvious conversational turns such as `hello` are sent without tool schemas.
+Thinking-capable models use their reasoning stream for planning and review turns;
+routine exploration and tool dispatch favor lower first-token latency. If a local
+request is idle for 90 seconds, OllamaCode retries once with at most eight tools,
+no thinking stream, and at most a 32K context before surfacing the error.
+Tool-capable turns default to a 1,024-token generation ceiling. Repetitive output
+is cancelled while streaming and retried once with a corrective prompt. Ornith
+uses native tool calling because its Ollama schema-constrained path can loop on
+concatenated response and mode-transition objects.
+Structured response and text-form tool envelopes are buffered invisibly while
+streaming, then converted to clean prose or tool activity at completion; normal
+prose continues to render live.
 
 ### Token estimation
 

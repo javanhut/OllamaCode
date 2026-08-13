@@ -245,6 +245,7 @@ func (m *Model) modelInfoCommand(args string) {
 		}
 		p := m.profile
 		p.NumCtx = n
+		p.NumCtxExplicit = true
 		m.saveProfile(p)
 		m.toast = fmt.Sprintf("num_ctx for %s set to %d", m.modelName, m.contextLimit)
 		return

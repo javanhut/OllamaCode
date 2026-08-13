@@ -4,11 +4,10 @@ package tui
 // model reports a larger window — keeps memory/latency sane on local hardware.
 const maxContextBudget = 131072
 
-// defaultContextLimit is the conservative fallback when /api/show reports
-// nothing usable. Allocating 124K blindly made a transient introspection error
-// reserve a huge KV cache on local hardware and dramatically slowed startup.
-// Models that advertise a larger window still get it (up to maxContextBudget),
-// and users can override this with `/model ctx`.
+// defaultContextLimit is both the conservative fallback and the automatic local
+// allocation ceiling. A model may advertise 128K+, but reserving that entire KV
+// cache makes ordinary 5-20K coding prompts dramatically slower. Users can
+// still opt into a larger window with `/model ctx`.
 const defaultContextLimit = 32768
 
 // resolveProfile loads the cached profile for the current model, or discovers it
@@ -48,6 +47,11 @@ func (m *Model) resolveProfile() {
 		// ParamsB == 0 also re-probes profiles cached before tier detection
 		// existed; one /api/show per model switch is cheap and self-heals.
 		if p, ok := m.cfg.Profiles[name]; ok && p.NumCtx > 0 && p.ParamsB > 0 {
+			if !p.NumCtxExplicit && p.NumCtx > defaultContextLimit {
+				p.NumCtx = defaultContextLimit
+				m.cfg.Profiles[name] = p
+				saveConfig(m.cfg)
+			}
 			m.applyProfile(p)
 			return
 		}
@@ -56,7 +60,7 @@ func (m *Model) resolveProfile() {
 	p := ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true}
 	if show, err := m.host.ShowModel(name); err == nil {
 		if n := show.ContextLength(); n > 0 {
-			p.NumCtx = n
+			p.NumCtx = min(n, defaultContextLimit)
 		}
 		// Only override the optimistic default when /api/show actually reports
 		// capabilities; an empty list means "unknown", not "no tools".
@@ -79,8 +83,9 @@ func (m *Model) resolveProfile() {
 }
 
 func preserveProfileOverrides(discovered, configured ModelProfile) ModelProfile {
-	if configured.NumCtx > 0 {
+	if configured.NumCtxExplicit && configured.NumCtx > 0 {
 		discovered.NumCtx = configured.NumCtx
+		discovered.NumCtxExplicit = true
 	}
 	discovered.CapabilityTier = configured.CapabilityTier
 	discovered.MaxVisibleTools = configured.MaxVisibleTools
@@ -113,7 +118,11 @@ func (m *Model) applyProfile(p ModelProfile) {
 
 // chatOptions builds the Ollama Options map from the active profile.
 func (m *Model) chatOptions(action bool) map[string]any {
-	opts := map[string]any{"num_ctx": m.contextLimit}
+	return m.chatOptionsForRequest(action, m.contextLimit)
+}
+
+func (m *Model) chatOptionsForRequest(action bool, contextLimit int) map[string]any {
+	opts := map[string]any{"num_ctx": contextLimit}
 	if m.profile.Temperature != nil {
 		opts["temperature"] = *m.profile.Temperature
 	} else if action && m.profile.ActionTemperature != nil {
@@ -134,6 +143,10 @@ func (m *Model) chatOptions(action bool) map[string]any {
 	}
 	if m.profile.NumPredict != nil {
 		opts["num_predict"] = *m.profile.NumPredict
+	} else if action {
+		// A tool selection should be a compact call, not an unbounded essay. This
+		// also gives continuously-streaming repetition a hard server-side stop.
+		opts["num_predict"] = 1024
 	}
 	return opts
 }

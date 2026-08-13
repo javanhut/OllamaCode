@@ -74,7 +74,7 @@ func (m *Model) refreshTranscript() {
 				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
-			if m.streamBuf.Len() > 0 {
+			if m.streamBuf.Len() > 0 && (m.stream == nil || !m.stream.hideContent) {
 				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String()})
 			}
 		case m.retrieving || m.compacting || m.verifying:

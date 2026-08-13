@@ -204,6 +204,15 @@ func (c *ConstraintCache) Downgrade(key string) bool {
 	return true
 }
 
+// Disable permanently selects the unconstrained rung for a model+host pair.
+// Use it when a host accepts the schema but the model loops while trying to
+// satisfy it; HTTP acceptance alone does not prove behavioral compatibility.
+func (c *ConstraintCache) Disable(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rungs[key] = RungOff
+}
+
 // IsFormatRejection reports whether an /api/chat error is the host refusing
 // the format payload — Ollama answers schema->grammar conversion failures with
 // a 400 whose body names the schema — as opposed to a transient transport
@@ -256,4 +265,28 @@ func UnwrapConstrainedProse(content string) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// UnwrapResponseEnvelope handles the exact {"response":"..."} transport
+// shape emitted by some native tool-capable model templates. Unlike
+// UnwrapConstrainedProse it deliberately rejects bare JSON strings and objects
+// with any additional fields, so ordinary unconstrained JSON answers survive.
+func UnwrapResponseEnvelope(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || trimmed[0] != '{' {
+		return "", false
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal([]byte(trimmed), &envelope) != nil || len(envelope) != 1 {
+		return "", false
+	}
+	raw, ok := envelope["response"]
+	if !ok {
+		return "", false
+	}
+	var response string
+	if json.Unmarshal(raw, &response) != nil || strings.TrimSpace(response) == "" {
+		return "", false
+	}
+	return response, true
 }

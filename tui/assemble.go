@@ -2,6 +2,8 @@ package tui
 
 import "github.com/javanhut/ollama_code/api"
 
+import "github.com/javanhut/ollama_code/tools"
+
 // generationReserve is how many tokens we hold back from num_ctx for the model's
 // own output when no explicit num_predict is set.
 const generationReserve = 4096
@@ -17,6 +19,17 @@ const generationReserve = 4096
 // any leading "tool" messages). The static prefix stays append-only so the KV
 // cache prefix remains stable across turns.
 func (m *Model) assembleMessages(ragBlock string) []api.Message {
+	var available []tools.Tool
+	if m.profile.SupportsTools && m.tools != nil {
+		available = m.toolsForMode()
+	}
+	return m.assembleMessagesForTools(ragBlock, available)
+}
+
+// assembleMessagesForTools keeps the dynamic tool banner consistent with the
+// schemas on the actual request. In particular, a conversational or degraded
+// tool-less turn must not advertise tools that the model cannot call.
+func (m *Model) assembleMessagesForTools(ragBlock string, available []tools.Tool) []api.Message {
 	reserve := generationReserve
 	if m.profile.NumPredict != nil && *m.profile.NumPredict > 0 {
 		reserve = *m.profile.NumPredict
@@ -27,7 +40,7 @@ func (m *Model) assembleMessages(ragBlock string) []api.Message {
 	}
 
 	sys := api.Message{Role: "system", Content: m.activeSystemPrompt()}
-	dyn := api.Message{Role: "system", Content: m.buildDynamicContext(ragBlock)}
+	dyn := api.Message{Role: "system", Content: m.buildDynamicContextForTools(ragBlock, available)}
 	base := estimateMsgTokens(sys) + estimateMsgTokens(dyn)
 
 	start := historyWindow(m.history, budget-base)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -567,6 +568,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.content != "" {
 			m.thinkTail = "" // answer started; drop the ticker
 			m.streamBuf.WriteString(msg.content)
+			if m.stream != nil && !m.stream.visibility {
+				if strings.TrimSpace(m.streamBuf.String()) != "" {
+					m.stream.visibility = true
+					m.stream.hideContent = likelyStructuredOutput(m.streamBuf.String())
+				}
+			}
+		}
+		if m.stream != nil && streamOutputRunaway(m.streamBuf.String(), m.stream.constrained) {
+			if m.stream.cancel != nil {
+				m.stream.cancel()
+			}
+			gen := m.turnGen
+			cmds = append(cmds, func() tea.Msg { return chatErrMsg{gen: gen, err: errRunawayModelStream} })
+			break
 		}
 		// Paint at a responsive cadence independently of token boundaries. When a
 		// chunk arrives inside the cadence window, schedule the missing frame: the
@@ -610,6 +625,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale tool calls from a cancelled/replaced stream
 		}
 		m.streamRetries = 0 // stream delivered — retry budget refreshes per step
+		m.degradedStreamRetry = false
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.thinking != "" {
 			m.recordThinking(msg.thinking)
@@ -758,6 +774,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break // stale completion from a cancelled/replaced stream
 		}
 		m.streamRetries = 0
+		m.degradedStreamRetry = false
 		// A successful completion supersedes any "stream error — retrying"
 		// toast left over from a recovered transient failure.
 		if strings.HasPrefix(m.toast, "stream error") {
@@ -779,6 +796,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the stream state: a constrained reply that isn't a tool call is the
 		// prose escape envelope and gets unwrapped below.
 		constrained := m.stream != nil && m.stream.constrained
+		actionTurn := m.stream != nil && m.stream.tools
+		structuredOutput := m.stream != nil && m.stream.hideContent
+		if !structuredOutput {
+			structuredOutput = likelyStructuredOutput(finalAssistant)
+		}
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
@@ -799,9 +821,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_parsed_from_content", Turn: msg.gen, Model: m.modelName,
 					Metadata: map[string]any{"received": len(parsedRaw), "kept": len(parsed), "calls": parsedRaw}})
 			}
+			historyContent := finalAssistant
+			if structuredOutput {
+				historyContent = ""
+			}
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
-				Content:   finalAssistant,
+				Content:   historyContent,
 				ToolCalls: parsed,
 			})
 			m.pending = &pendingBatch{
@@ -826,6 +852,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if prose, ok := agent.UnwrapConstrainedProse(finalAssistant); ok {
 					finalAssistant = prose
 				}
+			} else if structuredOutput {
+				if prose, ok := agent.UnwrapResponseEnvelope(finalAssistant); ok {
+					finalAssistant = prose
+				}
+			}
+			if actionTurn && m.actionDeferrals < maxActionDeferrals && promisesToolAction(finalAssistant) {
+				m.actionDeferrals++
+				m.history = append(m.history,
+					api.Message{Role: "assistant", Content: finalAssistant},
+					api.Message{Role: "system", Content: "[ACTION REQUIRED] You said you would inspect or check the workspace, but you did not call a tool. Do not narrate the next step. Call the single most relevant available tool now."},
+				)
+				m.busySince = time.Now()
+				cmds = append(cmds, m.startStream())
+				m.refreshTranscript()
+				if wasAtBottom {
+					m.viewport.GotoBottom()
+				}
+				break
 			}
 			if len(finalAssistant) > 0 {
 				m.history = append(m.history, api.Message{
@@ -940,6 +984,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			_ = m.trace.Record(tracepkg.Event{Kind: "stream_error", Turn: msg.gen, Model: m.modelName, Error: msg.err.Error(), Metadata: metadata})
 		}
+		runaway := errors.Is(msg.err, errRunawayModelStream)
+		if runaway && m.stream != nil && m.stream.constrained {
+			m.disableToolCallFormat()
+		}
+		if runaway && m.streamRetries == 0 {
+			m.streamRetries++
+			m.degradedStreamRetry = true
+			m.streamBuf.Reset()
+			m.history = append(m.history, api.Message{Role: "system", Content: "[RETRY CORRECTION] Your previous response entered a repetitive output loop. Emit exactly one concise tool call or one concise final answer. Do not concatenate JSON objects or repeat mode transitions."})
+			m.toast = "repetitive model output stopped — retrying once"
+			gen := m.turnGen
+			cmds = append(cmds, func() tea.Msg { return retryStreamMsg{gen: gen} })
+			m.refreshTranscript()
+			break
+		}
 		// A 400 against a schema-constrained request is the host refusing the
 		// format, not a transient failure: step down the fallback ladder and
 		// retry immediately rather than burning a stream retry (and its backoff)
@@ -957,11 +1016,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stream a bounded number of times before killing the turn, with a
 		// linear backoff so a struggling backend gets room to recover. History
 		// is intact, so the request simply regenerates from the same state.
-		if !m.compacting && m.streamRetries < maxStreamRetries {
+		idleTimeout := strings.Contains(msg.err.Error(), "stream idle timeout") &&
+			(m.stream == nil || m.stream.modelSource != "cloud")
+		retryLimit := maxStreamRetries
+		if idleTimeout {
+			retryLimit = 1
+		}
+		if !runaway && !m.compacting && m.streamRetries < retryLimit {
 			m.streamRetries++
+			m.degradedStreamRetry = idleTimeout
 			delay := time.Duration(m.streamRetries) * 2 * time.Second
-			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))
-			m.toast = fmt.Sprintf("stream error — retrying (%d/%d) in %ds…", m.streamRetries, maxStreamRetries, int(delay.Seconds()))
+			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, retryLimit, msg.err))
+			m.toast = fmt.Sprintf("stream error — retrying (%d/%d) in %ds…", m.streamRetries, retryLimit, int(delay.Seconds()))
 			m.streamBuf.Reset() // discard the partial response; the retry regenerates it
 			gen := m.turnGen
 			cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg { return retryStreamMsg{gen: gen} }))

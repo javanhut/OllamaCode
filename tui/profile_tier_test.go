@@ -62,6 +62,7 @@ func TestSmallModelExploreIncludesWebTools(t *testing.T) {
 		mode:    ExploreMode,
 		tools:   tools.DefaultRegistry(),
 		profile: ModelProfile{ParamsB: 7},
+		history: []api.Message{{Role: "user", Content: "search the web for the latest documentation"}},
 	}
 
 	names := map[string]bool{}
@@ -97,6 +98,42 @@ func TestRelevantToolSelectionHonorsProfileCap(t *testing.T) {
 	}
 }
 
+func TestCapableModelsGetBoundedToolSchemasByDefault(t *testing.T) {
+	m := &Model{
+		mode:    ExploreMode,
+		tools:   tools.DefaultRegistry(),
+		profile: ModelProfile{ParamsB: 28},
+		history: []api.Message{{Role: "user", Content: "inspect the project"}},
+	}
+	if got := len(m.toolsForMode()); got != 16 {
+		t.Fatalf("capable-model tool count = %d, want 16", got)
+	}
+}
+
+func TestConversationalOnlyRequest(t *testing.T) {
+	for _, input := range []string{"Hello", "hey!", "Thank you."} {
+		if !conversationalOnlyRequest(input) {
+			t.Errorf("%q should be tool-free", input)
+		}
+	}
+	for _, input := range []string{"hello, inspect this repo", "thanks, now run tests", "fix the greeting"} {
+		if conversationalOnlyRequest(input) {
+			t.Errorf("%q still needs task-aware tools", input)
+		}
+	}
+}
+
+func TestToolFreeDynamicContextDoesNotAdvertiseTools(t *testing.T) {
+	m := &Model{mode: ExploreMode, notes: &sessionNotes{}}
+	context := m.buildDynamicContextForTools("", nil)
+	if strings.Contains(context, "AVAILABLE TOOLS THIS TURN") {
+		t.Fatal("tool-free request still advertised unavailable tools")
+	}
+	if !strings.Contains(context, "No tools are available") {
+		t.Fatal("tool-free request should direct the model to answer plainly")
+	}
+}
+
 func TestActiveSystemPromptByTier(t *testing.T) {
 	m := &Model{profile: ModelProfile{ParamsB: 7}}
 	if !strings.HasPrefix(m.activeSystemPrompt(), compactSystemPrompt) {
@@ -121,6 +158,9 @@ func TestSmallModelTemperatureDefault(t *testing.T) {
 	}
 	if temp := m.chatOptions(false)["temperature"]; temp != 0.2 {
 		t.Fatalf("small-model prose turns should default temperature to 0.2, got %v", temp)
+	}
+	if got := m.chatOptions(true)["num_predict"]; got != 1024 {
+		t.Fatalf("action turn num_predict = %v, want 1024", got)
 	}
 	// Explicit override wins.
 	override := 0.9
@@ -168,13 +208,23 @@ func TestProfileDiscoveryPreservesCapabilityOverrides(t *testing.T) {
 	temp := 0.1
 	got := preserveProfileOverrides(
 		ModelProfile{NumCtx: 32768, ParamsB: 7, SupportsTools: true},
-		ModelProfile{NumCtx: 65536, CapabilityTier: "strong", MaxVisibleTools: 30, ProfileMaxSteps: 60, ParallelTools: &off, MaxParallelTools: 3, Delegation: &off, ActionTemperature: &temp},
+		ModelProfile{NumCtx: 65536, NumCtxExplicit: true, CapabilityTier: "strong", MaxVisibleTools: 30, ProfileMaxSteps: 60, ParallelTools: &off, MaxParallelTools: 3, Delegation: &off, ActionTemperature: &temp},
 	)
 	if got.ParamsB != 7 || !got.SupportsTools {
 		t.Fatalf("discovered capabilities were lost: %+v", got)
 	}
-	if got.NumCtx != 65536 || got.CapabilityTier != "strong" || got.MaxVisibleTools != 30 || got.ProfileMaxSteps != 60 || got.ParallelTools == nil || *got.ParallelTools || got.MaxParallelTools != 3 || got.Delegation == nil || *got.Delegation || got.ActionTemperature == nil {
+	if got.NumCtx != 65536 || !got.NumCtxExplicit || got.CapabilityTier != "strong" || got.MaxVisibleTools != 30 || got.ProfileMaxSteps != 60 || got.ParallelTools == nil || *got.ParallelTools || got.MaxParallelTools != 3 || got.Delegation == nil || *got.Delegation || got.ActionTemperature == nil {
 		t.Fatalf("configured overrides were lost: %+v", got)
+	}
+}
+
+func TestDiscoveredContextIsNotMistakenForExplicitOverride(t *testing.T) {
+	got := preserveProfileOverrides(
+		ModelProfile{NumCtx: defaultContextLimit, ParamsB: 28},
+		ModelProfile{NumCtx: maxContextBudget},
+	)
+	if got.NumCtx != defaultContextLimit || got.NumCtxExplicit {
+		t.Fatalf("auto-discovered 128K context should migrate to the safe default: %+v", got)
 	}
 }
 

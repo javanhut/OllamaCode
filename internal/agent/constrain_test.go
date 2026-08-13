@@ -188,6 +188,21 @@ func TestUnwrapConstrainedProse(t *testing.T) {
 	}
 }
 
+func TestUnwrapResponseEnvelopeIsExact(t *testing.T) {
+	if got, ok := UnwrapResponseEnvelope(`{"response":"clean prose"}`); !ok || got != "clean prose" {
+		t.Fatalf("exact response envelope = (%q, %v)", got, ok)
+	}
+	for _, content := range []string{
+		`{"response":"keep the object","status":"ok"}`,
+		`{"name":"read_file","arguments":{}}`,
+		`"plain JSON string"`,
+	} {
+		if got, ok := UnwrapResponseEnvelope(content); ok {
+			t.Errorf("ordinary JSON %q was unwrapped as %q", content, got)
+		}
+	}
+}
+
 func TestIsFormatRejection(t *testing.T) {
 	if !IsFormatRejection(schemaRejection()) {
 		t.Fatal("400 schema conversion failure should read as a format rejection")

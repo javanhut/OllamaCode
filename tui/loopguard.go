@@ -19,6 +19,7 @@ const (
 	recentOutcomesKept  = 12 // round outcome ring length for oscillation detection
 	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
 	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
+	maxActionDeferrals  = 1  // one corrective retry when prose promises a tool action but calls nothing
 )
 
 func maxStepsFromConfig(c config) int {
@@ -41,6 +42,8 @@ func (m *Model) resetTurnGuards() {
 	m.startTurnClock()
 	m.stepCount = 0
 	m.streamRetries = 0
+	m.degradedStreamRetry = false
+	m.actionDeferrals = 0
 	m.recentOutcomes = m.recentOutcomes[:0]
 	m.oscillationStreak = 0
 	m.stagnantRounds = 0
@@ -80,6 +83,53 @@ func (m *Model) resetTurnGuards() {
 	m.lastPreamble = ""
 	m.preambleStreak = 0
 	m.preambleWarned = false
+}
+
+// streamOutputRunaway catches a model that is still producing tokens but has
+// stopped making progress. Idle timeouts cannot see this failure mode.
+func streamOutputRunaway(content string, constrained bool) bool {
+	limit := 64 * 1024
+	if constrained {
+		limit = 8 * 1024
+	}
+	if len(content) > limit {
+		return true
+	}
+	if len(content) < 384 {
+		return false
+	}
+	for _, marker := range []string{`\"mode\":\"write\"`, `"mode":"write"`, `\"name\":\"switch_mode\"`, `"name":"switch_mode"`} {
+		if strings.Count(content, marker) >= 4 {
+			return true
+		}
+	}
+	// Sample several suffix positions so chunk boundaries do not hide a repeated
+	// phrase. Four prior copies of a 64-byte fragment is strong loop evidence.
+	for offset := 0; offset <= 48; offset += 16 {
+		end := len(content) - offset
+		if end < 64 {
+			continue
+		}
+		fragment := content[end-64 : end]
+		if strings.Count(content[:end-64], fragment) >= 4 {
+			return true
+		}
+	}
+	return false
+}
+
+func promisesToolAction(content string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(content), " "))
+	for _, phrase := range []string{
+		"let me check", "let me inspect", "let me look", "let me first check",
+		"i'll check", "i will check", "i'll inspect", "i will inspect",
+		"let me start by exploring", "let me start by checking",
+	} {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // dedupeCalls: see tools.DedupeCalls (shared with the headless sub-agent loop).

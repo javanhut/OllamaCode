@@ -40,6 +40,52 @@ func TestChatChunkQueuesMissingRenderFrame(t *testing.T) {
 	}
 }
 
+func TestStructuredStreamIsHiddenUntilCompletion(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 2
+	m.streaming = true
+	m.stream = &streamState{gen: 2, cancel: func() {}}
+
+	_, cmd := m.Update(chatChunkMsg{gen: 2, content: `{"response":"Hello there"}`})
+
+	if cmd == nil || !m.stream.hideContent {
+		t.Fatal("structured stream was not classified as hidden")
+	}
+	if rendered := stripANSI(m.transcript.String()); strings.Contains(rendered, `{"response"`) {
+		t.Fatalf("raw response envelope leaked into transcript: %s", rendered)
+	}
+	m.stream.cancel()
+}
+
+func TestUnconstrainedResponseEnvelopeRendersCleanProse(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 1
+	m.streaming = true
+	m.stream = &streamState{gen: 1, hideContent: true, visibility: true, cancel: func() {}}
+	m.streamBuf.WriteString(`{"response":"Hello there"}`)
+
+	m.Update(chatDoneMsg{gen: 1})
+
+	if len(m.history) == 0 || m.history[len(m.history)-1].Content != "Hello there" {
+		t.Fatalf("response envelope was not cleaned: %#v", m.history)
+	}
+}
+
+func TestLegitimateJSONObjectSurvivesCompletion(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 1
+	m.streaming = true
+	m.stream = &streamState{gen: 1, hideContent: true, visibility: true, cancel: func() {}}
+	want := `{"response":"keep object","status":"ok"}`
+	m.streamBuf.WriteString(want)
+
+	m.Update(chatDoneMsg{gen: 1})
+
+	if got := m.history[len(m.history)-1].Content; got != want {
+		t.Fatalf("legitimate JSON changed: got %q want %q", got, want)
+	}
+}
+
 func TestWaitForStreamKeepsThinkingAndContentFromSameFrame(t *testing.T) {
 	responses := make(chan api.ChatResponse, 1)
 	responses <- api.ChatResponse{Message: api.Message{
@@ -54,6 +100,21 @@ func TestWaitForStreamKeepsThinkingAndContentFromSameFrame(t *testing.T) {
 	}
 	if msg.thinking != "reasoning" || msg.content != "answer" {
 		t.Fatalf("stream frame lost a field: %#v", msg)
+	}
+}
+
+func TestChatChunkCancelsRunawayOutput(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 3
+	m.streaming = true
+	cancelled := false
+	m.stream = &streamState{gen: 3, constrained: true, cancel: func() { cancelled = true }}
+	repeated := strings.Repeat(`{"mode":"write","reason":"building now"}...`, 12)
+
+	_, cmd := m.Update(chatChunkMsg{gen: 3, content: repeated})
+
+	if !cancelled || cmd == nil {
+		t.Fatalf("runaway output was not cancelled: cancelled=%v cmd=%v", cancelled, cmd != nil)
 	}
 }
 
@@ -136,6 +197,48 @@ func TestChatErrSchedulesBackoffRetry(t *testing.T) {
 	}
 }
 
+func TestIdleTimeoutSchedulesOneDegradedRetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := statusTestModel()
+	m.turnGen = 7
+	m.contextLimit = maxContextBudget
+	m.streaming = true
+	m.stream = &streamState{gen: 7, cancel: func() {}}
+
+	_, cmd := m.Update(chatErrMsg{gen: 7, err: errors.New("stream idle timeout after 90s — no response from local model")})
+
+	if cmd == nil || m.streamRetries != 1 || !m.degradedStreamRetry {
+		t.Fatalf("idle timeout did not schedule degraded retry: retries=%d degraded=%v", m.streamRetries, m.degradedStreamRetry)
+	}
+	if !strings.Contains(m.toast, "(1/1)") {
+		t.Fatalf("idle timeout should allow one retry, got toast %q", m.toast)
+	}
+	if got := m.requestContextLimit(); got != defaultContextLimit {
+		t.Fatalf("degraded retry context = %d, want %d", got, defaultContextLimit)
+	}
+}
+
+func TestRunawayErrorDisablesConstraintAndRetriesOnce(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 7
+	m.modelName = "runaway-small"
+	m.profile = ModelProfile{ParamsB: 7, SupportsTools: true}
+	m.streaming = true
+	m.stream = &streamState{gen: 7, constrained: true, cancel: func() {}}
+
+	_, cmd := m.Update(chatErrMsg{gen: 7, err: errRunawayModelStream})
+
+	if cmd == nil || m.streamRetries != 1 || !m.degradedStreamRetry {
+		t.Fatalf("runaway did not schedule one degraded retry: retries=%d degraded=%v", m.streamRetries, m.degradedStreamRetry)
+	}
+	if got := m.history[len(m.history)-1].Content; !strings.Contains(got, "RETRY CORRECTION") {
+		t.Fatalf("missing retry correction: %q", got)
+	}
+	if raw, ok := m.toolCallFormat(true, testConstraintDefs(t)); ok {
+		t.Fatalf("runaway constraint was not disabled, got %s", raw)
+	}
+}
+
 func TestRetryStreamMsgStartsStream(t *testing.T) {
 	m := statusTestModel()
 	m.turnGen = 3
@@ -194,6 +297,27 @@ func TestChatDoneKeepsOtherToasts(t *testing.T) {
 	if m.toast != "context compacted" {
 		t.Fatalf("unrelated toast should survive, got %q", m.toast)
 	}
+}
+
+func TestChatDoneContinuesADeferredToolAction(t *testing.T) {
+	m := statusTestModel()
+	m.modelName = "test-model"
+	m.profile = ModelProfile{NumCtx: 8192, ParamsB: 7, SupportsTools: true}
+	m.contextLimit = 8192
+	m.history = append(m.history, api.Message{Role: "user", Content: "build a snake game"})
+	m.turnGen = 1
+	m.streaming = true
+	m.stream = &streamState{gen: 1, tools: true, cancel: func() {}}
+
+	_, cmd := m.Update(chatDoneMsg{gen: 1, content: "Let me check the current workspace first."})
+
+	if cmd == nil || m.actionDeferrals != 1 || !m.streaming || m.stream == nil {
+		t.Fatalf("deferred action was not continued: deferrals=%d streaming=%v", m.actionDeferrals, m.streaming)
+	}
+	if got := m.history[len(m.history)-1].Content; !strings.Contains(got, "ACTION REQUIRED") {
+		t.Fatalf("missing corrective tool instruction: %q", got)
+	}
+	m.stream.cancel()
 }
 
 func TestNarrowStatusLine(t *testing.T) {

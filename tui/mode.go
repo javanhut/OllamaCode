@@ -274,13 +274,36 @@ func (m *Model) toolsForMode() []tools.Tool {
 		}
 	}
 	maxVisible := m.profile.MaxVisibleTools
-	if maxVisible <= 0 && lean {
-		maxVisible = 18
+	if maxVisible <= 0 {
+		if lean {
+			maxVisible = 12
+		} else {
+			// Tool schemas are prompt tokens too. Sending every registered tool
+			// added more prompt bytes than the system instructions in real local
+			// sessions, even when the request needed only one or two tools.
+			maxVisible = 16
+		}
 	}
 	if maxVisible > 0 && len(out) > maxVisible {
 		out = selectRelevantTools(out, m.latestUserRequest(), maxVisible)
 	}
 	return out
+}
+
+// conversationalOnlyRequest recognizes deliberately narrow, exact small-talk
+// turns. These should not carry filesystem and network tool schemas or tempt an
+// agentic model into inspecting the workspace in response to "hello".
+func conversationalOnlyRequest(query string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(query))
+	normalized = strings.Trim(normalized, " \t\r\n.!?,;:")
+	switch normalized {
+	case "hi", "hello", "hey", "hiya", "howdy",
+		"good morning", "good afternoon", "good evening",
+		"how are you", "thanks", "thank you":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Model) latestUserRequest() string {
@@ -304,7 +327,8 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 		"switch_mode": 100, "read_file": 99, "grep": 98, "find_files": 96,
 		"list_directory": 95, "edit_file": 94, "run_shell": 93,
 		"write_file": 92, "todo_write": 91, "todo_read": 90, "get_project_tree": 88, "file_info": 85,
-		"web_search": 82, "web_fetch": 81, "git_status": 80, "git_diff": 79,
+		"web_search": 82, "web_fetch": 81, "web_search_api": 80, "web_crawl": 79,
+		"git_status": 78, "git_diff": 77,
 		"shell_output": 78,
 	}
 	has := func(words ...string) bool {

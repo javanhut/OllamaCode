@@ -76,8 +76,8 @@ func TestApplyRouteSwapsProfileWithModel(t *testing.T) {
 	if m.modelName != "big" {
 		t.Errorf("model = %q, want big", m.modelName)
 	}
-	if m.contextLimit != 131072 {
-		t.Errorf("contextLimit = %d, want 131072 (profile did not follow the model)", m.contextLimit)
+	if m.contextLimit != defaultContextLimit {
+		t.Errorf("contextLimit = %d, want safe automatic limit %d", m.contextLimit, defaultContextLimit)
 	}
 	if m.profile.smallModel() {
 		t.Error("120B model still classified as small — lean toolset would be applied")

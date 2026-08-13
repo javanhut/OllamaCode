@@ -444,3 +444,28 @@ func TestStaleMessagesDropped(t *testing.T) {
 		t.Fatalf("stale chatErrMsg was applied: lastError=%q retries=%d", m.lastError, m.streamRetries)
 	}
 }
+
+func TestStreamOutputRunawayDetectsRepeatedModeObjects(t *testing.T) {
+	repeated := `{"mode":"write","reason":"Plan approved; building the Snake game now."}...`
+	content := `{"response":"Let me check the workspace first."}...` + strings.Repeat(repeated, 8)
+	if !streamOutputRunaway(content, true) {
+		t.Fatal("failed to detect the repeated switch_mode pattern from the trace")
+	}
+	if streamOutputRunaway(strings.Repeat("A useful, non-repeating explanation. ", 10), false) {
+		t.Fatal("ordinary prose was mistaken for a runaway stream")
+	}
+}
+
+func TestPromisesToolAction(t *testing.T) {
+	for _, content := range []string{
+		"Let me check the current workspace first.",
+		"I'll inspect the files before making a plan.",
+	} {
+		if !promisesToolAction(content) {
+			t.Errorf("missed action deferral %q", content)
+		}
+	}
+	if promisesToolAction("The workspace is empty, so the game can go in index.html.") {
+		t.Fatal("completed evidence-based answer was treated as a deferral")
+	}
+}

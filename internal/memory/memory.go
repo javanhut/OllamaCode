@@ -37,6 +37,14 @@ type fileFormat struct {
 	LongTerm []Entry `json:"long_term"`
 }
 
+// Long-term memory remains fully searchable through Recall, but only a small,
+// recent working set belongs in every model prompt. Unbounded injection made
+// stale project notes dominate prompt evaluation on local models.
+const (
+	maxInjectedLongTermEntries = 12
+	maxInjectedLongTermChars   = 2000
+)
+
 func New(path string) (*Store, error) {
 	s := &Store{path: path}
 	if err := s.load(); err != nil {
@@ -96,9 +104,25 @@ func (s *Store) save() error {
 func (s *Store) Remember(content string, persist bool) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	content = strings.TrimSpace(content)
+	if persist {
+		if existing, ok := findDuplicate(content, s.longTerm); ok {
+			return existing, nil
+		}
+		if existing, index, ok := findDuplicateIndex(content, s.shortTerm); ok {
+			s.shortTerm = append(s.shortTerm[:index], s.shortTerm[index+1:]...)
+			s.longTerm = append(s.longTerm, existing)
+			if err := s.save(); err != nil {
+				return existing, err
+			}
+			return existing, nil
+		}
+	} else if existing, ok := findDuplicate(content, s.shortTerm, s.longTerm); ok {
+		return existing, nil
+	}
 	e := Entry{
 		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
-		Content:   strings.TrimSpace(content),
+		Content:   content,
 		CreatedAt: time.Now(),
 	}
 	if persist {
@@ -202,8 +226,8 @@ func (s *Store) PromoteAll() (int, error) {
 	return n, s.save()
 }
 
-// LongTermSummary returns long-term entries as a markdown list, oldest first.
-// Empty string if no entries.
+// LongTermSummary returns a bounded, deduplicated working set of the newest
+// long-term entries. Recall still searches the complete store.
 func (s *Store) LongTermSummary() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -215,13 +239,64 @@ func (s *Store) LongTermSummary() string {
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
 	})
-	var b strings.Builder
-	for _, e := range sorted {
-		b.WriteString("- ")
-		b.WriteString(e.Content)
-		b.WriteByte('\n')
+	seen := make(map[string]bool, len(sorted))
+	selected := make([]string, 0, min(len(sorted), maxInjectedLongTermEntries))
+	used := 0
+	for i := len(sorted) - 1; i >= 0 && len(selected) < maxInjectedLongTermEntries; i-- {
+		content := strings.TrimSpace(sorted[i].Content)
+		key := normalizeContent(content)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		line := "- " + content
+		if used+len(line)+1 > maxInjectedLongTermChars {
+			continue
+		}
+		selected = append(selected, line)
+		used += len(line) + 1
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if len(selected) == 0 {
+		return ""
+	}
+	// Present the selected working set in chronological order.
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	result := strings.Join(selected, "\n")
+	if len(selected) < len(sorted) {
+		result += "\n- (Older memories omitted from this prompt; use recall when needed.)"
+	}
+	return result
+}
+
+func findDuplicate(content string, tiers ...[]Entry) (Entry, bool) {
+	key := normalizeContent(content)
+	if key == "" {
+		return Entry{}, false
+	}
+	for _, entries := range tiers {
+		for _, e := range entries {
+			if normalizeContent(e.Content) == key {
+				return e, true
+			}
+		}
+	}
+	return Entry{}, false
+}
+
+func findDuplicateIndex(content string, entries []Entry) (Entry, int, bool) {
+	key := normalizeContent(content)
+	for i, e := range entries {
+		if key != "" && normalizeContent(e.Content) == key {
+			return e, i, true
+		}
+	}
+	return Entry{}, -1, false
+}
+
+func normalizeContent(content string) string {
+	return strings.ToLower(strings.Join(strings.Fields(content), " "))
 }
 
 // ShortTermSummary returns short-term entries as a markdown list.

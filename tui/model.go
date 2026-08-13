@@ -186,6 +186,7 @@ func providerKindLabel(kind string) string {
 // actual model instead of a hardcoded value.
 type ModelProfile struct {
 	NumCtx            int      `json:"num_ctx"`
+	NumCtxExplicit    bool     `json:"num_ctx_explicit,omitempty"`
 	SupportsTools     bool     `json:"supports_tools"`
 	SupportsThinking  bool     `json:"supports_thinking,omitempty"`
 	ParamsB           float64  `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
@@ -271,7 +272,7 @@ var (
 	networkToolTimeout       = 2 * time.Minute
 	longRunningToolTimeout   = 10 * time.Minute
 	shellToolTimeoutGrace    = 5 * time.Second
-	modelStreamIdleTimeout   = 3 * time.Minute
+	modelStreamIdleTimeout   = 90 * time.Second
 	toolCallDrainTimeout     = 2 * time.Second
 	pullIdleTimeout          = 5 * time.Minute
 )
@@ -355,6 +356,8 @@ type Model struct {
 	// Loop safety (reset each user turn).
 	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
 	streamRetries       int             // transient stream errors retried this turn
+	degradedStreamRetry bool            // idle-timeout retry uses a smaller, cheaper request
+	actionDeferrals     int             // tool-capable replies that promised action without calling a tool
 	stepCount           int             // tool-call rounds since the last user message
 	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
 	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
@@ -590,38 +593,38 @@ func New() *Model {
 	s.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &Model{
-		cfg:          cfg,
-		host:         host,
-		tools:        registry,
-		notes:        notes,
-		todos:        todos,
-		mode:         ExploreMode,
-		state:        stateChat,
-		urlInput:     ti,
-		keyInput:     ki,
-		nameInput:    ni,
-		envInput:     ei,
-		pullInput:    pi,
-		input:        ta,
-		modelName:    cfg.Model,
-		spinner:      s,
-		gitBranch:    getGitBranch(),
-		transcript:   &strings.Builder{},
-		streamBuf:    &strings.Builder{},
-		contextLimit: defaultContextLimit,
-		profile:      ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
-		maxSteps:     maxStepsFromConfig(cfg),
-		failedCalls:  make(map[string]int),
-		kvStore:      kv,
-		memory:       mem,
-		md:           newMarkdownRenderer(),
-		notesMd:      newMarkdownRenderer(),
-		faceMoodLen:  -1, // force first mood computation
-		expandTools:  false,
+		cfg:            cfg,
+		host:           host,
+		tools:          registry,
+		notes:          notes,
+		todos:          todos,
+		mode:           ExploreMode,
+		state:          stateChat,
+		urlInput:       ti,
+		keyInput:       ki,
+		nameInput:      ni,
+		envInput:       ei,
+		pullInput:      pi,
+		input:          ta,
+		modelName:      cfg.Model,
+		spinner:        s,
+		gitBranch:      getGitBranch(),
+		transcript:     &strings.Builder{},
+		streamBuf:      &strings.Builder{},
+		contextLimit:   defaultContextLimit,
+		profile:        ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
+		maxSteps:       maxStepsFromConfig(cfg),
+		failedCalls:    make(map[string]int),
+		kvStore:        kv,
+		memory:         mem,
+		md:             newMarkdownRenderer(),
+		notesMd:        newMarkdownRenderer(),
+		faceMoodLen:    -1, // force first mood computation
+		expandTools:    false,
 		subagents:      newSubagentStore(),
 		subagentEvents: make(chan *subagentJob, 64),
-		lastActivity: time.Now(),
-		faceLastKey:  time.Now(),
+		lastActivity:   time.Now(),
+		faceLastKey:    time.Now(),
 	}
 	if cfg.Trace {
 		tracePath := strings.TrimSpace(cfg.TracePath)

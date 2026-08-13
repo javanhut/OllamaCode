@@ -67,6 +67,17 @@ func TestToolCallFormatGating(t *testing.T) {
 		}
 	})
 
+	t.Run("ornith uses native tool calls", func(t *testing.T) {
+		m := &Model{profile: ModelProfile{ParamsB: 9}, modelName: "ornith:latest", host: native}
+		if raw, ok := m.toolCallFormat(true, defs); ok {
+			t.Fatalf("Ornith must avoid the schema path that causes output loops, got %s", raw)
+		}
+		constrain, cache := m.subagentConstraintOptions()
+		if constrain || cache != nil {
+			t.Fatal("Ornith sub-agents must also use native tool calls")
+		}
+	})
+
 	t.Run("rejection steps the cached rung down", func(t *testing.T) {
 		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-ladder", host: native}
 		first, ok := m.toolCallFormat(true, defs)
