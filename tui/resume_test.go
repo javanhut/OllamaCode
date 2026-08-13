@@ -250,7 +250,7 @@ func TestCheckpointPruningOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	m := &Model{todos: &todoList{}}
 	turns := maxUndoDepth + 5
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		f := filepath.Join(dir, string(rune('a'+i%26))+string(rune('a'+i/26))+".txt")
 		m.snapshotBeforeMutate([]string{f})
 		m.finalizeCheckpoint(fmt.Sprintf("turn-%02d", i))

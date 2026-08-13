@@ -3,6 +3,7 @@ package trace
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,9 +202,7 @@ func TestRecordRequestLogsOnlyDeltas(t *testing.T) {
 
 func copyMeta(src map[string]any) map[string]any {
 	out := map[string]any{}
-	for k, v := range src {
-		out[k] = v
-	}
+	maps.Copy(out, src)
 	return out
 }
 

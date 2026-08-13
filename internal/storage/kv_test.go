@@ -172,7 +172,7 @@ func TestLatestKeyNumericOrdering(t *testing.T) {
 func TestArchivePruning(t *testing.T) {
 	s, path := newStore(t)
 	total := maxArchives + 5
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if err := s.Set(fmt.Sprintf("archive_%d", i), "x"); err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +188,7 @@ func TestArchivePruning(t *testing.T) {
 		t.Fatalf("kept %d archives, want %d", count, maxArchives)
 	}
 	// The newest survive; the five oldest are gone from memory and disk.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		k := fmt.Sprintf("archive_%d", i)
 		if _, ok := s.Get(k); ok {
 			t.Fatalf("%s should have been pruned", k)

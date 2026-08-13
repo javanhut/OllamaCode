@@ -51,10 +51,7 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if msg.String() == "left" {
 				step = -1
 			}
-			i := slices.Index(providerKinds, m.settingsKind)
-			if i < 0 {
-				i = 0
-			}
+			i := max(slices.Index(providerKinds, m.settingsKind), 0)
 			m.settingsKind = providerKinds[(i+step+len(providerKinds))%len(providerKinds)]
 			// The Trust row only exists for the cursor kind; cycling away from it
 			// would otherwise strand focus on a row that is no longer rendered.
@@ -135,10 +132,7 @@ func (m *Model) focusSettingsField(f settingsField) {
 // cycleSettingsFocus walks the rows the selected endpoint actually has.
 func (m *Model) cycleSettingsFocus(step int) {
 	fields := m.settingsFields()
-	i := slices.Index(fields, m.settingsFocus)
-	if i < 0 {
-		i = 0
-	}
+	i := max(slices.Index(fields, m.settingsFocus), 0)
 	m.focusSettingsField(fields[(i+step+len(fields))%len(fields)])
 }
 
@@ -193,15 +187,41 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.statusMsg = "refreshing…"
 		m.statusErr = false
+		if m.pickerPurpose == "cursor_pair" && m.pairCursor != "" {
+			return m, m.fetchModelsFrom(m.providerHost(m.pairCursor), m.pairCursor)
+		}
 		return m, m.fetchModels()
 	case "p":
+		if m.pickerPurpose == "cursor_pair" {
+			return m, nil
+		}
 		m.pullErr = ""
 		return m, m.pullInput.Focus()
+	case "c":
+		if m.pickerPurpose == "cursor_pair" || m.modelsFrom != "" || len(m.models) == 0 {
+			return m, nil
+		}
+		provider := m.cursorPlanProvider()
+		if provider == "" {
+			m.toast = "no Cursor provider configured — add one with /provider new"
+			return m, nil
+		}
+		m.pairLocalModel = m.models[m.picker]
+		m.pairCursor = provider
+		m.pickerPurpose = "cursor_pair"
+		m.statusMsg = "loading Cursor planning models…"
+		m.statusErr = false
+		return m, m.fetchModelsFrom(m.providerHost(provider), provider)
 	case "enter":
 		if len(m.models) == 0 {
 			return m, nil
 		}
-		m.selectModel(m.models[m.picker], m.modelsFrom)
+		if m.pickerPurpose == "cursor_pair" {
+			m.configureCursorPair(m.pairLocalModel, m.pairCursor, m.models[m.picker])
+		} else {
+			m.selectModel(m.models[m.picker], m.modelsFrom)
+		}
+		m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
 		m.state = stateChat
 		m.input.Focus()
 		m.layout()
@@ -371,18 +391,31 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		i := m.pending.index
 		call := m.pending.calls[i]
 		m.recordPermission(call, "denied")
-		// Count the denial as a failure of this exact call so the identical-call
-		// short-circuit in processPendingTools fires on a retry. The finalized
-		// call+result outcome also feeds state-aware oscillation detection.
+		// A denial ends this tool round. Count it as a failure for diagnostics,
+		// cancel every call that has not started, and let any already-running calls
+		// drain before processPendingTools finalizes the turn and asks for feedback.
 		fp := tools.CallFingerprint(call)
 		m.failedCalls[fp]++
+		m.pending.deniedTool = call.Function.Name
 		m.pending.results[i] = api.Message{
 			Role:     "tool",
 			ToolName: call.Function.Name,
-			Content:  "denied by user. Do NOT retry this call or a minor variant of it — the user rejected it. Take a different approach, or ask the user how to proceed in plain text.",
+			Content:  "denied by user. The turn has stopped. Do NOT retry this call or a minor variant unless the user explicitly requests it later.",
 		}
 		m.pending.started[i] = true
 		m.pending.done++
+		for j, pendingCall := range m.pending.calls {
+			if m.pending.started[j] {
+				continue
+			}
+			m.pending.results[j] = api.Message{
+				Role:     "tool",
+				ToolName: pendingCall.Function.Name,
+				Content:  "not run because the user denied another call in this batch and ended the turn.",
+			}
+			m.pending.started[j] = true
+			m.pending.done++
+		}
 		m.state = stateChat
 		cmd := m.processPendingTools()
 		m.refreshTranscript()
@@ -496,6 +529,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		case "/models":
 			m.input.Reset()
+			m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
 			m.statusMsg = "refreshing…"
 			m.statusErr = false
 			return m, m.fetchModels()

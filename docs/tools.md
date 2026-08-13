@@ -161,6 +161,14 @@ spin forever.
 Requests a mode transition. Treated as destructive, so it goes through the
 approval prompt, and the preview names the model the switch would route to.
 
+### `ask_user`
+
+Creates a real conversation boundary. Ocode runs only the question from that
+batch, cancels other unstarted calls, and does not invoke the model again until
+the user replies. In plan mode, asking after recording notes establishes the
+review checkpoint required before requesting write mode; changing the notes
+requires another confirmation.
+
 ## Small-model toolset
 
 Models under 15B parameters get a trimmed set — file operations, directory and

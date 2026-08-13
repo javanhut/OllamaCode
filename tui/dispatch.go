@@ -32,14 +32,34 @@ var webContentTools = map[string]bool{
 }
 
 type pendingBatch struct {
-	calls    []tools.ToolCall
-	results  []api.Message
-	started  []bool
-	done     int
-	index    int
-	allowAll bool
-	preview  string
-	gen      int // turn generation this batch belongs to
+	calls      []tools.ToolCall
+	results    []api.Message
+	started    []bool
+	done       int
+	index      int
+	allowAll   bool
+	preview    string
+	gen        int    // turn generation this batch belongs to
+	deniedTool string // non-empty means the user ended this tool round
+}
+
+// pauseForUser closes the model-side activity state when a tool round ends at a
+// human checkpoint. Native tool-call messages arrive before the stream state is
+// cleared by chatDoneMsg, so without this the UI keeps showing THINKING and the
+// user's answer is silently put in the queue with nothing left to drain it.
+func (m *Model) pauseForUser(toast, reason string) {
+	if m.stream != nil && m.stream.cancel != nil {
+		m.stream.cancel()
+	}
+	if m.trace != nil {
+		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
+			Metadata: map[string]any{"reason": reason, "steps": m.stepCount, "open_todos": m.todos.openCount()}})
+	}
+	m.streaming = false
+	m.stream = nil
+	m.busySince = time.Time{}
+	m.toast = toast
+	m.lastActivity = time.Now()
 }
 
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
@@ -168,22 +188,71 @@ func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending == nil {
 		return nil
 	}
+	// A question is a conversation boundary, not one operation in a parallel
+	// batch. Run only the first ask_user call and cancel every other call that has
+	// not started, so nothing can continue behind the user's back while the model
+	// claims to be waiting for an answer.
+	questionIndex := -1
+	for i, call := range m.pending.calls {
+		if call.Function.Name == "ask_user" {
+			questionIndex = i
+			break
+		}
+	}
+	if questionIndex >= 0 {
+		for i, call := range m.pending.calls {
+			if i == questionIndex || m.pending.started[i] {
+				continue
+			}
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  "not run because ask_user requires the model to stop and wait for the user's answer.",
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+		}
+	}
 
 	if m.pending.done >= len(m.pending.calls) {
 		batchCalls := m.pending.calls
 		batchResults := m.pending.results
+		deniedTool := m.pending.deniedTool
 		m.history = append(m.history, batchResults...)
 		m.noteFetchedContent(batchCalls, batchResults)
 		m.pending = nil
 		m.markToolsDone()
 
-		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
-		warnMixed, stopMixed := false, false
-		if batchSingleTool(batchCalls) == "" {
-			warnMixed, stopMixed = m.observeMixedBatchStagnation(madeProgress)
-		} else {
-			m.stagnantRounds = 0
+		// A denial is a user decision, not another recoverable tool failure. End
+		// the turn here instead of handing the result back to the model and giving
+		// it an opportunity to rephrase and re-request the same action.
+		if deniedTool != "" {
+			m.denialFeedbackTool = deniedTool
+			m.history = append(m.history, api.Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("I stopped after you denied %s. What should I change, or why did you want that call denied? I won't request it again while handling your reply.", deniedTool),
+			})
+			m.pauseForUser("stopped after denial — waiting for your feedback", "permission_denied")
+			m.finalizeCheckpoint(m.lastUserMessage())
+			m.finishTurnClock()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return nil
 		}
+		if questionIndex >= 0 {
+			if m.mode == PlanMode && m.planRecorded() {
+				m.planReviewRequested = strings.TrimSpace(m.notes.get())
+			}
+			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
+			m.finalizeCheckpoint(m.lastUserMessage())
+			m.finishTurnClock()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return nil
+		}
+
+		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
+		warnStagnant, stopStagnant := m.observeStagnation(madeProgress)
 
 		// Outcomes include both the calls and their results, so A/B/A/B only
 		// trips when the observable evidence is repeating, not merely when the
@@ -202,35 +271,45 @@ func (m *Model) processPendingTools() tea.Cmd {
 			})
 			m.suppressToolsOnce = true
 		}
-		if warnMixed {
+		if warnStagnant {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
-				Content: "[NO PROGRESS DETECTED] This mixed set of tool calls has produced no new results for three rounds. Use the evidence already gathered, take a materially different action, or state the blocker.",
+				Content: "[NO PROGRESS DETECTED] Your last three rounds of tool calls returned nothing this turn has not already seen. Use the evidence you have, take a materially different action, or state the blocker.",
 			})
 		}
-		if stopMixed {
+		if stopStagnant {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
-				Content: "[LOOP BROKEN] This mixed tool batch produced no material progress for five rounds. Tools are disabled for your next message — explain the blocker and summarize what you know.",
+				Content: "[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command.",
 			})
 			m.suppressToolsOnce = true
+			// A tool-less message is not an ending on its own: the auto-continue on
+			// open todos and the citation gate each pull the model straight back in,
+			// which is exactly what kept the logged loop fed. This flag closes those
+			// doors so the reply reaches endTurnTail.
+			m.endTurnAfterReply = true
 		}
 
 		// Inspection calls include arguments in their repeat identity, so reading
 		// different files or running different searches is progress. Mutation and
 		// control tools remain name-based to catch varied-argument spam.
+		// The stagnation guard speaks for the same round when one tool repeats,
+		// and it is the stronger statement: telling the model the turn is over and
+		// then promising it a next message in the very next line is how a small
+		// model talks itself back into the loop. Whichever fires, only one speaks.
 		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls, madeProgress)
-		if warnRepeat {
+		if warnRepeat && !warnStagnant {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak),
 			})
 		}
-		if announceStop {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak),
-			})
+		if announceStop && !stopStagnant {
+			content := fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak)
+			if m.bannedTools[batchTool] {
+				content = fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", batchTool, m.sameToolStreak)
+			}
+			m.history = append(m.history, api.Message{Role: "system", Content: content})
 		}
 		if stopRepeat {
 			m.suppressToolsOnce = true
@@ -287,6 +366,22 @@ func (m *Model) processPendingTools() tea.Cmd {
 	parallelLimit := m.parallelToolLimit()
 	for i, call := range m.pending.calls {
 		if m.pending.started[i] {
+			continue
+		}
+
+		// A banned tool is gone from the schema, but the text-form fallback parses
+		// tool calls straight out of assistant prose, so the schema alone does not
+		// hold the ban. Refuse it here — the one path every call goes through —
+		// and answer with a tool result so the transcript stays well-formed.
+		if m.bannedTools[call.Function.Name] {
+			m.failedCalls[tools.CallFingerprint(call)]++
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  fmt.Sprintf("error: %q is disabled for the rest of this turn — you called it repeatedly without making progress. Do not call it again; act on what you already know or answer the user.", call.Function.Name),
+			}
+			m.pending.started[i] = true
+			m.pending.done++
 			continue
 		}
 

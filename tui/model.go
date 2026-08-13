@@ -299,6 +299,9 @@ type Model struct {
 	models          []string
 	modelsFrom      string // provider the model list came from; "" = default host
 	picker          int
+	pickerPurpose   string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
+	pairLocalModel  string
+	pairCursor      string
 	modelName       string
 
 	// Model pulling (from the model picker). pullInput captures the name to
@@ -314,6 +317,15 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// denialFeedbackTool is set when the user rejects a permission prompt. The
+	// next message is treated as feedback about that denial, and the rejected
+	// tool stays unavailable for that turn so the model cannot immediately ask
+	// for the same action again.
+	denialFeedbackTool string
+	// clarificationOnly is set for greetings/help offers that announce a task
+	// without stating it. Only ask_user is exposed for that turn, preventing
+	// stale notes or memory from being mistaken for the current assignment.
+	clarificationOnly bool
 
 	history    []api.Message
 	transcript *strings.Builder
@@ -364,14 +376,16 @@ type Model struct {
 	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
 	seenOutcomes        map[string]bool // evidence already observed this turn
 	oscillationStreak   int             // consecutive round endings that still form A/B alternation
-	stagnantRounds      int             // repeated no-evidence rounds for mixed-tool batches
+	stagnantRounds      int             // consecutive rounds that produced no evidence this turn had not already seen
 	failedCalls         map[string]int  // fingerprint -> consecutive failure count
 	oscillationWarned   bool            // corrective nudge emitted once per turn
 	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
+	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
 	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
 	sameToolStreak      int             // consecutive steps repeating that identity
 	sameToolWarned      bool            // early repeat warning emitted this user turn
-	sameToolStopWarned  bool            // hard-stop explanation emitted this user turn
+	stopWarnedTool      string          // tool the hard-stop already fired for this turn
+	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
 	fetchedContent      bool            // untrusted web content entered the conversation this turn
@@ -474,6 +488,10 @@ type Model struct {
 	// write mode can tell a plan that was actually written from one left over
 	// from an earlier task.
 	planNotesMark string
+	// The model must show a recorded plan to the user and wait for a reply before
+	// requesting write mode. Editing the notes after that reply invalidates it.
+	planReviewRequested string
+	planReviewed        string
 
 	// Set when a turn is executing a plan produced by an offloaded planner:
 	// the paths that plan named, gated so each is read before it is edited.

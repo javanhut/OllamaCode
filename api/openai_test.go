@@ -242,15 +242,15 @@ func TestContinuousChatOpenAIEndToEnd(t *testing.T) {
 		Messages: []Message{{Role: "user", Content: "hey"}},
 		Options:  map[string]any{"num_ctx": 8192, "temperature": temp},
 	})
-	var content string
+	var content strings.Builder
 	for c := range resp {
-		content += c.Message.Content
+		content.WriteString(c.Message.Content)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("stream error: %v", err)
 	}
-	if content != "hi" {
-		t.Errorf("content = %q, want hi", content)
+	if content.String() != "hi" {
+		t.Errorf("content = %q, want hi", content.String())
 	}
 	if !body.Stream || body.StreamOptions == nil || !body.StreamOptions.IncludeUsage {
 		t.Error("stream_options.include_usage must be set or token counts never arrive")

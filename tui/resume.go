@@ -148,7 +148,7 @@ func markSessionRunning() {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
-	_ = os.WriteFile(path, []byte(fmt.Sprintf("pid %d started %s\n", os.Getpid(), time.Now().Format(time.RFC3339))), 0o644)
+	_ = os.WriteFile(path, fmt.Appendf(nil, "pid %d started %s\n", os.Getpid(), time.Now().Format(time.RFC3339)), 0o644)
 }
 
 // clearSessionMarker removes the crash marker on a clean exit.

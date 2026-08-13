@@ -319,7 +319,7 @@ func TestSpawnSubagentJobCap(t *testing.T) {
 	}
 	tool := m.spawnSubagentTool()
 
-	for i := 0; i < maxBackgroundSubagentJobs; i++ {
+	for i := range maxBackgroundSubagentJobs {
 		if _, err := tool.Handler(context.Background(), json.RawMessage(`{"task":"t"}`)); err != nil {
 			t.Fatalf("spawn %d failed: %v", i+1, err)
 		}
@@ -331,7 +331,7 @@ func TestSpawnSubagentJobCap(t *testing.T) {
 
 	// Once a job finishes, capacity frees up.
 	close(release)
-	for i := 0; i < maxBackgroundSubagentJobs; i++ {
+	for range maxBackgroundSubagentJobs {
 		awaitJob(t, m)
 	}
 	if _, err := tool.Handler(context.Background(), json.RawMessage(`{"task":"now it fits"}`)); err != nil {

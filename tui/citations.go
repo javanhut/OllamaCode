@@ -251,14 +251,19 @@ func citationCorrectionMessage(problems []string) string {
 	return b.String()
 }
 
-// maybeCitationGate runs when an explore-mode answer finalizes. It mirrors
-// the verify gate's mechanics: append one corrective system message and
-// re-invoke the model. Returns nil to let the turn end normally — for
-// non-explore modes, empty answers, answers without code claims, answers
-// whose citations all verify, and (the loop guard) turns where a correction
-// was already issued.
+// maybeCitationGate runs when an explore-mode answer finalizes: append one
+// corrective system message and re-invoke the model with tools suppressed,
+// since the only acceptable reply is a better answer. Returns nil to let the
+// turn end normally — for non-explore modes, empty answers, answers without
+// code claims, answers whose citations all verify, and (the loop guards) turns
+// stopped for stagnation or where a correction was already issued.
 func (m *Model) maybeCitationGate(answer string) tea.Cmd {
 	if m.mode != ExploreMode || strings.TrimSpace(answer) == "" {
+		return nil
+	}
+	// A turn stopped for making no progress is over. Asking for a re-answer here
+	// would hold it open for another round, which is the loop this guard ends.
+	if m.endTurnAfterReply {
 		return nil
 	}
 	if citationCorrectionIssued(m.history) {
@@ -269,6 +274,11 @@ func (m *Model) maybeCitationGate(answer string) tea.Cmd {
 		return nil
 	}
 	m.history = append(m.history, api.Message{Role: "system", Content: citationCorrectionMessage(problems)})
+	// The gate wants a re-ANSWER, not more investigation. Left free to call
+	// tools, a model answers the correction with a tool call and never comes
+	// back — the burned session lost 35 rounds exactly there. startStream
+	// records the withholding, so the demand is enforced, not requested.
+	m.suppressToolsOnce = true
 	m.busySince = time.Now()
 	return m.startStream()
 }
@@ -342,7 +352,7 @@ func activeSGR(prefix string) string {
 		if params == "" {
 			params = "0"
 		}
-		for _, p := range strings.Split(params, ";") {
+		for p := range strings.SplitSeq(params, ";") {
 			if p == "0" {
 				codes = codes[:0]
 			} else {

@@ -9,7 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -649,7 +649,7 @@ func accumulate(rep *report, durations []int64) {
 		rep.ToolContractRate = float64(rep.ToolContracts) / float64(rep.Total)
 	}
 	if len(durations) > 0 {
-		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+		slices.Sort(durations)
 		var sum int64
 		for _, d := range durations {
 			sum += d
@@ -662,10 +662,7 @@ func accumulate(rep *report, durations []int64) {
 			squared += delta * delta
 		}
 		rep.DurationStdDevMS = int64(math.Sqrt(squared / float64(len(durations))))
-		idx := (95*len(durations)+99)/100 - 1
-		if idx < 0 {
-			idx = 0
-		}
+		idx := max((95*len(durations)+99)/100-1, 0)
 		rep.P95DurationMS = durations[idx]
 	}
 }

@@ -476,7 +476,6 @@ func (s *ExternalServer) ListTools(ctx context.Context, policy ToolPolicy) ([]To
 			return nil, err
 		}
 		for _, remote := range result.Tools {
-			remote := remote
 			fn, err := functionFromMCPSchema(externalToolName(s.name, remote.Name), remote.Description, remote.InputSchema)
 			if err != nil {
 				return nil, fmt.Errorf("MCP tool %s/%s: %w", s.name, remote.Name, err)

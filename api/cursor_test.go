@@ -111,18 +111,18 @@ EOF`)
 	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "x"}},
 	})
-	var content string
+	var content strings.Builder
 	for c := range resp {
-		content += c.Message.Content
+		content.WriteString(c.Message.Content)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("stream error: %v", err)
 	}
-	if !strings.Contains(content, "Which one-line change?") {
-		t.Errorf("content = %q, want the skipped question reported", content)
+	if !strings.Contains(content.String(), "Which one-line change?") {
+		t.Errorf("content = %q, want the skipped question reported", content.String())
 	}
-	if !strings.Contains(content, "Looked around.") {
-		t.Errorf("content = %q, want the narration kept as context", content)
+	if !strings.Contains(content.String(), "Looked around.") {
+		t.Errorf("content = %q, want the narration kept as context", content.String())
 	}
 }
 
@@ -202,15 +202,15 @@ func TestCursorFallsBackToNarration(t *testing.T) {
 	resp, errs := cursorHost(bin).ContinuousChat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "x"}},
 	})
-	var content string
+	var content strings.Builder
 	for c := range resp {
-		content += c.Message.Content
+		content.WriteString(c.Message.Content)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("stream error: %v", err)
 	}
-	if content != "only here" {
-		t.Errorf("content = %q, want the result event's text", content)
+	if content.String() != "only here" {
+		t.Errorf("content = %q, want the result event's text", content.String())
 	}
 }
 
@@ -284,15 +284,15 @@ func TestCursorKeyGoesThroughTheEnvironment(t *testing.T) {
 	resp, errs := h.ContinuousChat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "x"}},
 	})
-	var content string
+	var content strings.Builder
 	for c := range resp {
-		content += c.Message.Content
+		content.WriteString(c.Message.Content)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("stream error: %v", err)
 	}
-	if content != "secret-key" {
-		t.Errorf("CURSOR_API_KEY reached the child as %q, want secret-key", content)
+	if content.String() != "secret-key" {
+		t.Errorf("CURSOR_API_KEY reached the child as %q, want secret-key", content.String())
 	}
 	argv, _ := os.ReadFile(argvLog)
 	if strings.Contains(string(argv), "secret-key") {
@@ -355,15 +355,15 @@ func TestCursorResolvesEitherName(t *testing.T) {
 		resp, errs := host.ContinuousChat(context.Background(), ChatRequest{
 			Messages: []Message{{Role: "user", Content: "x"}},
 		})
-		var content string
+		var content strings.Builder
 		for c := range resp {
-			content += c.Message.Content
+			content.WriteString(c.Message.Content)
 		}
 		if err := <-errs; err != nil {
 			t.Fatalf("did not fall through to the working binary: %v", err)
 		}
-		if content != "fallback ok" {
-			t.Errorf("content = %q, want the second candidate's output", content)
+		if content.String() != "fallback ok" {
+			t.Errorf("content = %q, want the second candidate's output", content.String())
 		}
 	})
 }

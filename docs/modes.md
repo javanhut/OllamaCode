@@ -60,16 +60,21 @@ diff strategy. The notes written here are the durable artifact — they are
 re-injected into the prompt every turn, while ordinary chat history gets
 truncated away as the context fills.
 
-**Leaving plan mode for write mode requires a plan in notes.** A `switch_mode`
-call is refused until the notes have actually changed since plan mode was
-entered:
+**Leaving plan mode for write mode requires a reviewed plan in notes.** The
+model records the plan, presents it with one focused `ask_user` confirmation,
+and stops until you answer. A `switch_mode` call is refused until the notes
+have actually changed since plan mode was entered and you have reviewed the
+current version:
 
 > `error: no plan recorded. Call update_session_notes with the complete plan —
-> scope, the exact files to touch and the change in each, and the risks — then
-> call switch_mode("write", ...) again.`
+> scope, the exact files to touch and the change in each, and the risks.`
 
 Staleness counts: notes left over from an earlier task do not satisfy the gate,
 because they describe the wrong work. See [Safety](safety.md#the-plan-gate).
+
+Model tool calls cannot jump directly from explore to write. The harness rejects
+that transition and requires explore → plan → reviewed plan → write. A user can
+still force a mode with `/mode` or `shift+tab`.
 
 ## write — full toolset
 

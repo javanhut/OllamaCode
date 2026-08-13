@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -30,10 +31,18 @@ type todoList struct {
 	items []todoItem
 }
 
-func (t *todoList) set(items []todoItem) {
+// set replaces the checklist and reports whether it actually changed. The
+// comparison happens under the same lock as the store, so a second tool
+// goroutine cannot slip a write in between and make a real edit look like a
+// no-op. Callers that only seed the list ignore the result.
+func (t *todoList) set(items []todoItem) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if slices.Equal(t.items, items) {
+		return false
+	}
 	t.items = items
+	return true
 }
 
 func (t *todoList) get() []todoItem {
@@ -186,7 +195,14 @@ func todoWriteTool(list *todoList) tools.Tool {
 					done++
 				}
 			}
-			list.set(a.Todos)
+			// A rewrite that changes nothing is not a step forward, and answering
+			// it with a success receipt is what sustains rewrite loops: the model
+			// re-sends the same list, reads "todo list updated", and books it as
+			// progress. Failing makes it ok:false, so the repeated-failure
+			// short-circuit and the round-progress guard both see it for what it is.
+			if !list.set(a.Todos) {
+				return "", fmt.Errorf("todo list unchanged: every item already has this exact content and status, so nothing was written. Do not send this list again and do not reword items to force a write — take the next real action (read, edit, run a command) or give your final answer")
+			}
 			return fmt.Sprintf("todo list updated: %d/%d completed", done, len(a.Todos)), nil
 		},
 	}

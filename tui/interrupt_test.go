@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
@@ -109,6 +110,9 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	m := interruptTestModel()
 	m.mode = WriteMode
 	m.state = statePermission
+	m.streaming = true
+	m.stream = &streamState{cancel: func() {}}
+	m.busySince = time.Now()
 	m.pending = &pendingBatch{
 		calls:   []tools.ToolCall{call},
 		results: make([]api.Message, 1),
@@ -124,6 +128,9 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	if m.state != stateChat {
 		t.Fatalf("expected stateChat after denial, got %v", m.state)
 	}
+	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+		t.Fatal("denial left the UI thinking, so the user's feedback would be queued")
+	}
 	// The batch finalizes into history once every call is done.
 	if len(m.history) == 0 {
 		t.Fatal("denied batch never finalized into history")
@@ -132,52 +139,64 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	if res.Role != "tool" || !strings.Contains(res.Content, "Do NOT retry") {
 		t.Fatalf("denial result missing anti-retry guidance: %#v", res)
 	}
-	if cmd == nil {
-		t.Fatal("expected the turn to continue after denial")
+	if cmd != nil {
+		t.Fatal("denial must not continue the model turn")
+	}
+	if m.denialFeedbackTool != "write_file" {
+		t.Fatalf("expected denied tool to be held for feedback, got %q", m.denialFeedbackTool)
+	}
+	if len(m.history) < 2 || m.history[len(m.history)-1].Role != "assistant" || !strings.Contains(m.history[len(m.history)-1].Content, "What should I change") {
+		t.Fatalf("expected a feedback question after denial, history=%#v", m.history)
 	}
 	if m.stream != nil {
 		m.stream.cancel()
 	}
 }
 
-func TestDeniedCallShortCircuitsOnThirdAttempt(t *testing.T) {
+func TestDeniedCallStopsImmediatelyAndBlocksFeedbackTurn(t *testing.T) {
 	call := tc("write_file", `{"path":"a.txt","content":"x"}`)
 	m := interruptTestModel()
 	m.mode = WriteMode
 	m.state = statePermission
 
-	deny := func() {
-		m.pending = &pendingBatch{
-			calls:   []tools.ToolCall{call},
-			results: make([]api.Message, 1),
-			started: make([]bool, 1),
-		}
-		m.updatePermission(tea.KeyPressMsg{Code: 'n', Text: "n"})
-		if m.stream != nil {
-			m.stream.cancel()
-			m.stream = nil
-		}
-		m.streaming = false
-		m.state = statePermission
-		m.history = m.history[:0]
-	}
-	deny()
-	deny()
-
-	// Third identical call: no permission prompt — the failedCalls
-	// short-circuit rejects it synchronously with a "do not repeat" message.
-	m.state = stateChat
 	m.pending = &pendingBatch{
 		calls:   []tools.ToolCall{call},
 		results: make([]api.Message, 1),
 		started: make([]bool, 1),
 	}
-	cmd := m.processPendingTools()
+	m.updatePermission(tea.KeyPressMsg{Code: 'n', Text: "n"})
+
+	m.input = textarea.New()
+	m.input.SetValue("because that file belongs to me")
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("expected feedback to start a model response")
+	}
+	if !m.bannedTools["write_file"] {
+		t.Fatal("denied tool must stay blocked while the model handles feedback")
+	}
+	if m.denialFeedbackTool != "" {
+		t.Fatal("feedback hold should be consumed by the next user message")
+	}
 	if m.stream != nil {
 		m.stream.cancel()
 	}
+}
+
+func TestRepeatedFailedCallStillShortCircuits(t *testing.T) {
+	call := tc("write_file", `{"path":"a.txt","content":"x"}`)
+	m := interruptTestModel()
+	m.mode = WriteMode
+	m.failedCalls[tools.CallFingerprint(call)] = maxSameCallFailures
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: make([]api.Message, 1),
+		started: make([]bool, 1),
+	}
+
+	cmd := m.processPendingTools()
 	if m.state == statePermission {
-		t.Fatal("third identical attempt should not re-prompt for permission")
+		t.Fatal("repeated failed call should not prompt for permission")
 	}
 	if cmd == nil {
 		t.Fatal("expected the rejected batch to advance to the next model stream")
@@ -189,6 +208,115 @@ func TestDeniedCallShortCircuitsOnThirdAttempt(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected the identical-call short-circuit message, history=%#v", m.history)
+		t.Fatalf("expected identical-call short-circuit message, history=%#v", m.history)
 	}
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+}
+
+func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
+	m := interruptTestModel()
+	m.mode = PlanMode
+	m.notes.set("1. edit tui/mode.go\n2. run go test ./...")
+	m.streaming = true
+	m.stream = &streamState{cancel: func() {}}
+	m.busySince = time.Now()
+	call := tc("ask_user", `{"question":"Does this plan match what you want?","options":"approve|revise"}`)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: []api.Message{{Role: "tool", ToolName: "ask_user", Content: "QUESTION: Does this plan match what you want?"}},
+		started: []bool{true},
+		done:    1,
+	}
+
+	if cmd := m.processPendingTools(); cmd != nil {
+		t.Fatal("ask_user must stop instead of automatically continuing the model")
+	}
+	if m.planReviewRequested != strings.TrimSpace(m.notes.get()) {
+		t.Fatalf("plan review checkpoint = %q, want current notes", m.planReviewRequested)
+	}
+	if m.toast != "waiting for your answer" {
+		t.Fatalf("toast = %q", m.toast)
+	}
+	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+		t.Fatal("ask_user left the UI thinking, so the user's answer would be queued")
+	}
+
+	m.input = textarea.New()
+	m.input.SetValue("approve")
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("expected the user's answer to start a new model response")
+	}
+	if m.planReviewed != strings.TrimSpace(m.notes.get()) || m.planReviewRequested != "" {
+		t.Fatalf("review was not consumed: reviewed=%q requested=%q", m.planReviewed, m.planReviewRequested)
+	}
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+}
+
+func TestAskUserCancelsOtherUnstartedCallsInBatch(t *testing.T) {
+	m := interruptTestModel()
+	question := tc("ask_user", `{"question":"Which approach?"}`)
+	write := tc("write_file", `{"path":"a.txt","content":"x"}`)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{question, write},
+		results: make([]api.Message, 2),
+		started: make([]bool, 2),
+	}
+
+	cmd := m.processPendingTools()
+	if cmd == nil {
+		t.Fatal("expected ask_user to run")
+	}
+	if !m.pending.started[1] || !strings.Contains(m.pending.results[1].Content, "stop and wait") {
+		t.Fatalf("call beside ask_user was not cancelled: %#v", m.pending.results[1])
+	}
+	if m.state == statePermission {
+		t.Fatal("write call beside ask_user reached a permission prompt")
+	}
+}
+
+func TestTaskIntroductionOnlyExposesAskUser(t *testing.T) {
+	if !needsTaskClarification("Hello i have a task for you") {
+		t.Fatal("test phrase should require task clarification")
+	}
+	m := interruptTestModel()
+	m.profile = ModelProfile{SupportsTools: true}
+	m.input = textarea.New()
+	m.input.SetValue("Hello i have a task for you")
+
+	if cmd := m.submit(); cmd == nil {
+		t.Fatal("expected clarification turn to start")
+	}
+	if !m.clarificationOnly {
+		t.Fatal("generic task introduction was treated as an actionable request")
+	}
+	visible := m.toolsForMode()
+	if len(visible) != 1 || visible[0].Function.Name != "ask_user" {
+		t.Fatalf("visible tools = %v, want only ask_user", toolNames(visible))
+	}
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+}
+
+func TestConcreteTaskDoesNotTriggerClarificationOnly(t *testing.T) {
+	for _, request := range []string{
+		"I have a task: add a primary indicator to AssetDetailsHeader",
+		"Can you help me fix the failing auth test?",
+	} {
+		if needsTaskClarification(request) {
+			t.Errorf("concrete request was treated as missing: %q", request)
+		}
+	}
+}
+
+func toolNames(defs []tools.Tool) []string {
+	names := make([]string, len(defs))
+	for i, def := range defs {
+		names[i] = def.Function.Name
+	}
+	return names
 }

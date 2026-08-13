@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -67,12 +68,7 @@ func TestSandboxWritableDirs(t *testing.T) {
 
 	dirs := sandboxWritableDirs()
 	has := func(d string) bool {
-		for _, got := range dirs {
-			if got == d {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(dirs, d)
 	}
 	resolvedRoot, _ := filepath.EvalSymlinks(root)
 	if !has(resolvedRoot) {
@@ -99,12 +95,7 @@ func TestSandboxWritableDirsToolCaches(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	has := func(dirs []string, d string) bool {
-		for _, got := range dirs {
-			if got == d {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(dirs, d)
 	}
 
 	t.Run("env overrides", func(t *testing.T) {

@@ -54,10 +54,16 @@ func (m *Model) resetTurnGuards() {
 	}
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
+	m.endTurnAfterReply = false
 	m.lastStepRepeatKey = ""
 	m.sameToolStreak = 0
 	m.sameToolWarned = false
-	m.sameToolStopWarned = false
+	m.stopWarnedTool = ""
+	if m.bannedTools == nil {
+		m.bannedTools = map[string]bool{}
+	} else {
+		clear(m.bannedTools)
+	}
 	m.turnTouchedFiles = false
 	m.fetchedContent = false
 	if m.turnChangedPaths == nil {
@@ -151,14 +157,29 @@ func batchSingleTool(calls []tools.ToolCall) string {
 	return name
 }
 
-// argumentSensitiveRepeatTools are naturally iterative inspection operations.
-// Different arguments mean the model is gathering different information, not
-// repeating an action. Exact repeats are still guarded.
+// argumentSensitiveRepeatTools are naturally iterative operations whose
+// arguments carry the whole action. Different arguments mean the model is
+// gathering different information (or recording different findings), not
+// repeating itself. Exact repeats are still guarded. The notes writers belong
+// here because their argument IS the content: writing a long plan in five
+// sections is five distinct actions, and treating it as a streak suppressed
+// tools mid-plan and could ban the tool plan mode requires.
 var argumentSensitiveRepeatTools = map[string]bool{
 	"read_file": true, "list_directory": true, "find_files": true,
 	"grep": true, "file_info": true, "find_symbol": true,
 	"code_definition": true, "code_references": true, "code_hover": true,
 	"semantic_search": true, "git_diff": true, "git_log": true,
+	"update_session_notes": true, "append_session_notes": true,
+}
+
+// bookkeepingTools mutate nothing in the workspace and answer no question about
+// the code, so their own output can never be evidence of forward motion. A model
+// that reworded one todo item ("Review ticket.md" -> "Read ticket.md") produced a
+// fresh outcome hash every round, which reset the repeat tolerance window forever
+// and bought it 33 todo_write calls in one turn.
+var bookkeepingTools = map[string]bool{
+	"todo_write": true, "todo_read": true, "switch_mode": true,
+	"read_session_notes": true, "update_session_notes": true, "append_session_notes": true,
 }
 
 // batchRepeatIdentity returns the display tool name and semantic repeat key for
@@ -184,7 +205,10 @@ func batchRepeatIdentity(calls []tools.ToolCall) (string, string) {
 // observeRepeatedBatch advances the per-turn repetition state. warn is emitted
 // at most once per user turn. stop remains true after the hard threshold so a
 // text-form tool call cannot bypass a single tool-less response; announceStop
-// keeps the transcript explanation to one copy.
+// re-fires on every round past the threshold, because latching it once let a
+// looping model run 22 further rounds with no feedback at all. Crossing the
+// threshold a second time for the same tool bans it for the rest of the turn
+// (see m.bannedTools, applied in toolsForMode and enforced in dispatch).
 func (m *Model) observeRepeatedBatch(calls []tools.ToolCall, madeProgress ...bool) (tool string, warn, stop, announceStop bool) {
 	tool, key := batchRepeatIdentity(calls)
 	if key == "" {
@@ -193,8 +217,10 @@ func (m *Model) observeRepeatedBatch(calls []tools.ToolCall, madeProgress ...boo
 		return "", false, false, false
 	}
 	// A repeated tool name is not itself stagnation. A new mutation, diagnostic,
-	// target, or result is material evidence and restarts the tolerance window.
-	if len(madeProgress) > 0 && madeProgress[0] {
+	// target, or result is material evidence and restarts the tolerance window —
+	// but a bookkeeping tool cannot certify its own progress, or cosmetic churn
+	// in its arguments resets the window for free.
+	if len(madeProgress) > 0 && madeProgress[0] && !bookkeepingTools[tool] {
 		m.lastStepRepeatKey = key
 		m.sameToolStreak = 1
 		return tool, false, false, false
@@ -211,10 +237,20 @@ func (m *Model) observeRepeatedBatch(calls []tools.ToolCall, madeProgress ...boo
 	}
 	if m.sameToolStreak >= 5 {
 		stop = true
-		if !m.sameToolStopWarned {
-			m.sameToolStopWarned = true
-			announceStop = true
+		announceStop = true
+		// Muting every tool for one message has already been tried for this tool
+		// and it kept calling it, so take the tool itself away instead: the model
+		// keeps working with everything else rather than losing the whole turn.
+		// Two kinds of tool are never withdrawn: switch_mode, the only route out
+		// of a read-only mode, and anything argument-keyed above — its streak was
+		// earned by one grep pattern or one file path, so banning the name would
+		// take away every other search and make the "try something different"
+		// instruction impossible to follow. Those repeats are already covered
+		// per-target by the failed-call short-circuit and the re-read guard.
+		if m.stopWarnedTool == tool && tool != "switch_mode" && !argumentSensitiveRepeatTools[tool] {
+			m.bannedTools[tool] = true
 		}
+		m.stopWarnedTool = tool
 	}
 	return tool, warn, stop, announceStop
 }
@@ -252,12 +288,16 @@ func (m *Model) observeRoundProgress(calls []tools.ToolCall, results []api.Messa
 	}
 	outcome := roundOutcomeIdentity(calls, results)
 	progress = outcome != "" && !m.seenOutcomes[outcome]
-	// A locally refused duplicate is enforcement feedback, not new knowledge,
-	// even though its text differs from the original tool failure.
+	// A locally refused call is enforcement feedback, not new knowledge, even
+	// though its text differs from the original tool failure. The ban refusal
+	// counts too: it is identical for every argument, so a banned tool called
+	// with reworded arguments would otherwise mint a fresh outcome hash and
+	// reset the stagnation window on nothing but the harness's own answer.
 	if len(results) > 0 {
 		allRefusedRepeats := true
 		for _, result := range results {
-			if !strings.Contains(result.Content, "you already called") && !strings.Contains(result.Content, "you already ran") {
+			if !strings.Contains(result.Content, "you already called") && !strings.Contains(result.Content, "you already ran") &&
+				!strings.Contains(result.Content, "is disabled for the rest of this turn") {
 				allRefusedRepeats = false
 				break
 			}
@@ -283,11 +323,15 @@ func (m *Model) observeRoundProgress(calls []tools.ToolCall, results []api.Messa
 	return progress, warnOscillation, stopOscillation
 }
 
-// observeMixedBatchStagnation covers repeated mixed-tool batches, for which a
-// single tool name cannot describe the loop. Thresholds mirror the 3/5 policy:
-// the first round is evidence, two repeated no-evidence rounds warn (round 3),
-// and four stop (round 5).
-func (m *Model) observeMixedBatchStagnation(progress bool) (warn, stop bool) {
+// observeStagnation counts consecutive rounds that produced no evidence this
+// turn had not already seen, whatever tools produced them. Batch shape is not
+// the signal: one tool repeated with cosmetically different arguments defeats
+// the repeat guard exactly as easily as a rotating mixed batch does — a logged
+// session spent 33 no-op todo_write rounds proving it. Thresholds mirror the
+// 3/5 policy: the first round is evidence, two repeated no-evidence rounds warn
+// (round 3), and four end the turn (round 5) — rather than discovering the loop
+// by exhausting a 40-round step budget.
+func (m *Model) observeStagnation(progress bool) (warn, stop bool) {
 	if progress {
 		m.stagnantRounds = 0
 		return false, false
@@ -381,11 +425,11 @@ func similarPreamble(a, b string) bool {
 		return true
 	}
 	setA := map[string]bool{}
-	for _, w := range strings.Fields(a) {
+	for w := range strings.FieldsSeq(a) {
 		setA[w] = true
 	}
 	shared, union := 0, len(setA)
-	for _, w := range strings.Fields(b) {
+	for w := range strings.FieldsSeq(b) {
 		if setA[w] {
 			shared++
 		} else {

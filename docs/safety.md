@@ -23,9 +23,11 @@ a           allow every pending call this turn
 n / Esc     deny
 ```
 
-Denial is recorded as a failure of that exact call, so an immediate identical
-retry is short-circuited and the reject-retry loop shows up to the oscillation
-detector.
+Denial ends the current model turn immediately. Calls in the same batch that
+have not started are cancelled, Ocode asks what should change or why the call
+was denied, and the rejected tool is unavailable while the model handles that
+reply. This makes a denial a control boundary instead of another tool error the
+model can retry or rephrase.
 
 In auto mode, prompts are suppressed only for paths **inside the working
 directory**. Anything outside still asks.
@@ -88,14 +90,27 @@ Leaving plan mode for write mode requires a plan in session notes. The model's
 `switch_mode` call is refused until the notes have changed since plan mode was
 entered — stale notes from an earlier task don't count.
 
+Plan mode is also the only model-controlled entrance to write mode. An
+explore-mode `switch_mode("write", ...)` call is rejected mechanically and sent
+to plan instead; `/mode` and `shift+tab` remain explicit user overrides.
+
 The notes are the handoff: they are re-injected every turn while chat history
 gets truncated away as the context fills, and when routing is configured the
 executing model may be a different model entirely that never saw the planning
 conversation.
 
-The refusal is deliberately not counted as a failed call, because the intended
-recovery is to write the notes and retry that same call. A model that ignores
-the instruction and just retries is caught by the repeated-action guard instead.
+After recording the plan, the model must present it through `ask_user` and wait
+for a reply. The reviewed notes must still match the current notes; changing the
+plan invalidates the checkpoint and requires another focused confirmation.
+
+`ask_user` is enforced as a turn boundary. If a model batches a question with
+other calls, unstarted companion calls are cancelled and no new model response
+begins until the user answers.
+
+A greeting or generic introduction such as “I have a task for you” is not an
+actionable request. On that turn, only `ask_user` is exposed, and the model is
+explicitly forbidden from inferring the current task from old memory, session
+notes, filenames, or repository contents.
 
 Forcing the switch with `shift+tab` still works — that's your call — but the
 toast says `write mode — no plan in notes, nothing was handed off`.
