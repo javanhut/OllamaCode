@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +123,42 @@ func (s *subagentStore) running() []*subagentJob {
 		}
 	}
 	return out
+}
+
+// all returns every job, running or finished, sorted by id. Finished jobs are
+// kept in the store on purpose: the /jobs modal shows them too, like the
+// shell background-job registry does.
+func (s *subagentStore) all() []*subagentJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*subagentJob, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].id < out[k].id })
+	return out
+}
+
+// cancel stops one running job by id, marking it interrupted so its
+// completion notification doesn't auto-wake the parent. Returns false when
+// there is no such running job (unknown id or already finished).
+func (s *subagentStore) cancel(id int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j := s.jobs[id]
+	if j == nil {
+		return false
+	}
+	if done, _, _ := j.snapshot(); done {
+		return false
+	}
+	if j.cancel != nil {
+		j.mu.Lock()
+		j.interrupted = true
+		j.mu.Unlock()
+		j.cancel()
+	}
+	return true
 }
 
 // cancelAll stops every running job (interrupt path). Jobs finish with a

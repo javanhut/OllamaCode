@@ -141,7 +141,11 @@ func (m *Model) chatOptionsForRequest(action bool, contextLimit int) map[string]
 	if m.profile.TopP != nil {
 		opts["top_p"] = *m.profile.TopP
 	}
-	if m.profile.NumPredict != nil {
+	if m.numPredictOverride > 0 {
+		// One-shot escalation after a dead (truncated, content-less) response;
+		// set by the chatDoneMsg retry path and cleared in startStream.
+		opts["num_predict"] = m.numPredictOverride
+	} else if m.profile.NumPredict != nil {
 		opts["num_predict"] = *m.profile.NumPredict
 	} else if action {
 		// A tool selection should be a compact call, not an unbounded essay. This
@@ -149,6 +153,21 @@ func (m *Model) chatOptionsForRequest(action bool, contextLimit int) map[string]
 		opts["num_predict"] = 1024
 	}
 	return opts
+}
+
+// deadRetryNumPredict picks the generation budget for the retry after a dead
+// response: 4x the budget the truncated request used, capped at
+// max(4096, configured num_predict) so an explicit profile setting still bounds
+// the escalation.
+func deadRetryNumPredict(normal int, configured *int) int {
+	if normal <= 0 {
+		normal = 1024
+	}
+	cap := 4096
+	if configured != nil && *configured > cap {
+		cap = *configured
+	}
+	return min(4*normal, cap)
 }
 
 func (m *Model) parallelToolsEnabled() bool {

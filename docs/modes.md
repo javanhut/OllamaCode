@@ -61,13 +61,19 @@ re-injected into the prompt every turn, while ordinary chat history gets
 truncated away as the context fills.
 
 **Leaving plan mode for write mode requires a reviewed plan in notes.** The
-model records the plan, presents it with one focused `ask_user` confirmation,
-and stops until you answer. A `switch_mode` call is refused until the notes
-have actually changed since plan mode was entered and you have reviewed the
-current version:
+model records the plan, then calls `request_approval` to present it to you in
+an approval prompt. Approving switches the session straight to write mode;
+rejecting hands your feedback back to the planner. A `switch_mode` call is
+refused until the notes have actually changed since plan mode was entered and
+you have approved the current version. A plan presented as plain text — or a
+verbal "yes" to one — does not count as review:
 
-> `error: no plan recorded. Call update_session_notes with the complete plan —
-> scope, the exact files to touch and the change in each, and the risks.`
+> `error: the current plan has not been reviewed by the user. Call
+> request_approval to present the recorded plan for approval — on approval the
+> session switches to write mode. …`
+
+Plan-mode turns also end without the open-todo `[CONTINUE]` nudge other modes
+get: the turn is meant to stop at the review checkpoint, not loop the plan.
 
 Staleness counts: notes left over from an earlier task do not satisfy the gate,
 because they describe the wrong work. See [Safety](safety.md#the-plan-gate).

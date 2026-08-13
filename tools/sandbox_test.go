@@ -45,7 +45,7 @@ func TestSeatbeltProfileEscapesQuotes(t *testing.T) {
 }
 
 func TestBwrapArgvShape(t *testing.T) {
-	argv := bwrapArgv("echo hi", []string{"/ws", "/tmp"})
+	argv := bwrapArgv([]string{"sh", "-c", "echo hi"}, []string{"/ws", "/tmp"})
 	joined := strings.Join(argv, " ")
 
 	for _, want := range []string{"--ro-bind / /", "--dev /dev", "--proc /proc", "--bind /ws /ws", "--bind /tmp /tmp"} {
@@ -173,6 +173,7 @@ func TestSandboxWritableDirsToolCaches(t *testing.T) {
 }
 
 func TestNewShellCommandWrapsWhenSandboxed(t *testing.T) {
+	wantTail := strings.Join(shellArgv("true"), " ")
 	switch detectShellSandbox() {
 	case "sandbox-exec":
 		cmd := newShellCommand("true")
@@ -180,7 +181,7 @@ func TestNewShellCommandWrapsWhenSandboxed(t *testing.T) {
 			t.Fatalf("expected sandbox-exec wrapper, got %v", cmd.Args)
 		}
 		joined := strings.Join(cmd.Args, " ")
-		if !strings.Contains(joined, "-p ") || !strings.HasSuffix(joined, "sh -c true") {
+		if !strings.Contains(joined, "-p ") || !strings.HasSuffix(joined, wantTail) {
 			t.Fatalf("sandbox-exec argv malformed: %v", cmd.Args)
 		}
 	case "bwrap":
@@ -188,12 +189,15 @@ func TestNewShellCommandWrapsWhenSandboxed(t *testing.T) {
 		if filepath.Base(cmd.Path) != "bwrap" {
 			t.Fatalf("expected bwrap wrapper, got %v", cmd.Args)
 		}
+		if joined := strings.Join(cmd.Args, " "); !strings.HasSuffix(joined, "-- "+wantTail) {
+			t.Fatalf("bwrap argv must end with the shell invocation, got %v", cmd.Args)
+		}
 	default:
 		// No sandbox on PATH (e.g. minimal CI): the command must run unwrapped
 		// exactly as before.
 		cmd := newShellCommand("true")
-		if filepath.Base(cmd.Path) != "sh" {
-			t.Fatalf("expected plain sh without a sandbox, got %v", cmd.Args)
+		if strings.Join(cmd.Args, " ") != wantTail {
+			t.Fatalf("expected plain shell invocation without a sandbox, got %v", cmd.Args)
 		}
 	}
 }
@@ -202,8 +206,8 @@ func TestNewShellCommandKillSwitch(t *testing.T) {
 	SetShellSandboxEnabled(false)
 	defer SetShellSandboxEnabled(true)
 	cmd := newShellCommand("true")
-	if filepath.Base(cmd.Path) != "sh" {
-		t.Fatalf("shell_sandbox=false must run plain sh, got %v", cmd.Args)
+	if want := shellArgv("true"); strings.Join(cmd.Args, " ") != strings.Join(want, " ") {
+		t.Fatalf("shell_sandbox=false must run the plain shell invocation %v, got %v", want, cmd.Args)
 	}
 }
 
@@ -311,7 +315,8 @@ func TestRunShellUnwrappedWhenAbsent(t *testing.T) {
 }
 
 // Guard against a regression in exec arg construction: the wrapped command
-// must still be exactly sh -c <command> with nothing dropped.
+// must still end with the shell invocation and the command intact as the
+// final argument, with nothing dropped.
 func TestWrappedArgvKeepsCommandIntact(t *testing.T) {
 	const command = "a='b c' && echo \"$a\""
 	switch detectShellSandbox() {

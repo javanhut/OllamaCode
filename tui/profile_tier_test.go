@@ -111,12 +111,13 @@ func TestPlanModePinsWorkflowToolsThroughLeanCap(t *testing.T) {
 	registry.Register(updateNotesTool(m.notes))
 	registry.Register(appendNotesTool(m.notes))
 	registry.Register(m.switchModeTool())
+	registry.Register(m.requestApprovalTool())
 	names := map[string]bool{}
 	for _, tool := range m.toolsForMode() {
 		names[tool.Function.Name] = true
 	}
 	for _, want := range []string{
-		"switch_mode", "ask_user", "read_session_notes",
+		"switch_mode", "ask_user", "request_approval", "read_session_notes",
 		"update_session_notes", "append_session_notes",
 	} {
 		if !names[want] {

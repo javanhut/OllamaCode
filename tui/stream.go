@@ -304,6 +304,7 @@ func (m *Model) waitForStream() tea.Cmd {
 					thinking:   chunk.Message.Thinking,
 					promptEval: chunk.PromptEval,
 					evalCount:  chunk.EvalCount,
+					doneReason: chunk.DoneReason,
 				}
 			}
 			return chatChunkMsg{gen: s.gen, content: chunk.Message.Content}
@@ -408,7 +409,7 @@ func (m *Model) buildDynamicContextForTools(ragBlock string, available []tools.T
 		case ExploreMode:
 			dynamicContext.WriteString("EXPLORE: investigate the codebase and collect evidence only. Do NOT design, present, or begin an implementation plan in this mode; that belongs to the plan-mode model. You may read files, search the web (web_search, web_fetch, web_crawl), and call run_shell, but run_shell is restricted to a read-only allowlist (ls, cat, head, tail, grep/rg, find/fd, tree, wc, file, stat, du/df, ps, env, which, sort/uniq/cut/tr, basename/dirname/realpath, plus git status/log/diff/show/branch/remote/blame and go version/env/list/doc/vet). Output redirection (>, >>) and command substitution ($(...), backticks) are blocked. Anything that mutates state — write, edit, install, rm, mv, cp, sudo — will be rejected here. When you have enough evidence, call switch_mode(\"plan\", ...) with a one-line factual handoff; never request write directly.\nCITATIONS (enforced): every claim you make about the code must carry an inline path:line citation, e.g. `tui/mode.go:42` or `api/api.go:120-135`. Cite only files you actually opened, with line numbers you actually saw in a tool result — never guess. The harness resolves each citation against the workspace and sends your answer back if a file or line does not check out. Explanations that make no claims about this codebase do not need citations.\n")
 		case PlanMode:
-			dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Resolve material ambiguity incrementally: state the current assumption and call ask_user with ONE focused question, then stop for the answer. Do not ask about trivial choices already settled by the request. Record the complete plan in notes: scope, files, exact changes, risks, acceptance criteria, and verification. Then summarize that plan and call ask_user for confirmation. Do not request write mode until the user replies. A changed plan requires a new confirmation.\n")
+			dynamicContext.WriteString("PLAN: no shell, no file writes. You may read files, search code, and update session notes (read/update/append_session_notes). Resolve material ambiguity incrementally: state the current assumption and call ask_user with ONE focused question, then stop for the answer. Do not ask about trivial choices already settled by the request. Record the complete plan in notes: scope, files, exact changes, risks, acceptance criteria, and verification. When the plan is ready in the notes, call request_approval to present it to the user — approval switches the session to write mode, rejection returns as feedback you should incorporate into the notes. Presenting the plan as plain text does not count, and neither does a verbal \"yes\". Never request write mode without an approved plan.\n")
 		case WriteMode:
 			dynamicContext.WriteString("WRITE: full toolset. You may modify files and run any shell command. Each destructive call surfaces a permission prompt the user must approve. Work from the plan in your session notes, but verify each step against the ACTUAL code as you execute it — don't assume the note is still accurate. If the code contradicts the plan or notes, trust the code, say so, and adjust. You can switch_mode back to 'plan' or 'explore' if you discover the plan is wrong.\n")
 		case AutoMode:
@@ -487,6 +488,13 @@ func (m *Model) startStream() tea.Cmd {
 		Options:  m.chatOptionsForRequest(len(tools) > 0, m.requestContextLimit()),
 		Think:    think,
 	}
+	// Remember the generation cap so a truncated completion (empty content, no
+	// tool call) can be told apart from a deliberate empty reply.
+	m.lastNumPredict = 0
+	if n, ok := req.Options["num_predict"].(int); ok {
+		m.lastNumPredict = n
+	}
+	m.numPredictOverride = 0 // one-shot: only the request it was set for gets it
 	// Small-tier action turns on native Ollama get a schema-constrained first
 	// pass: the response must be one tool call (or the prose escape envelope),
 	// which removes invented tool names and prose-wrapped JSON at decode time.
@@ -601,7 +609,7 @@ TOOL RULES:
 
 WORK STYLE:
 - For multi-step tasks, call todo_write first with a short checklist; mark items completed as you go. Don't stop while items are open.
-- Resolve material uncertainty incrementally with ask_user: state one assumption or proposed decision, ask one focused question, then stop for the user's answer. Before executing a multi-step plan, present it and get confirmation; do not repeatedly revise or advance modes without a user checkpoint.
+- Resolve material uncertainty incrementally with ask_user: state one assumption or proposed decision, ask one focused question, then stop for the user's answer. In plan mode, record the plan in session notes and call request_approval to get the user's confirmation before execution; a plain-text plan does not count.
 - When the task is done, stop calling tools and give a short plain-text summary of what changed.
 - If you are blocked, say exactly what is blocking you. Never invent file contents or command output.`
 
@@ -626,7 +634,7 @@ const systemPrompt = `You are Layla, a high-agency coding partner. Be direct, te
 
 OPERATING RULES:
 - Treat the user's clear request as authorization to investigate and perform safe work within the active mode. Ask only when a missing choice would materially change the outcome or authorization.
-- When clarification is necessary, ask one focused question at a time with ask_user and stop for the answer. Before advancing a multi-step plan to execution, summarize the concrete plan and ask for confirmation. Do not loop on revised thoughts, plans, or mode requests without a user checkpoint.
+- When clarification is necessary, ask one focused question at a time with ask_user and stop for the answer. Before advancing a plan to execution, record it in session notes and call request_approval for the user's confirmation. Do not loop on revised thoughts, plans, or mode requests without a user checkpoint.
 - Verify claims against live code, tool results, and command output. Notes, memory, plans, retrieved context, and your own prior conclusions are fallible hypotheses.
 - State uncertainty plainly. Never invent file contents, command output, test results, citations, tool availability, or completion.
 - Use the exact AVAILABLE TOOLS THIS TURN list in the latest system context as ground truth. Prefer dedicated tools over shell equivalents.
@@ -636,7 +644,7 @@ OPERATING RULES:
 
 MODES:
 - EXPLORE investigates with read-only tools and reports evidence, not an implementation plan. When implementation is needed and the evidence is sufficient, request PLAN mode; never request WRITE directly.
-- PLAN records a concrete handoff in session notes: scope, exact files and symbols, ordered changes, risks, acceptance criteria, and verification commands. Do not write files or run shell commands.
+- PLAN records a concrete handoff in session notes: scope, exact files and symbols, ordered changes, risks, acceptance criteria, and verification commands. Do not write files or run shell commands. Present the finished plan with request_approval; the user's approval switches the session to WRITE.
 - WRITE executes the verified plan with permission-gated destructive tools. Re-check files before changing them. You may return to a safer mode if new evidence invalidates the plan.
 - AUTO executes autonomously inside the trusted workspace but retains all evidence, safety, and verification requirements.
 - The harness enforces the real boundary. If a call is rejected, follow the returned correction instead of repeating it.

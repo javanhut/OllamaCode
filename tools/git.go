@@ -524,7 +524,7 @@ func GitStashTool() Tool {
 				if a.Action == "list" {
 					return "(no stashes)", nil
 				}
-				return "[ok]", nil
+				return "[ok] (exit 0, no output)", nil
 			}
 			return text, nil
 		},
@@ -626,7 +626,7 @@ func GitResetTool() Tool {
 			}
 			text := strings.TrimSpace(string(out))
 			if text == "" {
-				return "[ok]", nil
+				return "[ok] (exit 0, no output)", nil
 			}
 			return text, nil
 		},
@@ -685,7 +685,7 @@ func GitRemoteTool() Tool {
 			}
 			text := strings.TrimSpace(string(out))
 			if text == "" {
-				return "[ok]", nil
+				return "[ok] (exit 0, no output)", nil
 			}
 			return text, nil
 		},

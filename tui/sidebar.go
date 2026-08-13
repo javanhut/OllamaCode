@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // sidebarCols is the sidebar's total on-screen width, borders included.
@@ -71,6 +72,8 @@ func (m *Model) statusText() (string, bool) {
 		return "ASLEEP", false
 	case m.runningSubagentJobs() > 0:
 		return fmt.Sprintf("SUB-AGENTS ×%d", m.runningSubagentJobs()), true
+	case tools.BackgroundJobCount() > 0:
+		return fmt.Sprintf("BG JOBS ×%d", tools.BackgroundJobCount()), true
 	}
 	return "READY", false
 }

@@ -209,6 +209,8 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/diff` | View the last turn's diffs full-screen |
 | `/copy` | Copy the last response to the clipboard |
 | `/stats` | Timing and token totals |
+| `/compact` | Compress the older half of the history into a summary now (same as automatic compaction) |
+| `/jobs` | List background shell and sub-agent jobs; `x`/`d` kills the highlighted one, `r` refreshes |
 
 ### Notes and memory
 

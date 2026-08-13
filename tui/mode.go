@@ -214,6 +214,35 @@ func (m *Model) approveOffloadedPlan(reply string) bool {
 	return true
 }
 
+// approveRecordedPlan performs the one-shot approval the request_approval
+// permission prompt stands for: the recorded notes become the reviewed plan
+// and the session transitions straight to write mode, with the same
+// verify-against-live-code handoff a planner→executor route would produce.
+// The tool's stub handler is never invoked — the user's y IS the review.
+func (m *Model) approveRecordedPlan() bool {
+	if m.mode != PlanMode || !m.planRecorded() {
+		return false
+	}
+	planner := m.modelName
+	m.planReviewed = strings.TrimSpace(m.notes.get())
+	check := checkPlan(m.planReviewed)
+	if !m.applyModeTransition(WriteMode, "approved plan from "+planner) {
+		return false
+	}
+	m.planNeedsVerify = true
+	m.planPaths = make(map[string]bool, len(check.named))
+	for _, p := range check.named {
+		m.planPaths[p] = true
+	}
+	m.history = append(m.history, api.Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"[PLAN HANDOFF] %s planned this; %s is executing the user-approved plan. The planner cannot see this conversation or the outcome, so verify the proposal against live code. %s If the code contradicts the plan, trust the code, say so, and adjust.",
+			planner, m.modelName, check.findings()),
+	})
+	return true
+}
+
 func explicitPlanApproval(reply string) bool {
 	reply = strings.ToLower(strings.TrimSpace(reply))
 	reply = strings.Trim(reply, " .!\t\r\n")
@@ -246,9 +275,9 @@ func (m *Model) planGateMessage() string {
 	if m.mode != PlanMode {
 		return `error: write mode can only be requested from plan mode. Do not plan or request execution from explore. Call switch_mode("plan", ...) and let the plan-mode model produce a concrete plan for user review.`
 	}
-	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks.`
+	msg := `error: no plan recorded. Call update_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks — then call request_approval to present it to the user.`
 	if m.planRecorded() {
-		msg = `error: the current plan has not been reviewed by the user. Summarize the concrete plan and call ask_user with one focused confirmation question. Stop and wait for their reply before requesting write mode. If their reply changes the plan, update the notes and ask for confirmation again.`
+		msg = `error: the current plan has not been reviewed by the user. Call request_approval to present the recorded plan for approval — on approval the session switches to write mode. Presenting the plan as plain text does not count, and neither does a verbal "yes" from the user. If the plan changes, update the notes and call request_approval again.`
 	}
 	if next := m.modelForMode(WriteMode); next != "" && !m.routeIsLoaded(next) {
 		msg += fmt.Sprintf(" Write mode runs on %s, a different model that will see your notes but not this conversation.", next)
@@ -293,6 +322,32 @@ func (m *Model) switchModeTool() tools.Tool {
 			}
 
 			return fmt.Sprintf("mode switch requested to %s", req.mode), nil
+		},
+	}
+}
+
+// requestApprovalTool is plan mode's review checkpoint. The handler is a stub
+// like switchModeTool's: the dispatch loop special-cases the call into a
+// permission prompt showing the plan, and the user's keypress there performs
+// the approval (see updatePermission / approveRecordedPlan).
+func (m *Model) requestApprovalTool() tools.Tool {
+	return tools.Tool{
+		Type: "function",
+		Function: tools.Function{
+			Name:        "request_approval",
+			Description: "Present the recorded plan to the user for approval. Call this once the complete plan is in the session notes and ready to execute: the user is shown the plan and asked to approve it, and on approval the session switches to write mode. Do not call it before the plan is recorded, and do not present the plan as plain text instead — only this approval counts as review.",
+			Parameters: tools.Schema{
+				Type: "object",
+				Properties: map[string]tools.Property{
+					"summary": {
+						Type:        "string",
+						Description: "Short summary of the plan to show the user. If empty, the session notes are shown instead.",
+					},
+				},
+			},
+		},
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			return "plan approval requested", nil
 		},
 	}
 }
@@ -355,6 +410,7 @@ func pinnedToolNames(mode Mode) map[string]bool {
 	pinned := map[string]bool{"switch_mode": true}
 	if mode == PlanMode {
 		pinned["ask_user"] = true
+		pinned["request_approval"] = true
 		pinned["read_session_notes"] = true
 		pinned["update_session_notes"] = true
 		pinned["append_session_notes"] = true

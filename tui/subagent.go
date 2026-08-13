@@ -26,9 +26,10 @@ const subagentMaxSteps = 20
 // write_file, edit_file, delete_file, and run_shell — is permitted, subject to
 // the parent's current safety mode (see the filter in spawnSubagentTool).
 var subagentExcluded = map[string]bool{
-	"spawn_subagent": true, // no recursion — a sub-agent can't spawn sub-agents
-	"switch_mode":    true, // no mode concept inside a headless child
-	"ask_user":       true, // headless: there's no user to prompt
+	"spawn_subagent":   true, // no recursion — a sub-agent can't spawn sub-agents
+	"switch_mode":      true, // no mode concept inside a headless child
+	"ask_user":         true, // headless: there's no user to prompt
+	"request_approval": true, // headless: there's no user to approve a plan
 }
 
 const subagentSystem = `You are an autonomous sub-agent spawned to complete ONE self-contained task end to end, then report back. You have full capability within the current safety mode: read and search the codebase, edit and write files, and run shell commands. Work decisively — gather the context you need, make the change or find the answer, verify it, and stop. Return a concise, concrete report: what you did or found, with exact file paths, line references, and any commands you ran. Do NOT ask questions; if something is ambiguous, state your assumption and proceed. When the task is complete, reply WITHOUT calling any tools.`

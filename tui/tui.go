@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Run starts the TUI with a fresh session. If the previous run died without
@@ -81,6 +82,10 @@ func runProgram(m *Model) (err error) {
 			clearSessionMarker()
 		}
 	}()
+	// Background shell jobs (run_shell background=true) are detached from the
+	// turn that started them; without this they survive every quit path as
+	// orphans. Deferred so /quit, ctrl+c, and tea.Quit all reap them.
+	defer tools.KillAllBackgroundJobs()
 	p := tea.NewProgram(m)
 	m.companionSender = func(msg tea.Msg) { p.Send(msg) }
 	defer func() {

@@ -182,3 +182,19 @@ func TestPullModelServerError(t *testing.T) {
 		t.Fatal("expected an error for a not-found model")
 	}
 }
+
+func TestChatResponseParsesDoneReason(t *testing.T) {
+	// Ollama signals truncation at the num_predict cap with done_reason "length";
+	// the TUI's dead-response retry depends on seeing it.
+	var resp ChatResponse
+	raw := `{"model":"m","created_at":"now","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","eval_count":1024}`
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.DoneReason != "length" {
+		t.Fatalf("done_reason not parsed, got %q", resp.DoneReason)
+	}
+	if resp.EvalCount != 1024 {
+		t.Fatalf("eval_count not parsed, got %d", resp.EvalCount)
+	}
+}

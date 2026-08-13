@@ -123,17 +123,21 @@ sent without its originating call.
 `processPendingTools` walks the batch, and each call passes a preflight before
 it runs:
 
-1. mode gating
-2. explore-mode shell allowlist
-3. VCS bypass interception
-4. `switch_mode` checks — auto-mode refusal, redundant no-op, **the plan gate**
-5. **read-before-edit** when executing an offloaded plan
-6. identical-failure short circuit
-7. approval prompt
+1. `request_approval` — plan-mode-only; pauses the batch at an approval prompt
+   showing the plan instead of executing a handler
+2. mode gating
+3. explore-mode shell allowlist
+4. VCS bypass interception
+5. `switch_mode` checks — auto-mode refusal, redundant no-op, **the plan gate**
+6. **read-before-edit** when executing an offloaded plan
+7. identical-failure short circuit
+8. approval prompt
 
 Rejections here complete synchronously and don't produce a `toolResultMsg`, so
 the batch is finalized directly — otherwise a batch made entirely of rejected
-calls would hang at `TOOLS n/n`.
+calls would hang at `TOOLS n/n`. Each rejection also records a `tool` trace
+event with `"refused": true`, since the call never reaches the executor that
+normally logs it.
 
 After UI-specific preflight, both the interactive TUI and headless/eval loops
 delegate execution to `internal/agent.Executor`. JSON salvage, schema

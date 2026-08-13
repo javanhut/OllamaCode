@@ -99,9 +99,12 @@ gets truncated away as the context fills, and when routing is configured the
 executing model may be a different model entirely that never saw the planning
 conversation.
 
-After recording the plan, the model must present it through `ask_user` and wait
-for a reply. The reviewed notes must still match the current notes; changing the
-plan invalidates the checkpoint and requires another focused confirmation.
+After recording the plan, the model presents it with `request_approval`, which
+shows the plan in a permission-style prompt. Approval counts as the review and
+switches to write mode in one shot; a plan presented as plain text — or a
+verbal "yes" to one — does not. The reviewed notes must still match the current
+notes; changing the plan invalidates the checkpoint and requires a fresh
+approval. (`ask_user` still works as a review checkpoint for compatibility.)
 
 `ask_user` is enforced as a turn boundary. If a model batches a question with
 other calls, unstarted companion calls are cancelled and no new model response

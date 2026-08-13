@@ -136,6 +136,55 @@ func (m *Model) cycleSettingsFocus(step int) {
 	m.focusSettingsField(fields[(i+step+len(fields))%len(fields)])
 }
 
+// updateJobs drives the /jobs modal: a flat list of background shell jobs and
+// sub-agent jobs with a per-row kill. Killing needs no confirmation — the jobs
+// are user-started and SIGKILL/cancel is the existing semantic everywhere else.
+func (m *Model) updateJobs(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	rows := m.jobRows()
+	switch msg.String() {
+	case "up", "k":
+		if m.jobsCursor > 0 {
+			m.jobsCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.jobsCursor < len(rows)-1 {
+			m.jobsCursor++
+		}
+		return m, nil
+	case "x", "d":
+		if len(rows) == 0 {
+			return m, nil
+		}
+		row := rows[m.jobsCursor]
+		switch {
+		case row.done:
+			m.toast = fmt.Sprintf("job %d already finished", row.id)
+		case row.shell:
+			if err := tools.KillBgJob(row.id); err != nil {
+				m.toast = err.Error()
+			} else {
+				m.toast = fmt.Sprintf("job %d killed", row.id)
+			}
+		default:
+			if m.subagents != nil && m.subagents.cancel(row.id) {
+				m.toast = fmt.Sprintf("sub-agent job %d cancelled", row.id)
+			} else {
+				m.toast = fmt.Sprintf("no running sub-agent job %d", row.id)
+			}
+		}
+		return m, nil
+	case "r":
+		m.toast = "refreshed"
+		return m, nil
+	case "esc", "q", "enter":
+		m.state = stateChat
+		m.input.Focus()
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// A pull is streaming: only allow cancel.
 	if m.pulling {
@@ -370,13 +419,37 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.state = stateChat
 		return m, nil
 	}
-	switch msg.String() {
+	key := msg.String()
+	// "Allow all" is meaningless for a one-shot plan approval; treat it as
+	// approve rather than letting it suppress the rest of the batch's prompts.
+	if key == "a" && m.pending.index < len(m.pending.calls) &&
+		m.pending.calls[m.pending.index].Function.Name == "request_approval" {
+		key = "y"
+	}
+	switch key {
 	case "y", "enter":
 		i := m.pending.index
 		call := m.pending.calls[i]
 		m.recordPermission(call, "allowed_once")
 		m.pending.started[i] = true
 		m.state = stateChat
+		if call.Function.Name == "request_approval" {
+			// One shot: the approval IS the plan review and the switch to
+			// write mode, so the stub handler is never invoked. Record a
+			// result so the batch finalizes and the write-mode model picks
+			// up the approved plan.
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  "plan approved by the user — the session is now in write mode. Execute the approved plan, verifying each step against the live code.",
+			}
+			m.pending.done++
+			m.approveRecordedPlan()
+			cmd := m.processPendingTools()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, cmd
+		}
 		return m, m.invokeToolCmd(m.pending.gen, i, call)
 	case "a":
 		for i, call := range m.pending.calls {
@@ -711,6 +784,22 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/stats":
 			m.input.Reset()
 			m.state = stateStats
+			return m, nil
+		case "/compact":
+			m.input.Reset()
+			if cmd := m.compactContext(); cmd != nil {
+				return m, cmd // the toast is set inside compactContext
+			}
+			if m.compacting {
+				m.toast = "already compacting"
+			} else {
+				m.toast = "history too short to compact"
+			}
+			return m, nil
+		case "/jobs":
+			m.input.Reset()
+			m.jobsCursor = 0
+			m.state = stateJobs
 			return m, nil
 		case "/show_thinking", "/thinking":
 			m.input.Reset()

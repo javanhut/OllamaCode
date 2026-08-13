@@ -30,7 +30,8 @@ type chatDoneMsg struct {
 	thinking         string
 	promptEval       int
 	evalCount        int
-	toolCallsDropped bool // native calls were rejected before this completion path
+	doneReason       string // provider's completion reason; "length" = truncated at num_predict
+	toolCallsDropped bool   // native calls were rejected before this completion path
 }
 type chatErrMsg struct {
 	gen int
@@ -405,6 +406,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSettings(msg)
 		case stateModelPicker:
 			return m.updatePicker(msg)
+		case stateJobs:
+			return m.updateJobs(msg)
 		case stateHelp:
 			switch msg.String() {
 			case "esc", "enter", "q":
@@ -956,6 +959,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.GotoBottom()
 			}
 		} else {
+			// dead marks a completion truncated at the generation cap before any
+			// content or tool call; it skips every end-of-turn gate below.
+			dead := false
 			// The model chose the schema's prose escape branch: surface the
 			// answer text, not the {"response": ...} envelope it arrived in.
 			if constrained {
@@ -990,8 +996,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// A dropped tool call is not an interrupted stream: the reply
 				// arrived intact, it just wasn't allowed to be a tool call, and
 				// the system message above already says so in the transcript.
-				m.lastError = "model returned empty response — stream may have been interrupted"
-				m.logActivity("WARNING: empty model response (stream ended with no content)")
+				//
+				// A genuinely empty completion is almost always the model hitting
+				// the num_predict cap while still reasoning: done_reason "length",
+				// zero tokens generated, or a token count at the request's cap.
+				// Retry it with a larger budget and reasoning suppressed before
+				// giving up — and never let it fall through to the end-of-turn
+				// gates, which would nudge the model as if it had answered.
+				dead = msg.doneReason == "length" || msg.evalCount == 0 ||
+					(m.lastNumPredict > 0 && msg.evalCount >= m.lastNumPredict)
+				if dead && m.deadResponseRetries < maxDeadResponseRetries {
+					m.deadResponseRetries++
+					m.degradedStreamRetry = true // brief reasoning; the answer must come first
+					m.numPredictOverride = deadRetryNumPredict(m.lastNumPredict, m.profile.NumPredict)
+					m.history = append(m.history, api.Message{Role: "system", Content: "[RESPONSE CUT OFF] Your previous reply hit the generation token limit before producing any content or tool call. Keep reasoning brief — emit the tool call or final answer FIRST."})
+					m.logActivity(fmt.Sprintf("empty response at generation cap (done_reason=%q eval=%d cap=%d), retrying (%d/%d)",
+						msg.doneReason, msg.evalCount, m.lastNumPredict, m.deadResponseRetries, maxDeadResponseRetries))
+					m.toast = "response hit the token limit — retrying with a larger budget"
+					m.busySince = time.Now()
+					cmds = append(cmds, m.startStream())
+					m.refreshTranscript()
+					if wasAtBottom {
+						m.viewport.GotoBottom()
+					}
+					break
+				}
+				if dead {
+					m.lastError = "model hit the generation token limit without producing any content (retries exhausted) — try a larger num_predict or a bigger model"
+					m.logActivity("WARNING: dead model response (generation cap), retries exhausted")
+					m.endTurnAfterReply = true // no [CONTINUE], citation, or self-check gate on a reply that never happened
+				} else {
+					m.lastError = "model returned empty response — stream may have been interrupted"
+					m.logActivity("WARNING: empty model response (stream ended with no content)")
+				}
 			}
 			m.refreshTranscript()
 			if m.companion != nil && finalAssistant != "" {
@@ -1006,7 +1043,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the step budget) so a model that won't finish can't spin forever.
 			// Exempt: a turn stopped for stagnation. Open todos are precisely what
 			// the stalled model kept rewriting, so nudging it there re-opens the loop.
-			if !m.endTurnAfterReply && m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
+			// Plan mode is exempt too: its turns are meant to end for user review,
+			// and the nudge otherwise loop-locks the model into re-presenting the
+			// same plan until request_approval gets its checkpoint.
+			if !m.endTurnAfterReply && m.mode != PlanMode && m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
 				m.autoContinues++
 				m.history = append(m.history, api.Message{
 					Role: "system",
@@ -1045,7 +1085,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Verification gate: if this turn edited files, don't let it end on
 			// broken code — run a compile check (or challenge the model to prove
 			// it verified). On failure this re-invokes the model to keep fixing.
-			if vc := m.maybeVerifyGate(); vc != nil {
+			// A dead response already exhausted its retries; re-invoking through
+			// the gate would just ask again the model that could not answer.
+			var vc tea.Cmd
+			if !dead {
+				vc = m.maybeVerifyGate()
+			}
+			if vc != nil {
 				cmds = append(cmds, vc)
 				m.refreshTranscript()
 			} else {

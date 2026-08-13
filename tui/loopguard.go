@@ -14,12 +14,13 @@ import (
 
 // Loop-safety tunables.
 const (
-	defaultMaxSteps     = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
-	maxSameCallFailures = 2  // identical failing call attempts before short-circuit
-	recentOutcomesKept  = 12 // round outcome ring length for oscillation detection
-	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
-	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
-	maxActionDeferrals  = 1  // one corrective retry when prose promises a tool action but calls nothing
+	defaultMaxSteps        = 40 // tool-call rounds per user turn before we stop (room for verify-driven iteration)
+	maxSameCallFailures    = 2  // identical failing call attempts before short-circuit
+	recentOutcomesKept     = 12 // round outcome ring length for oscillation detection
+	maxAutoContinues       = 3  // times we nudge the model to keep going on open todos before yielding
+	maxStreamRetries       = 2  // transient stream errors auto-retried per turn before surfacing
+	maxDeadResponseRetries = 2  // empty completions truncated at the num_predict cap retried per turn
+	maxActionDeferrals     = 1  // one corrective retry when prose promises a tool action but calls nothing
 )
 
 func maxStepsFromConfig(c config) int {
@@ -43,6 +44,9 @@ func (m *Model) resetTurnGuards() {
 	m.stepCount = 0
 	m.streamRetries = 0
 	m.degradedStreamRetry = false
+	m.deadResponseRetries = 0
+	m.numPredictOverride = 0
+	m.lastTodoOpenCount = m.todos.openCount()
 	m.actionDeferrals = 0
 	m.recentOutcomes = m.recentOutcomes[:0]
 	m.oscillationStreak = 0
@@ -306,6 +310,13 @@ func (m *Model) observeRoundProgress(calls []tools.ToolCall, results []api.Messa
 			progress = false
 		}
 	}
+	// A round that changed observable state is forward motion even when its
+	// outcome hash repeats earlier evidence: a long task legitimately performs
+	// many similar edits, and an identical success text is not a loop.
+	if !progress && m.roundMovedState(calls, results) {
+		progress = true
+	}
+	m.lastTodoOpenCount = m.todos.openCount()
 	if outcome != "" {
 		m.seenOutcomes[outcome] = true
 		m.recentOutcomes = append(m.recentOutcomes, outcome)
@@ -323,21 +334,56 @@ func (m *Model) observeRoundProgress(calls []tools.ToolCall, results []api.Messa
 	return progress, warnOscillation, stopOscillation
 }
 
+// roundMovedState reports whether the round changed observable state: a file
+// mutation succeeded, or a todo_write moved the open-item count. Both are real
+// progress the outcome hash cannot see — an edit retried after an intervening
+// change returns the same success text, and todo results summarize identically.
+func (m *Model) roundMovedState(calls []tools.ToolCall, results []api.Message) bool {
+	for i, call := range calls {
+		if i >= len(results) || !tools.ToolResultOK(results[i].Content) {
+			continue
+		}
+		if len(tools.MutatedPaths(call.Function.Name, call.Function.Arguments)) > 0 {
+			return true
+		}
+		if call.Function.Name == "todo_write" && m.todos.openCount() != m.lastTodoOpenCount {
+			return true
+		}
+	}
+	return false
+}
+
+// pollingOnlyRound reports whether every call in the round only observes state
+// (reads, searches, status polls) and cannot mutate anything. A model polling a
+// live background job gets the same "still running" text every round; combined
+// with tools.BackgroundJobCount this keeps waiting from reading as looping.
+func pollingOnlyRound(calls []tools.ToolCall) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, call := range calls {
+		if tools.PolicyForName(call.Function.Name).Destructive {
+			return false
+		}
+	}
+	return true
+}
+
 // observeStagnation counts consecutive rounds that produced no evidence this
 // turn had not already seen, whatever tools produced them. Batch shape is not
 // the signal: one tool repeated with cosmetically different arguments defeats
 // the repeat guard exactly as easily as a rotating mixed batch does — a logged
-// session spent 33 no-op todo_write rounds proving it. Thresholds mirror the
-// 3/5 policy: the first round is evidence, two repeated no-evidence rounds warn
-// (round 3), and four end the turn (round 5) — rather than discovering the loop
-// by exhausting a 40-round step budget.
+// session spent 33 no-op todo_write rounds proving it. Three consecutive
+// no-evidence rounds warn and six end the turn, so a long task with legitimately
+// repetitive reads (or a wait on a background job) gets room before the harness
+// steps in — rather than discovering a real loop by exhausting the step budget.
 func (m *Model) observeStagnation(progress bool) (warn, stop bool) {
 	if progress {
 		m.stagnantRounds = 0
 		return false, false
 	}
 	m.stagnantRounds++
-	return m.stagnantRounds == 2, m.stagnantRounds >= 4
+	return m.stagnantRounds == 3, m.stagnantRounds >= 6
 }
 
 // maxReadsPerUnchangedTarget allows one initial read and one warned repeat. A
@@ -366,26 +412,49 @@ func readTargetKey(call tools.ToolCall) (string, bool) {
 	return call.Function.Name + "\x01" + filepath.Clean(a.Path), true
 }
 
+// readObservation is the per-target re-read ledger entry: how often the target
+// was read this turn and a hash of the last-seen result content. The hash is
+// what separates a loop from a legitimate re-read — an edit made through
+// run_shell (or any path the mutator ledger in forgetReads cannot see) changes
+// the content, and re-reading a changed file is new evidence, not repetition.
+type readObservation struct {
+	count int
+	hash  string // sha256 of the last read result for this target
+}
+
 // observeFileReads records path-keyed reads for the turn and reports targets
-// the model has already read without an intervening mutation. The streak
+// the model has already read without the content changing since. The streak
 // guard misses these because it resets whenever any other call interleaves.
-func (m *Model) observeFileReads(calls []tools.ToolCall) (rereads []string, stop bool) {
+func (m *Model) observeFileReads(calls []tools.ToolCall, results []api.Message) (rereads []string, stop bool) {
 	if m.turnReads == nil {
-		m.turnReads = map[string]int{}
+		m.turnReads = map[string]readObservation{}
 	}
 	seen := map[string]bool{}
-	for _, call := range calls {
+	for i, call := range calls {
 		key, ok := readTargetKey(call)
 		if !ok || seen[key] {
 			continue
 		}
 		seen[key] = true
-		m.turnReads[key]++
-		if m.turnReads[key] > 1 {
+		content := ""
+		if i < len(results) {
+			content = results[i].Content
+		}
+		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+		obs := m.turnReads[key]
+		if obs.count == 0 || obs.hash != hash {
+			// First read, or the content changed since the last one: a
+			// legitimate re-read. Reset the count and remember the new hash.
+			m.turnReads[key] = readObservation{count: 1, hash: hash}
+			continue
+		}
+		obs.count++
+		m.turnReads[key] = obs
+		if obs.count > 1 {
 			rereads = append(rereads, strings.SplitN(key, "\x01", 2)[1])
 			m.rereadEvents++
 		}
-		if m.turnReads[key] >= maxReadsPerUnchangedTarget {
+		if obs.count >= maxReadsPerUnchangedTarget {
 			stop = true
 		}
 	}

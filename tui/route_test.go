@@ -566,6 +566,19 @@ func TestPlanGate(t *testing.T) {
 			t.Errorf("message = %q, want the executing model named", msg)
 		}
 	})
+
+	t.Run("recorded but unreviewed plan is directed to request_approval", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		m.notes.set("1. edit tui/route.go\n2. add a test")
+		msg := m.planGateMessage()
+		if !strings.Contains(msg, "request_approval") {
+			t.Errorf("message = %q, want the model directed to request_approval", msg)
+		}
+		if !strings.Contains(msg, "plain text") {
+			t.Errorf("message = %q, want it to say a plain-text plan does not count", msg)
+		}
+	})
 }
 
 // A cursor provider drives a local CLI, so it has no URL to require and its
@@ -842,7 +855,7 @@ func TestRequireReadBeforeEdit(t *testing.T) {
 		m := routedModel(nil, "small")
 		m.planNeedsVerify = true
 		m.planPaths = map[string]bool{"tui/route.go": true}
-		m.turnReads = map[string]int{}
+		m.turnReads = map[string]readObservation{}
 		return m
 	}
 
@@ -859,7 +872,7 @@ func TestRequireReadBeforeEdit(t *testing.T) {
 
 	t.Run("allowed once read", func(t *testing.T) {
 		m := arm(t)
-		m.turnReads["read_file\x01tui/route.go"] = 1
+		m.turnReads["read_file\x01tui/route.go"] = readObservation{count: 1}
 		if reason := m.requireReadBeforeEdit("edit_file", []string{"tui/route.go"}); reason != "" {
 			t.Errorf("refused after the file was read: %s", reason)
 		}

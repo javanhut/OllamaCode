@@ -54,3 +54,59 @@ func TestHistoryWindow_NoDanglingToolResult(t *testing.T) {
 		t.Fatalf("window must not begin on a dangling tool result (start=%d role=%s)", start, h[start].Role)
 	}
 }
+
+func TestDedupeNudgesKeepsOnlyLatestPerTag(t *testing.T) {
+	m := routedModel(nil, "small")
+	m.mode = WriteMode
+	m.contextLimit = 8192
+	m.history = []api.Message{
+		msg("user", "do the thing"),
+		msg("system", "[CONTINUE] 2 todo item(s) are still open:\n- a\n- b\nKeep working."),
+		msg("system", "[NO PROGRESS DETECTED] Your last three rounds returned nothing new."),
+		msg("system", "A plain system notice with no tag stays put."),
+		msg("system", "[CONTINUE] 1 todo item(s) are still open:\n- b\nKeep working."),
+		msg("assistant", "still working"),
+	}
+	historyLen := len(m.history)
+
+	out := m.assembleMessagesForTools("", nil)
+
+	continues := 0
+	latestContinue := false
+	noProgress := 0
+	plainNotice := false
+	for _, message := range out {
+		if message.Role != "system" {
+			continue
+		}
+		if strings.HasPrefix(message.Content, "[CONTINUE]") {
+			continues++
+			latestContinue = strings.Contains(message.Content, "1 todo item")
+		}
+		if strings.HasPrefix(message.Content, "[NO PROGRESS DETECTED]") {
+			noProgress++
+		}
+		if strings.Contains(message.Content, "plain system notice") {
+			plainNotice = true
+		}
+	}
+	if continues != 1 || !latestContinue {
+		t.Fatalf("expected only the latest [CONTINUE] nudge to be sent (continues=%d latest=%v)", continues, latestContinue)
+	}
+	if noProgress != 1 {
+		t.Fatalf("distinct nudge tags must both survive, got %d [NO PROGRESS DETECTED]", noProgress)
+	}
+	if !plainNotice {
+		t.Fatal("non-nudge system message was filtered out")
+	}
+	if len(m.history) != historyLen {
+		t.Fatalf("history must be untouched by the send-time filter (%d -> %d)", historyLen, len(m.history))
+	}
+	// The persona prompt and the dynamic tail are not nudges and must be first/last.
+	if out[0].Role != "system" || !strings.Contains(out[0].Content, systemPrompt) {
+		t.Fatal("persona system prompt missing from the assembled head")
+	}
+	if !strings.Contains(out[len(out)-1].Content, "Current mode:") {
+		t.Fatal("dynamic mode tail missing from the assembled tail")
+	}
+}

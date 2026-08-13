@@ -1,5 +1,7 @@
 package tui
 
+import "strings"
+
 import "github.com/javanhut/ollama_code/api"
 
 import "github.com/javanhut/ollama_code/tools"
@@ -47,9 +49,56 @@ func (m *Model) assembleMessagesForTools(ragBlock string, available []tools.Tool
 
 	out := make([]api.Message, 0, len(m.history)-start+2)
 	out = append(out, sys)
-	out = append(out, m.history[start:]...)
+	out = append(out, dedupeNudges(m.history[start:])...)
 	out = append(out, dyn)
 	return out
+}
+
+// nudgeTag extracts the [TAG] prefix of an injected system nudge (e.g.
+// "[CONTINUE]", "[NO PROGRESS DETECTED]"). Non-nudge system messages — the
+// persona prompt, "Current mode: ..." notices — have no such prefix and return
+// false.
+func nudgeTag(content string) (string, bool) {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "[") {
+		return "", false
+	}
+	end := strings.Index(trimmed, "]")
+	if end <= 1 {
+		return "", false
+	}
+	return trimmed[:end+1], true
+}
+
+// dedupeNudges collapses injected nudges for the outgoing request: long turns
+// accumulate many near-identical [CONTINUE]/[SELF-CHECK]/... system messages,
+// and only the most recent one of each tag carries information the model has
+// not already ignored. History itself is untouched — this is a send-time
+// filter — and non-nudge system messages always pass through.
+func dedupeNudges(msgs []api.Message) []api.Message {
+	seen := map[string]bool{}
+	drop := make([]bool, len(msgs))
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "system" {
+			continue
+		}
+		tag, ok := nudgeTag(msgs[i].Content)
+		if !ok {
+			continue
+		}
+		if seen[tag] {
+			drop[i] = true
+		} else {
+			seen[tag] = true
+		}
+	}
+	kept := make([]api.Message, 0, len(msgs))
+	for i, message := range msgs {
+		if !drop[i] {
+			kept = append(kept, message)
+		}
+	}
+	return kept
 }
 
 // historyWindow returns the index at which the kept (newest-fitting) slice of

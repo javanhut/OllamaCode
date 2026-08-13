@@ -101,6 +101,7 @@ tools translate transparently. `detectVCS` walks up the tree and returns
 | `remember` / `recall` / `forget` | ✓ | ✓ | ✓ | ✓ |
 | `todo_write` / `todo_read` | ✓ | ✓ | ✓ | ✓ |
 | `switch_mode` | ✓ | ✓ | ✓ | ✓ |
+| `request_approval` | | ✓ | | |
 | `ask_user` | ✓ | ✓ | ✓ | ✓ |
 | `spawn_subagent` | ✓ | ✓ | ✓ | ✓ |
 
@@ -160,6 +161,18 @@ spin forever.
 
 Requests a mode transition. Treated as destructive, so it goes through the
 approval prompt, and the preview names the model the switch would route to.
+
+### `request_approval`
+
+Plan mode's review checkpoint. The model calls it once the complete plan is in
+the session notes; the user is shown the plan (the call's `summary` argument,
+or the notes themselves) in a permission-style prompt. Approving (`y`/`enter`)
+counts as the plan review **and** switches the session to write mode in one
+shot — the write-mode model starts from the approved notes. Rejecting
+(`n`/`esc`) ends the turn with the rejection as feedback, so the user can say
+what to change. Calling it without a recorded plan, or outside plan mode, is
+refused with instructions. A plan presented as plain text — or a verbal "yes"
+to one — does not satisfy the plan gate; only this approval does.
 
 ### `ask_user`
 

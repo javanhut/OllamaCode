@@ -15,6 +15,15 @@ func tc(name, args string) tools.ToolCall {
 	return tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
 }
 
+// readResults builds tool-result messages for observeFileReads tests.
+func readResults(contents ...string) []api.Message {
+	msgs := make([]api.Message, len(contents))
+	for i, c := range contents {
+		msgs[i] = api.Message{Role: "tool", Content: c}
+	}
+	return msgs
+}
+
 func TestCallFingerprint_KeyOrderStable(t *testing.T) {
 	a := tools.CallFingerprint(tc("edit_file", `{"path":"a","old_string":"x"}`))
 	b := tools.CallFingerprint(tc("edit_file", `{"old_string":"x","path":"a"}`))
@@ -162,8 +171,11 @@ func TestBannedToolIsRefusedInDispatch(t *testing.T) {
 
 func TestRepeatedOutcomeWarnsAtThreeAndStopsAtFive(t *testing.T) {
 	m := &Model{}
-	calls := []tools.ToolCall{tc("edit_file", `{"path":"same.go","old_string":"x","new_string":"y"}`)}
-	results := []api.Message{{Role: "tool", Content: "edited same.go\nNew Hash: unchanged"}}
+	// A non-mutating tool: identical call + identical result is no progress, so
+	// the repeat guard must escalate. (A successful file mutation now counts as
+	// progress by definition — see roundMovedState.)
+	calls := []tools.ToolCall{tc("run_shell", `{"command":"make build"}`)}
+	results := []api.Message{{Role: "tool", Content: "make: Nothing to be done for 'build'."}}
 	for round := 1; round <= 5; round++ {
 		progress, _, _ := m.observeRoundProgress(calls, results)
 		_, warn, stop, _ := m.observeRepeatedBatch(calls, progress)
@@ -205,17 +217,17 @@ func TestChangingResultsAreNotOscillation(t *testing.T) {
 	}
 }
 
-func TestStagnationUsesThreeFivePolicy(t *testing.T) {
+func TestStagnationUsesThreeSixPolicy(t *testing.T) {
 	m := &Model{}
 	calls := []tools.ToolCall{tc("read_file", `{"path":"a.go"}`), tc("grep", `{"pattern":"missing"}`)}
 	results := []api.Message{{Role: "tool", Content: "same file"}, {Role: "tool", Content: "same matches"}}
-	for round := 1; round <= 5; round++ {
+	for round := 1; round <= 7; round++ {
 		progress, _, _ := m.observeRoundProgress(calls, results)
 		warn, stop := m.observeStagnation(progress)
-		if warn != (round == 3) {
+		if warn != (round == 4) {
 			t.Fatalf("round %d: warn=%v", round, warn)
 		}
-		if stop != (round >= 5) {
+		if stop != (round >= 7) {
 			t.Fatalf("round %d: stop=%v", round, stop)
 		}
 	}
@@ -228,10 +240,10 @@ func TestStagnationStopsSingleToolLoop(t *testing.T) {
 	calls := []tools.ToolCall{tc("todo_write", `{"todos":[{"content":"Read ticket.md","status":"completed"}]}`)}
 	results := []api.Message{{Role: "tool", Content: `{"ok":true,"summary":"todo_write completed","evidence":["todo list updated: 2/3 completed"]}`}}
 	stopped := 0
-	for round := 1; round <= 5; round++ {
+	for round := 1; round <= 7; round++ {
 		progress, _, _ := m.observeRoundProgress(calls, results)
 		warn, stop := m.observeStagnation(progress)
-		if warn != (round == 3) {
+		if warn != (round == 4) {
 			t.Fatalf("round %d: warn=%v", round, warn)
 		}
 		if stop {
@@ -239,8 +251,8 @@ func TestStagnationStopsSingleToolLoop(t *testing.T) {
 			break
 		}
 	}
-	if stopped != 5 {
-		t.Fatalf("single-tool no-progress loop should end the turn at round 5, got %d", stopped)
+	if stopped != 7 {
+		t.Fatalf("single-tool no-progress loop should end the turn at round 7, got %d", stopped)
 	}
 
 	m.endTurnAfterReply = true
@@ -420,13 +432,13 @@ func TestRereadGuardCatchesInterleavedRereads(t *testing.T) {
 	m := &Model{}
 	// Read a.go, do something else, read a.go again: the streak guard resets
 	// on the interleaved call, but the re-read guard must still catch it.
-	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); len(rereads) != 0 {
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents")); len(rereads) != 0 {
 		t.Fatalf("first read reported as re-read: %v", rereads)
 	}
-	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("grep", `{"pattern":"x","path":"a.go"}`)}); len(rereads) != 0 {
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("grep", `{"pattern":"x","path":"a.go"}`)}, readResults("match")); len(rereads) != 0 {
 		t.Fatalf("grep with same path is a different question, got rereads: %v", rereads)
 	}
-	rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"./a.go"}`)})
+	rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"./a.go"}`)}, readResults("contents"))
 	if len(rereads) != 1 || rereads[0] != "a.go" {
 		t.Fatalf("re-read via ./a.go not caught or misreported: %v", rereads)
 	}
@@ -436,35 +448,35 @@ func TestRereadGuardStopsAfterCap(t *testing.T) {
 	m := &Model{}
 	stop := false
 	for range 5 {
-		if _, stop = m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); stop {
+		if _, stop = m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents")); stop {
 			break
 		}
 	}
 	if !stop {
 		t.Fatal("re-read loop never hit the stop cap")
 	}
-	if got := m.turnReads["read_file\x01a.go"]; got < maxReadsPerUnchangedTarget {
-		t.Fatalf("expected at least %d reads, got %d", maxReadsPerUnchangedTarget, got)
+	if got := m.turnReads["read_file\x01a.go"]; got.count < maxReadsPerUnchangedTarget {
+		t.Fatalf("expected at least %d reads, got %d", maxReadsPerUnchangedTarget, got.count)
 	}
 }
 
 func TestRereadStopIsPerTarget(t *testing.T) {
 	m := &Model{}
 	for _, path := range []string{"a.go", "a.go", "b.go", "b.go"} {
-		if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"`+path+`"}`)}); stop {
+		if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"`+path+`"}`)}, readResults("contents")); stop {
 			t.Fatalf("two reads of %s should warn but not stop", path)
 		}
 	}
-	if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); !stop {
+	if _, stop := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents")); !stop {
 		t.Fatal("third unchanged read of a.go should stop")
 	}
 }
 
 func TestForgetReadsAllowsRereadAfterMutation(t *testing.T) {
 	m := &Model{}
-	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)})
+	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents"))
 	m.forgetReads(tools.MutatedPaths("edit_file", json.RawMessage(`{"path":"a.go"}`)))
-	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}); len(rereads) != 0 {
+	if rereads, _ := m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents")); len(rereads) != 0 {
 		t.Fatalf("re-read after mutation treated as a loop: %v", rereads)
 	}
 }
@@ -523,7 +535,7 @@ func TestObservePreambleIgnoresShortAndDistinct(t *testing.T) {
 
 func TestResetTurnGuardsClearsNewState(t *testing.T) {
 	m := &Model{failedCalls: map[string]int{}}
-	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)})
+	m.observeFileReads([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}, readResults("contents"))
 	m.observePreamble("Good question — let me check exactly how the bypass guard behaves.")
 	m.observePreamble("Good question — let me check exactly how the bypass guard behaves!")
 	m.observeRoundProgress(
@@ -732,5 +744,185 @@ func TestRequestRejectsToolNotInAdvertisedSchemas(t *testing.T) {
 	next, _ = model(map[string]bool{"todo_write": true}).Update(chatDoneMsg{gen: 1, content: content})
 	if next.(*Model).pending == nil {
 		t.Fatal("advertised text-form tool call was rejected")
+	}
+}
+
+func TestRereadAfterContentChangeIsLegitimate(t *testing.T) {
+	m := &Model{}
+	read := []tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}
+	if rereads, _ := m.observeFileReads(read, readResults("v1")); len(rereads) != 0 {
+		t.Fatalf("first read reported as re-read: %v", rereads)
+	}
+	// The content changed since the last read (e.g. edited via run_shell, which
+	// forgetReads cannot see): re-reading is new evidence, not a loop.
+	if rereads, _ := m.observeFileReads(read, readResults("v2")); len(rereads) != 0 {
+		t.Fatalf("re-read of changed content treated as a loop: %v", rereads)
+	}
+	if got := m.turnReads["read_file\x01a.go"].count; got != 1 {
+		t.Fatalf("content change did not reset the read count, got %d", got)
+	}
+	// Reading the SAME content again is the loop the guard exists for.
+	if rereads, _ := m.observeFileReads(read, readResults("v2")); len(rereads) != 1 {
+		t.Fatalf("unchanged re-read not caught: %v", rereads)
+	}
+}
+
+func TestSuccessfulMutationIsProgressEvenWhenOutcomeRepeats(t *testing.T) {
+	m := &Model{}
+	calls := []tools.ToolCall{tc("edit_file", `{"path":"a.go","old_string":"x","new_string":"y"}`)}
+	results := []api.Message{{Role: "tool", Content: "edited a.go"}}
+	if progress, _, _ := m.observeRoundProgress(calls, results); !progress {
+		t.Fatal("first edit is new evidence")
+	}
+	// Identical call, identical success text: the outcome hash repeats, but a
+	// mutation that keeps succeeding is forward motion, not a loop.
+	if progress, _, _ := m.observeRoundProgress(calls, results); !progress {
+		t.Fatal("successful mutation must count as progress even when the outcome repeats")
+	}
+	// A FAILED mutation proves nothing moved. The first failure is still new
+	// diagnostic evidence; only the identical repeat must be non-progress.
+	failed := []api.Message{{Role: "tool", Content: "error: old_string not found"}}
+	if progress, _, _ := m.observeRoundProgress(calls, failed); !progress {
+		t.Fatal("first failure is new diagnostic evidence")
+	}
+	if progress, _, _ := m.observeRoundProgress(calls, failed); progress {
+		t.Fatal("repeated failed mutation counted as progress")
+	}
+}
+
+func TestTodoCountChangeIsProgress(t *testing.T) {
+	m := &Model{todos: &todoList{}, failedCalls: map[string]int{}}
+	m.todos.set([]todoItem{{Content: "a", Status: todoInProgress}, {Content: "b", Status: todoInProgress}})
+	m.resetTurnGuards() // snapshots the open count (2) for the coming round
+	// todo_write closes one item: the open count moves 2 -> 1 mid-round.
+	m.todos.set([]todoItem{{Content: "a", Status: todoCompleted}, {Content: "b", Status: todoInProgress}})
+	calls := []tools.ToolCall{tc("todo_write", `{"todos":[{"content":"a","status":"completed"}]}`)}
+	results := []api.Message{{Role: "tool", Content: `{"ok":true,"summary":"todo_write completed"}`}}
+	if progress, _, _ := m.observeRoundProgress(calls, results); !progress {
+		t.Fatal("todo_write that moved the open count must count as progress")
+	}
+	// The same write again with no further change is churn, not progress.
+	if progress, _, _ := m.observeRoundProgress(calls, results); progress {
+		t.Fatal("todo_write that changed nothing counted as progress")
+	}
+}
+
+func TestPollingOnlyRound(t *testing.T) {
+	if pollingOnlyRound(nil) {
+		t.Fatal("an empty round is not polling")
+	}
+	if !pollingOnlyRound([]tools.ToolCall{tc("shell_output", `{"job":1}`), tc("read_file", `{"path":"a.go"}`)}) {
+		t.Fatal("status poll plus read should be polling-only")
+	}
+	if pollingOnlyRound([]tools.ToolCall{tc("read_file", `{"path":"a.go"}`), tc("run_shell", `{"command":"go build ./..."}`)}) {
+		t.Fatal("run_shell can mutate, so the round is not polling-only")
+	}
+}
+
+// deadResponseModel builds the minimal model that survives a chatDoneMsg ->
+// startStream round trip in a test (no network: the request errors out in a
+// goroutine nobody services).
+func deadResponseModel(t *testing.T) *Model {
+	t.Helper()
+	// logActivity persists the config; keep it out of the user's real files.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	registry := tools.NewRegistry()
+	registry.Register(tools.Tool{Function: tools.Function{Name: "todo_write",
+		Parameters: tools.Schema{Type: "object"}}})
+	m := &Model{
+		mode: WriteMode, turnGen: 1, maxSteps: defaultMaxSteps,
+		tools: registry, notes: &sessionNotes{}, todos: &todoList{},
+		failedCalls: map[string]int{},
+		transcript:  &strings.Builder{}, streamBuf: &strings.Builder{},
+		md: newMarkdownRenderer(), notesMd: newMarkdownRenderer(),
+		stream: &streamState{gen: 1},
+	}
+	m.viewport.SetWidth(80)
+	return m
+}
+
+func TestDeadResponseRetriesWithRaisedBudget(t *testing.T) {
+	m := deadResponseModel(t)
+	m.lastNumPredict = 1024 // the cap the truncated request went out with
+
+	next, _ := m.Update(chatDoneMsg{gen: 1, doneReason: "length", evalCount: 1024})
+	after := next.(*Model)
+	defer after.stream.cancel()
+
+	if after.deadResponseRetries != 1 {
+		t.Fatalf("expected one dead-response retry, got %d", after.deadResponseRetries)
+	}
+	if !after.degradedStreamRetry {
+		t.Fatal("retry should suppress extended reasoning")
+	}
+	if after.lastNumPredict != 4096 {
+		t.Fatalf("retry should raise num_predict to 4x the cap (4096), got %d", after.lastNumPredict)
+	}
+	if !after.streaming || after.stream == nil {
+		t.Fatal("dead response did not re-invoke the model")
+	}
+	found := false
+	for _, msg := range after.history {
+		if msg.Role == "system" && strings.Contains(msg.Content, "[RESPONSE CUT OFF]") {
+			found = true
+		}
+		if strings.Contains(msg.Content, "[CONTINUE]") {
+			t.Fatal("dead response triggered the open-todo nudge")
+		}
+	}
+	if !found {
+		t.Fatalf("missing [RESPONSE CUT OFF] note: %+v", after.history)
+	}
+	if after.lastError != "" {
+		t.Fatalf("a retried dead response must not surface as an error: %q", after.lastError)
+	}
+}
+
+func TestDeadResponseExhaustedEndsTurn(t *testing.T) {
+	m := deadResponseModel(t)
+	m.todos.set([]todoItem{{Content: "still open", Status: todoInProgress}})
+	m.lastNumPredict = 1024
+	m.deadResponseRetries = maxDeadResponseRetries
+
+	next, _ := m.Update(chatDoneMsg{gen: 1, doneReason: "length", evalCount: 1024})
+	after := next.(*Model)
+
+	if after.lastError == "" {
+		t.Fatal("exhausted retries must surface a visible error")
+	}
+	if !after.endTurnAfterReply {
+		t.Fatal("exhausted retries must end the turn without re-entry gates")
+	}
+	if after.streaming {
+		t.Fatal("turn kept streaming after retries were exhausted")
+	}
+	if after.autoContinues != 0 {
+		t.Fatal("dead response was auto-continued on open todos")
+	}
+	for _, msg := range after.history {
+		if strings.Contains(msg.Content, "[CONTINUE]") || strings.Contains(msg.Content, "[RESPONSE CUT OFF]") {
+			t.Fatalf("exhausted turn still got a nudge: %q", msg.Content)
+		}
+	}
+}
+
+func TestEmptyResponseWithoutTruncationNotRetried(t *testing.T) {
+	m := deadResponseModel(t)
+	m.lastNumPredict = 1024
+
+	// Tokens were generated below the cap and the reason is not "length": this
+	// is the old interrupted-stream case, not a truncation.
+	next, _ := m.Update(chatDoneMsg{gen: 1, evalCount: 5})
+	after := next.(*Model)
+
+	if after.deadResponseRetries != 0 {
+		t.Fatal("non-truncated empty response burned a dead-response retry")
+	}
+	if !strings.Contains(after.lastError, "interrupted") {
+		t.Fatalf("expected the interrupted-stream error, got %q", after.lastError)
+	}
+	if after.streaming {
+		t.Fatal("non-truncated empty response should end the turn as before")
 	}
 }

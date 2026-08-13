@@ -15,7 +15,7 @@ func RunShellTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "run_shell",
-			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
+			Description: "Run a shell command via `bash -o pipefail -c` (falls back to `sh -c` when bash is unavailable). Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result — with pipefail, a failure in ANY stage of a pipeline (e.g. `curl … | head` where curl fails) fails the whole command. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -23,7 +23,7 @@ func RunShellTool() Tool {
 					"working_dir": {Type: "string", Description: "Directory to run in. Defaults to the current working directory."},
 					"timeout_sec": {Type: "number", Description: "Hard timeout in seconds for foreground runs. Defaults to 30, max 300. Ignored when background=true."},
 					"stdin":       {Type: "string", Description: "Text to pipe into the command's standard input."},
-					"background":  {Type: "boolean", Description: "Run detached and return immediately with a job id instead of waiting. Use for commands that run for a while or never exit."},
+					"background":  {Type: "boolean", Description: "Run detached and return immediately with a job id instead of waiting. Use for commands that run for a while or never exit. Do not append '&' to the command — the job is already backgrounded (a trailing '&' is stripped)."},
 				},
 				Required: []string{"command"},
 			},
@@ -50,12 +50,17 @@ func RunShellTool() Tool {
 				}
 			}
 			if a.Background {
-				job, err := startBackgroundShell(a.Command, a.WorkingDir, a.Stdin)
+				command, strippedAmp := stripBackgroundAmpersand(a.Command)
+				job, err := startBackgroundShell(command, a.WorkingDir, a.Stdin)
 				if err != nil {
 					return "", err
 				}
-				return withSandboxNotice(fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
-					job.id, job.pid, shortCommand(a.Command), job.id, job.id)), nil
+				msg := fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
+					job.id, job.pid, shortCommand(command), job.id, job.id)
+				if strippedAmp {
+					msg += "\n(stripped trailing '&' — the job is already backgrounded)"
+				}
+				return withSandboxNotice(msg), nil
 			}
 			timeout := 30 * time.Second
 			if a.TimeoutSec > 0 {
@@ -68,6 +73,19 @@ func RunShellTool() Tool {
 			return withSandboxNotice(res), err
 		},
 	}
+}
+
+// stripBackgroundAmpersand removes a trailing shell-backgrounding '&' from a
+// command that is already being run via run_shell(background=true) — the job
+// is detached by the tool, so a doubled '&' would only spawn an orphaned
+// grandchild. Returns the cleaned command and whether anything was stripped.
+// A trailing "&&" is left alone: that's a broken AND-list, not backgrounding.
+func stripBackgroundAmpersand(command string) (string, bool) {
+	trimmed := strings.TrimRight(command, " \t\r\n")
+	if !strings.HasSuffix(trimmed, "&") || strings.HasSuffix(trimmed, "&&") {
+		return command, false
+	}
+	return strings.TrimRight(strings.TrimSuffix(trimmed, "&"), " \t\r\n"), true
 }
 
 func AskUserTool() Tool {

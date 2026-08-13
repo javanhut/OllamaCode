@@ -101,6 +101,27 @@ func (m *Model) recordPermission(call tools.ToolCall, decision string) {
 		Tool: call.Function.Name, Arguments: call.Function.Arguments, Metadata: map[string]any{"decision": decision}})
 }
 
+// refuseToolCall completes a call synchronously with an error result for a
+// dispatch-level refusal (gate, mode policy, loop guards). These calls never
+// reach invokeTool, so without this they produce a tool-role error in history
+// but no trace event — an invisible refusal is how a plan-gate deadlock goes
+// undiagnosed in the debug log. The event carries the normal tool shape with
+// "refused": true and the refusal reason as the result.
+func (m *Model) refuseToolCall(i int, call tools.ToolCall, reason string) {
+	if m.trace != nil {
+		_ = m.trace.Record(tracepkg.Event{Kind: "tool", Turn: m.turnGen, Model: m.modelName,
+			Tool: call.Function.Name, Arguments: call.Function.Arguments,
+			Result: reason, Metadata: map[string]any{"refused": true}})
+	}
+	m.pending.results[i] = api.Message{
+		Role:     "tool",
+		ToolName: call.Function.Name,
+		Content:  reason,
+	}
+	m.pending.started[i] = true
+	m.pending.done++
+}
+
 func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 	return func() tea.Msg {
 		var req *modeSwitchRequest
@@ -259,7 +280,14 @@ func (m *Model) processPendingTools() tea.Cmd {
 		}
 
 		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
-		warnStagnant, stopStagnant := m.observeStagnation(madeProgress)
+		// Polling a live background job returns the same "still running" text
+		// every round — that is waiting, not looping. Keep it out of the
+		// stagnation count so long-running tasks are not killed mid-flight.
+		stagnationProgress := madeProgress
+		if !stagnationProgress && tools.BackgroundJobCount() > 0 && pollingOnlyRound(batchCalls) {
+			stagnationProgress = true
+		}
+		warnStagnant, stopStagnant := m.observeStagnation(stagnationProgress)
 
 		// Outcomes include both the calls and their results, so A/B/A/B only
 		// trips when the observable evidence is repeating, not merely when the
@@ -287,7 +315,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if stopStagnant {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
-				Content: "[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command.",
+				Content: "[TURN ENDED — NO PROGRESS] Six rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command.",
 			})
 			m.suppressToolsOnce = true
 			// A tool-less message is not an ending on its own: the auto-continue on
@@ -325,7 +353,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Re-read guard: the streak guard above resets on any interleaved call,
 		// so it misses a model re-reading files it already has. Re-reading a
 		// file nothing has mutated is always wasted work.
-		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
+		if rereads, stopRereads := m.observeFileReads(batchCalls, batchResults); len(rereads) > 0 {
 			m.history = append(m.history, api.Message{
 				Role:    "system",
 				Content: fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`)),
@@ -382,25 +410,39 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// and answer with a tool result so the transcript stays well-formed.
 		if m.bannedTools[call.Function.Name] {
 			m.failedCalls[tools.CallFingerprint(call)]++
-			m.pending.results[i] = api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: %q is disabled for the rest of this turn — you called it repeatedly without making progress. Do not call it again; act on what you already know or answer the user.", call.Function.Name),
-			}
-			m.pending.started[i] = true
-			m.pending.done++
+			m.refuseToolCall(i, call, fmt.Sprintf("error: %q is disabled for the rest of this turn — you called it repeatedly without making progress. Do not call it again; act on what you already know or answer the user.", call.Function.Name))
 			continue
+		}
+
+		// request_approval is a permission prompt, not an executable call: the
+		// user's keypress performs the approval (updatePermission), so the stub
+		// handler never runs. It sits before the generic mode check so a
+		// text-parsed call outside plan mode gets the actionable message.
+		if call.Function.Name == "request_approval" {
+			switch {
+			case m.mode != PlanMode:
+				m.failedCalls[tools.CallFingerprint(call)]++
+				m.refuseToolCall(i, call, "error: request_approval is only available in plan mode.")
+				continue
+			case !m.planRecorded():
+				// Deliberately not counted as a failed call: the model is meant
+				// to record the plan and retry this exact call.
+				m.refuseToolCall(i, call, "error: no plan recorded. Call update_session_notes or append_session_notes with the complete plan — scope, the exact files to touch and the change in each, and the risks — then call request_approval.")
+				continue
+			}
+			m.pending.index = i
+			m.pending.preview = computePreview(call)
+			if strings.TrimSpace(m.pending.preview) == "" {
+				m.pending.preview = m.notes.get()
+			}
+			m.state = statePermission
+			m.refreshTranscript()
+			break
 		}
 
 		if !m.toolCallAllowedInMode(call) {
 			m.failedCalls[tools.CallFingerprint(call)]++
-			m.pending.results[i] = api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: tool %q not allowed in %s mode (press shift+tab to switch modes)", call.Function.Name, m.mode),
-			}
-			m.pending.started[i] = true
-			m.pending.done++
+			m.refuseToolCall(i, call, fmt.Sprintf("error: tool %q not allowed in %s mode (press shift+tab to switch modes)", call.Function.Name, m.mode))
 			continue
 		}
 
@@ -411,13 +453,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			if m.mode == ExploreMode {
 				if ok, reason := safeshell.IsExploreReadOnlyShell(cmd); !ok {
 					m.failedCalls[tools.CallFingerprint(call)]++
-					m.pending.results[i] = api.Message{
-						Role:     "tool",
-						ToolName: call.Function.Name,
-						Content:  fmt.Sprintf("error: %s. Call switch_mode(\"plan\", ...) and then switch_mode(\"write\", ...) to run mutating commands.", reason),
-					}
-					m.pending.started[i] = true
-					m.pending.done++
+					m.refuseToolCall(i, call, fmt.Sprintf("error: %s. Call switch_mode(\"plan\", ...) and then switch_mode(\"write\", ...) to run mutating commands.", reason))
 					continue
 				}
 			}
@@ -428,13 +464,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			// transparently; raw `git` via run_shell does not.
 			if ok, reason := safeshell.InterceptVCSBypass(cmd, tools.DetectVCS()); !ok {
 				m.failedCalls[tools.CallFingerprint(call)]++
-				m.pending.results[i] = api.Message{
-					Role:     "tool",
-					ToolName: call.Function.Name,
-					Content:  "error: " + reason,
-				}
-				m.pending.started[i] = true
-				m.pending.done++
+				m.refuseToolCall(i, call, "error: "+reason)
 				continue
 			}
 		}
@@ -444,22 +474,10 @@ func (m *Model) processPendingTools() tea.Cmd {
 			switch {
 			case err != nil:
 				// Genuinely malformed (bad/unknown mode) — report and move on.
-				m.pending.results[i] = api.Message{
-					Role:     "tool",
-					ToolName: call.Function.Name,
-					Content:  fmt.Sprintf("error: %v", err),
-				}
-				m.pending.started[i] = true
-				m.pending.done++
+				m.refuseToolCall(i, call, fmt.Sprintf("error: %v", err))
 				continue
 			case req.target == AutoMode:
-				m.pending.results[i] = api.Message{
-					Role:     "tool",
-					ToolName: call.Function.Name,
-					Content:  "error: transition to 'auto' mode can only be triggered by the user explicitly, not via tool call.",
-				}
-				m.pending.started[i] = true
-				m.pending.done++
+				m.refuseToolCall(i, call, "error: transition to 'auto' mode can only be triggered by the user explicitly, not via tool call.")
 				continue
 			case m.planGateBlocks(req.target):
 				// The plan is the handoff. Write mode may run on a different,
@@ -467,13 +485,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 				// every turn while chat history gets truncated away. Deliberately
 				// not counted as a failed call: the model is meant to write the
 				// notes and retry this exact call.
-				m.pending.results[i] = api.Message{
-					Role:     "tool",
-					ToolName: call.Function.Name,
-					Content:  m.planGateMessage(),
-				}
-				m.pending.started[i] = true
-				m.pending.done++
+				m.refuseToolCall(i, call, m.planGateMessage())
 				continue
 			case req.target == m.mode:
 				// Redundant switch: succeed as a no-op rather than erroring, so a
@@ -497,13 +509,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// edited until it has been read this turn. The handoff message asks for
 		// this; a small local model may ignore a prompt, but not this.
 		if reason := m.requireReadBeforeEdit(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
-			m.pending.results[i] = api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  reason,
-			}
-			m.pending.started[i] = true
-			m.pending.done++
+			m.refuseToolCall(i, call, reason)
 			continue
 		}
 
@@ -511,13 +517,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// it won't help and just burns a round-trip.
 		fp := tools.CallFingerprint(call)
 		if m.failedCalls[fp] >= maxSameCallFailures {
-			m.pending.results[i] = api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: you already called %q with these exact arguments %d times and it failed each time. Do not repeat it — change the arguments or use a different approach.", call.Function.Name, m.failedCalls[fp]),
-			}
-			m.pending.started[i] = true
-			m.pending.done++
+			m.refuseToolCall(i, call, fmt.Sprintf("error: you already called %q with these exact arguments %d times and it failed each time. Do not repeat it — change the arguments or use a different approach.", call.Function.Name, m.failedCalls[fp]))
 			continue
 		}
 
@@ -600,6 +600,11 @@ func computePreview(call tools.ToolCall) string {
 		mode, _ := args["mode"].(string)
 		reason, _ := args["reason"].(string)
 		return fmt.Sprintf("Switch mode to: %s\nReason: %s", strings.TrimSpace(mode), strings.TrimSpace(reason))
+	case "request_approval":
+		// The summary the model supplied, if any. Dispatch falls back to the
+		// session notes when this is empty.
+		summary, _ := args["summary"].(string)
+		return strings.TrimSpace(summary)
 	case "write_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)

@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func (m *Model) overlayModal(base, modal string) string {
@@ -301,6 +302,87 @@ func (m *Model) pickerModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// jobRow is one row in the /jobs modal: a background shell job
+// (run_shell background=true) or a background sub-agent job.
+type jobRow struct {
+	shell  bool // true = shell job; false = sub-agent job
+	id     int
+	done   bool
+	status string // "running (…)" / "exited N" / "done (…)"
+	text   string // command line or task summary
+}
+
+// jobRows snapshots both job registries. Both keep finished jobs on purpose,
+// so the modal doubles as a "what ran" list, not just a kill switch.
+func (m *Model) jobRows() []jobRow {
+	var rows []jobRow
+	for _, j := range tools.ListBgJobs() {
+		status := fmt.Sprintf("running (pid %d, %s)", j.PID, time.Since(j.Started).Round(time.Second))
+		if j.Done {
+			status = fmt.Sprintf("exited %d", j.ExitCode)
+		}
+		rows = append(rows, jobRow{shell: true, id: j.ID, done: j.Done, status: status, text: j.Command})
+	}
+	if m.subagents != nil {
+		for _, j := range m.subagents.all() {
+			done, _, _ := j.snapshot()
+			tasks := "1 task"
+			if len(j.tasks) != 1 {
+				tasks = fmt.Sprintf("%d tasks", len(j.tasks))
+			}
+			rows = append(rows, jobRow{id: j.id, done: done, status: j.statusLine(), text: tasks + ": " + strings.Join(j.tasks, " | ")})
+		}
+	}
+	return rows
+}
+
+// jobsModal lists background shell and sub-agent jobs, mirroring the model
+// picker's scrollable-list chrome.
+func (m *Model) jobsModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Background jobs", "esc", innerW))
+	b.WriteString("\n\n")
+
+	rows := m.jobRows()
+	if len(rows) == 0 {
+		b.WriteString(modalMutedStyle.Render(truncatePlain("no background jobs — run_shell background jobs and sub-agents show up here", innerW)))
+		b.WriteString("\n")
+	} else {
+		if m.jobsCursor >= len(rows) {
+			m.jobsCursor = len(rows) - 1
+		}
+		view := pickerWindow(len(rows), m.jobsCursor, 8)
+		for i := view.start; i < view.end; i++ {
+			r := rows[i]
+			kind := "agent"
+			if r.shell {
+				kind = "shell"
+			}
+			row := truncatePlain(fmt.Sprintf("#%-3d %-5s %-24s %s", r.id, kind, r.status, r.text), innerW-4)
+			if i == m.jobsCursor {
+				b.WriteString("  " + modalSelectStyle.Render(padCell(" "+row+" ", innerW-2)))
+			} else {
+				b.WriteString("   " + modalBodyStyle.Render(padCell(row, innerW-3)))
+			}
+			b.WriteString("\n")
+		}
+		if view.start > 0 || view.end < len(rows) {
+			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("   %d / %d", m.jobsCursor+1, len(rows))))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
+		modalMutedStyle.Render("   x/d ") + modalBodyStyle.Render("kill") +
+		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh") +
+		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("close")
+	b.WriteString(hint)
+	return modalStyle.Width(w).Render(b.String())
+}
+
 // pullErrorHint maps the common /api/pull failure modes to actionable guidance,
 // since the daemon's raw error ("file does not exist", "unauthorized") rarely
 // tells the user what to actually do. Returns "" when nothing useful applies.
@@ -581,9 +663,15 @@ func (m *Model) permissionModal() string {
 
 	var footerSection []string
 	footerSection = append(footerSection, "")
-	footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("allow once   ")+
-		modalMutedStyle.Render("a ")+modalBodyStyle.Render("allow all in this turn   ")+
-		modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
+	if call.Function.Name == "request_approval" {
+		headerSection[0] = m.modalHeader("Plan ready for review", "n=reject", innerW)
+		footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("approve plan and switch to write mode   ")+
+			modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("reject"))
+	} else {
+		footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("allow once   ")+
+			modalMutedStyle.Render("a ")+modalBodyStyle.Render("allow all in this turn   ")+
+			modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
+	}
 
 	// How many lines are left for arguments and preview?
 	usedLines := len(headerSection) + len(footerSection) + 2

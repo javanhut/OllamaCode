@@ -39,6 +39,7 @@ type ChatResponse struct {
 	CreatedAt  string  `json:"created_at"`
 	Message    Message `json:"message"`
 	Done       bool    `json:"done"`
+	DoneReason string  `json:"done_reason,omitempty"` // "length" signals truncation at the num_predict cap
 	Total      int64   `json:"total_duration,omitempty"`
 	PromptEval int     `json:"prompt_eval_count,omitempty"`
 	EvalCount  int     `json:"eval_count,omitempty"`

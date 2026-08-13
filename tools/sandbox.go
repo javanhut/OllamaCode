@@ -70,21 +70,56 @@ func detectShellSandbox() string {
 	return kind
 }
 
-// newShellCommand builds `sh -c command`, wrapped in the OS sandbox when one
-// is available and enabled. Callers still apply configureShellCommand, so
-// process-group kill semantics are identical wrapped or not.
+// shellKind caches the bash probe as a pointer so tests can simulate absence:
+// nil = not probed yet, non-nil = probed ("" means bash not found). A racy
+// double-probe is harmless — LookPath is idempotent and cheap.
+var shellKind atomic.Pointer[string]
+
+// detectShell returns "bash" when bash is on PATH, "" otherwise. Probed once:
+// PATH does not meaningfully change mid-process.
+func detectShell() string {
+	if p := shellKind.Load(); p != nil {
+		return *p
+	}
+	kind := ""
+	if _, err := exec.LookPath("bash"); err == nil {
+		kind = "bash"
+	}
+	shellKind.Store(&kind)
+	return kind
+}
+
+// shellArgv renders the interpreter invocation for command. bash with
+// pipefail is preferred so a failure in any pipeline stage fails the whole
+// command (plain sh reports only the last stage's status, which let a failed
+// `curl … | head` look like a success); sh -c is the fallback when bash is
+// missing. Foreground and background commands share this resolution so both
+// report exit status the same way.
+func shellArgv(command string) []string {
+	if detectShell() == "bash" {
+		return []string{"bash", "-o", "pipefail", "-c", command}
+	}
+	return []string{"sh", "-c", command}
+}
+
+// newShellCommand builds the shell invocation for command (see shellArgv),
+// wrapped in the OS sandbox when one is available and enabled. Callers still
+// apply configureShellCommand, so process-group kill semantics are identical
+// wrapped or not.
 func newShellCommand(command string) *exec.Cmd {
+	argv := shellArgv(command)
 	if shellSandboxEnabled() {
 		switch detectShellSandbox() {
 		case "sandbox-exec":
-			return exec.Command("sandbox-exec", "-p", seatbeltProfile(sandboxWritableDirs()), "sh", "-c", command)
+			args := append([]string{"-p", seatbeltProfile(sandboxWritableDirs())}, argv...)
+			return exec.Command("sandbox-exec", args...)
 		case "bwrap":
 			// bwrap bind-mounts must exist, unlike seatbelt subpath rules.
-			argv := bwrapArgv(command, existingDirs(sandboxWritableDirs()))
-			return exec.Command(argv[0], argv[1:]...)
+			wrapped := bwrapArgv(argv, existingDirs(sandboxWritableDirs()))
+			return exec.Command(wrapped[0], wrapped[1:]...)
 		}
 	}
-	return exec.Command("sh", "-c", command)
+	return exec.Command(argv[0], argv[1:]...)
 }
 
 // sandboxWritableDirs is the writeable set for both sandboxes: every jail
@@ -196,18 +231,19 @@ func sbplString(s string) string {
 
 // bwrapArgv renders the Linux bubblewrap invocation: the host filesystem
 // read-only, the writable roots overlaid read-write, scratch /dev and /proc,
-// network left shared (not unshared). Pure, so tests can pin the shape.
-func bwrapArgv(command string, writable []string) []string {
-	argv := []string{
+// network left shared (not unshared). argv is the command to run after "--"
+// (the shell invocation from shellArgv). Pure, so tests can pin the shape.
+func bwrapArgv(argv []string, writable []string) []string {
+	out := []string{
 		"bwrap", "--die-with-parent",
 		"--ro-bind", "/", "/",
 		"--dev", "/dev",
 		"--proc", "/proc",
 	}
 	for _, dir := range writable {
-		argv = append(argv, "--bind", dir, dir)
+		out = append(out, "--bind", dir, dir)
 	}
-	return append(argv, "--", "sh", "-c", command)
+	return append(out, append([]string{"--"}, argv...)...)
 }
 
 // sandboxMissingNotice rides the first unwrapped run_shell result so both the

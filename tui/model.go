@@ -109,6 +109,7 @@ const (
 	stateDiff
 	stateStats
 	stateRouteConfirm
+	stateJobs
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -302,6 +303,7 @@ type Model struct {
 	pickerPurpose   string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
 	pairLocalModel  string
 	pairCursor      string
+	jobsCursor      int // highlighted row in the /jobs modal
 	modelName       string
 
 	// Model pulling (from the model picker). pullInput captures the name to
@@ -366,40 +368,44 @@ type Model struct {
 	retrieving     bool   // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
-	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
-	streamRetries       int             // transient stream errors retried this turn
-	degradedStreamRetry bool            // idle-timeout retry uses a smaller, cheaper request
-	actionDeferrals     int             // tool-capable replies that promised action without calling a tool
-	stepCount           int             // tool-call rounds since the last user message
-	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
-	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
-	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
-	seenOutcomes        map[string]bool // evidence already observed this turn
-	oscillationStreak   int             // consecutive round endings that still form A/B alternation
-	stagnantRounds      int             // consecutive rounds that produced no evidence this turn had not already seen
-	failedCalls         map[string]int  // fingerprint -> consecutive failure count
-	oscillationWarned   bool            // corrective nudge emitted once per turn
-	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
-	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
-	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
-	sameToolStreak      int             // consecutive steps repeating that identity
-	sameToolWarned      bool            // early repeat warning emitted this user turn
-	stopWarnedTool      string          // tool the hard-stop already fired for this turn
-	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
-	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
-	turnChangedPaths    map[string]bool // exact files covered by targeted verification
-	fetchedContent      bool            // untrusted web content entered the conversation this turn
-	verifying           bool            // a compile check is running
-	verifyAttempts      int             // failed compile checks this turn
-	lastVerification    string          // exact command/evidence from the latest gate
-	challengedThisTurn  bool            // self-check challenge already issued this turn
-	reviewedThisTurn    bool            // optional adversarial review already issued this turn
-	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
-	rereadEvents        int             // re-reads of unchanged files this turn
-	rereadStopAnnounced bool            // hard-stop explanation for re-read loops emitted
-	lastPreamble        string          // normalized previous assistant preamble this turn
-	preambleStreak      int             // consecutive near-duplicate preambles
-	preambleWarned      bool            // preamble-echo warning emitted this turn
+	turnGen             int                        // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	streamRetries       int                        // transient stream errors retried this turn
+	degradedStreamRetry bool                       // idle-timeout retry uses a smaller, cheaper request
+	deadResponseRetries int                        // empty/truncated completions retried this turn
+	lastNumPredict      int                        // num_predict sent with the in-flight request (0 = unset)
+	numPredictOverride  int                        // one-shot num_predict for the next request (dead-response retry)
+	lastTodoOpenCount   int                        // open todo count after the previous tool round
+	actionDeferrals     int                        // tool-capable replies that promised action without calling a tool
+	stepCount           int                        // tool-call rounds since the last user message
+	autoContinues       int                        // times we've nudged the model to keep going on open todos this turn
+	maxSteps            int                        // budget per turn (cfg.MaxSteps, default 25)
+	recentOutcomes      []string                   // round-level call+result identities (state-aware oscillation)
+	seenOutcomes        map[string]bool            // evidence already observed this turn
+	oscillationStreak   int                        // consecutive round endings that still form A/B alternation
+	stagnantRounds      int                        // consecutive rounds that produced no evidence this turn had not already seen
+	failedCalls         map[string]int             // fingerprint -> consecutive failure count
+	oscillationWarned   bool                       // corrective nudge emitted once per turn
+	suppressToolsOnce   bool                       // next stream sends no tools (step budget hit)
+	endTurnAfterReply   bool                       // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
+	lastStepRepeatKey   string                     // semantic identity of the previous single-tool batch
+	sameToolStreak      int                        // consecutive steps repeating that identity
+	sameToolWarned      bool                       // early repeat warning emitted this user turn
+	stopWarnedTool      string                     // tool the hard-stop already fired for this turn
+	bannedTools         map[string]bool            // tools withdrawn for the rest of this turn by the repeat guard
+	turnTouchedFiles    bool                       // a file-mutating tool succeeded this turn
+	turnChangedPaths    map[string]bool            // exact files covered by targeted verification
+	fetchedContent      bool                       // untrusted web content entered the conversation this turn
+	verifying           bool                       // a compile check is running
+	verifyAttempts      int                        // failed compile checks this turn
+	lastVerification    string                     // exact command/evidence from the latest gate
+	challengedThisTurn  bool                       // self-check challenge already issued this turn
+	reviewedThisTurn    bool                       // optional adversarial review already issued this turn
+	turnReads           map[string]readObservation // read tool + cleaned path -> read state this turn
+	rereadEvents        int                        // re-reads of unchanged files this turn
+	rereadStopAnnounced bool                       // hard-stop explanation for re-read loops emitted
+	lastPreamble        string                     // normalized previous assistant preamble this turn
+	preambleStreak      int                        // consecutive near-duplicate preambles
+	preambleWarned      bool                       // preamble-echo warning emitted this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -659,6 +665,7 @@ func New() *Model {
 	m.lastActivity = time.Now()
 	m.toast = legacyMemoryNotice(memPath)
 	registry.Register(m.switchModeTool())
+	registry.Register(m.requestApprovalTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())
 	// Registered after m exists so the semantic tools read the live host and

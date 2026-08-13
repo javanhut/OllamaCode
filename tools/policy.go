@@ -71,6 +71,11 @@ var toolPolicies = func() map[string]ToolPolicy {
 		m[name] = policy(ModeReadOnly, false, false, false, ToolCostLow)
 	}
 	m["switch_mode"] = policy(ModeReadOnly, true, true, false, ToolCostLow)
+	// request_approval is plan mode's one-shot review checkpoint: the dispatch
+	// loop special-cases it into a permission prompt before the generic gate,
+	// so it is deliberately not marked destructive here. The explicit entry is
+	// still required — unknown tools default to write/auto-only.
+	m["request_approval"] = policy(ModePlan, true, false, false, ToolCostLow)
 	// Todos are session-local state like notes: available in every mode,
 	// safe for small models. todo_read is the read-only half of the pair.
 	for _, name := range []string{"todo_write", "todo_read"} {

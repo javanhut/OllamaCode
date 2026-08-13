@@ -112,7 +112,7 @@ func shellCommandResult(raw string, err error) (string, error) {
 		return "", err
 	}
 	if text == "" {
-		return "[ok]", nil
+		return "[ok] (exit 0, no output)", nil
 	}
 	return text, nil
 }
