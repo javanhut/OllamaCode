@@ -77,22 +77,6 @@ func (m *Model) finishTurnClock() {
 	m.turnStart = time.Time{}
 }
 
-// rebaseTurnTimes shifts the keys after compaction drops the first n messages,
-// so timings stay attached to their turns instead of sliding onto other ones.
-func (m *Model) rebaseTurnTimes(dropped int) {
-	if len(m.turnRecords) == 0 || dropped <= 0 {
-		return
-	}
-	shifted := make(map[int]turnRecord, len(m.turnRecords))
-	for k, v := range m.turnRecords {
-		if k-dropped >= 0 {
-			shifted[k-dropped] = v
-		}
-	}
-	m.turnRecords = shifted
-	m.turnAnchor -= dropped
-}
-
 // thinkingBlock replays a finished turn's reasoning when /show_thinking is on.
 // It's indented and dimmed so it reads as an aside, not as the answer.
 func (m *Model) thinkingBlock(userIdx, width int) string {

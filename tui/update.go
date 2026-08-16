@@ -960,19 +960,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case compactDoneMsg:
 		m.compacting = false
 		m.toast = "context compacted"
-		// Store the summary in the volatile tail (archiveSummary) and DROP the
-		// compacted messages, rather than prepending a system message into
-		// history. This keeps m.history append-only so the KV-cache prefix
-		// (systemPrompt + unchanged history) never shifts.
+		// Store the summary in the volatile tail (archiveSummary) and move the
+		// archive boundary, rather than prepending a system message into history
+		// or slicing the log. The KV-cache prefix (systemPrompt + unchanged
+		// history) never shifts, the transcript keeps the conversation the user
+		// actually had, and every index into the log — turn timings, the turn
+		// anchor — stays valid, so nothing has to be rebased.
 		idx := min(msg.index, len(m.history))
 		m.archiveSummary = msg.summary
-		m.history = append([]api.Message(nil), m.history[idx:]...)
-		m.rebaseTurnTimes(idx)
+		m.archivedThrough = idx
 		// The measured counts describe the PRE-compaction prompt, and so does the
 		// in-flight turn's (compaction starts before the request goes out).
 		// Leaving them would re-fire compaction from endTurnTail and halve the
 		// history twice. Fall back to the estimate until a fresh count lands.
 		m.lastPromptEval, m.prevPromptEval = 0, 0
+		// Same reason, and endTurnTail compacts again on this one at 90%: left
+		// stale-high it fires a second pass on the halved history.
+		m.totalTokens = 0
 		m.refreshTranscript()
 
 		// The turn was killed mid-flight by a context-overflow refusal and is

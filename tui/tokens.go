@@ -102,7 +102,9 @@ func (m *Model) displayTokens() int {
 	if !m.streaming && m.pending == nil {
 		return n
 	}
-	est := estimateMsgsTokens(m.history)
+	// The model's view, not the log: this number is context in use against
+	// num_ctx, and the log keeps everything compaction archived away.
+	est := estimateMsgsTokens(m.deriveModelMessages())
 	if m.streamBuf != nil {
 		est += estimateTokensLen(m.streamBuf.Len())
 	}

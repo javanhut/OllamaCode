@@ -204,7 +204,8 @@ func (m *Model) interruptTurn() tea.Cmd {
 // overflow path, where the PROVIDER refused the request, so a prune that merely
 // clears our own threshold has not proved anything.
 func (m *Model) compactContext(force bool) tea.Cmd {
-	if len(m.history) < 6 || m.compacting {
+	visible := m.deriveModelMessages()
+	if len(visible) < 6 || m.compacting {
 		return nil
 	}
 
@@ -212,7 +213,7 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 	// free, and on a tool-heavy turn it clears the threshold on its own so the
 	// model round-trip below never has to happen. Only what pruning can't
 	// reclaim falls through to summarization.
-	if before := estimateMsgsTokens(m.history); pruneToolResults(m.history) > 0 {
+	if before := estimateMsgsTokens(visible); m.pruneToolResults() {
 		// The measured counts describe the PRE-prune request, but zeroing them
 		// hands the decision back to the estimate — which, whenever the
 		// measurement is what fired this pass, is BY DEFINITION below the
@@ -220,7 +221,8 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 		// keep cancelling it every time, while the real context grew to the
 		// provider's hard refusal. Subtract what pruning actually reclaimed and
 		// let the measurement stay authoritative.
-		reclaimed := before - estimateMsgsTokens(m.history)
+		visible = m.deriveModelMessages()
+		reclaimed := before - estimateMsgsTokens(visible)
 		m.lastPromptEval = max(0, m.lastPromptEval-reclaimed)
 		m.prevPromptEval = max(0, m.prevPromptEval-reclaimed)
 		if !force && !m.shouldCompact() {
@@ -232,12 +234,15 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 	m.compacting = true
 	m.toast = "compacting & compressing..."
 
-	mid := len(m.history) / 2
-	toCompact := m.history[:mid]
+	// Halve the MODEL's view, and report the boundary as an index into the log,
+	// since that is what compactDoneMsg moves. The log itself is untouched.
+	half := len(visible) / 2
+	mid := m.archivedThrough + half
+	toCompact := visible[:half]
 
 	var conversation strings.Builder
 	// Carry the prior rolling summary forward so repeated compactions don't lose
-	// older context (it no longer lives in m.history).
+	// older context (it is behind the archive boundary now).
 	if m.archiveSummary != "" {
 		conversation.WriteString("[prior summary]: " + m.archiveSummary + "\n")
 	}

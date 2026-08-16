@@ -34,6 +34,8 @@ var slashCommands = []struct {
 	{"/sessions", "list saved sessions"},
 	{"/archive", "retrieve compressed archive"},
 	{"/undo", "revert the last turn's file changes"},
+	{"/rewind", "drop the last n turns of conversation (default 1)"},
+	{"/fork", "branch the conversation into a saved session"},
 	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},

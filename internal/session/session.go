@@ -29,6 +29,14 @@ type Session struct {
 	Workspace string        `json:"workspace,omitempty"`
 	Todos     []Todo        `json:"todos,omitempty"`
 	Messages  []api.Message `json:"messages"`
+	// Boundaries into Messages, which is an append-only log: the model sees
+	// everything from ArchivedThrough on, with tool results before
+	// PrunedThrough reduced to their headline. Absent in sessions saved before
+	// they existed, and zero is exactly right there — the whole log was
+	// model-visible, which is what those sessions meant.
+	ArchiveSummary  string `json:"archive_summary,omitempty"`
+	ArchivedThrough int    `json:"archived_through,omitempty"`
+	PrunedThrough   int    `json:"pruned_through,omitempty"`
 }
 
 // testDirOverride, when non-empty, replaces the user-config session dir. Only

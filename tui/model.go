@@ -362,8 +362,23 @@ type Model struct {
 	prevPromptEval int
 
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)
-	compacting     bool   // guards against overlapping compaction passes
-	retrieving     bool   // RAG retrieval is gating the model call for this turn
+	// m.history is the append-only log of the conversation: a message that lands
+	// in it is never moved, rewritten, or dropped for the rest of the session.
+	// What the MODEL sees is derived from it — deriveModelMessages is the only
+	// projection, and these two boundaries are the only way to change it.
+	// Compaction and pruning used to mutate the slice, which meant every reader
+	// keyed to a position (turn timings, the overflow yardstick, the measured
+	// token counts) had to be told separately and one of them always wasn't.
+	//
+	// ponytail: the log is unbounded — a session that used to shed messages at
+	// every compaction now keeps them all, in memory and in the saved session
+	// file. Text, so megabytes at worst; if a session ever gets long enough to
+	// care, spill the pre-archive prefix to disk and leave the boundaries
+	// pointing at it. Same projection, one more backing store.
+	archivedThrough int  // messages before this are compacted away; archiveSummary stands in for them
+	prunedThrough   int  // tool results before this project as their envelope headline only
+	compacting      bool // guards against overlapping compaction passes
+	retrieving      bool // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
 	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch

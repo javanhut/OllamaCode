@@ -512,6 +512,26 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.providerCommand(strings.TrimSpace(strings.TrimPrefix(val, "/provider")))
 			return m, nil
 		}
+		if val == "/save" || strings.HasPrefix(val, "/save ") {
+			m.input.Reset()
+			m.saveCommand(strings.TrimSpace(strings.TrimPrefix(val, "/save")))
+			return m, nil
+		}
+		if val == "/load" || strings.HasPrefix(val, "/load ") {
+			m.input.Reset()
+			m.loadCommand(strings.TrimSpace(strings.TrimPrefix(val, "/load")))
+			return m, nil
+		}
+		if val == "/fork" || strings.HasPrefix(val, "/fork ") {
+			m.input.Reset()
+			m.forkCommand(strings.TrimSpace(strings.TrimPrefix(val, "/fork")))
+			return m, nil
+		}
+		if val == "/rewind" || strings.HasPrefix(val, "/rewind ") {
+			m.input.Reset()
+			m.rewindCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rewind")))
+			return m, nil
+		}
 		if val == "/research" || strings.HasPrefix(val, "/research ") {
 			m.input.Reset()
 			return m, m.researchCommand(strings.TrimSpace(strings.TrimPrefix(val, "/research")))
@@ -545,6 +565,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.pending = nil
 			m.queue = nil
 			m.history = nil
+			m.archiveSummary, m.archivedThrough, m.prunedThrough = "", 0, 0
 			m.turnRecords = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
@@ -745,69 +766,6 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			m.toast = "retrieved archive"
-			return m, nil
-		case "/save":
-			m.input.Reset()
-			name := strings.TrimSpace(strings.TrimPrefix(val, "/save"))
-			if name == "" {
-				name = time.Now().Format("2006-01-02_15-04-05")
-			}
-			s := session.Session{
-				Name:      name,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-				Model:     m.modelName,
-				Mode:      m.mode.String(),
-				Notes:     m.notes.get(),
-				Workspace: workspaceRoot(),
-				Messages:  append([]api.Message(nil), m.history...),
-			}
-			for _, it := range m.todos.get() {
-				s.Todos = append(s.Todos, session.Todo{Content: it.Content, Status: string(it.Status)})
-			}
-			if err := session.Save(s); err != nil {
-				m.toast = "save failed: " + err.Error()
-			} else {
-				m.toast = "saved session '" + name + "'"
-			}
-			return m, nil
-		case "/load":
-			m.input.Reset()
-			name := strings.TrimSpace(strings.TrimPrefix(val, "/load"))
-			if name == "" {
-				m.toast = "usage: /load <name>"
-				return m, nil
-			}
-			s, err := session.Load(name)
-			if err != nil {
-				m.toast = "load failed: " + err.Error()
-				return m, nil
-			}
-			m.history = append([]api.Message(nil), s.Messages...)
-			m.turnRecords = nil // timings belong to the session we just left
-			m.notes.set(s.Notes)
-			m.modelName = s.Model
-			if s.Mode != "" {
-				switch s.Mode {
-				case "explore":
-					m.mode = ExploreMode
-				case "plan":
-					m.mode = PlanMode
-				case "write":
-					m.mode = WriteMode
-				case "auto":
-					m.mode = AutoMode
-				}
-			}
-			m.cfg.Model = m.modelName
-			saveConfig(m.cfg)
-			// Save the session's model as the default first: routing may re-point
-			// the active model for the restored mode, and that must not persist.
-			m.applyRoute(m.mode)
-			m.resolveProfile()
-			m.refreshTranscript()
-			m.viewport.GotoBottom()
-			m.toast = "loaded session '" + name + "'"
 			return m, nil
 		case "/sessions":
 			m.input.Reset()

@@ -62,6 +62,12 @@ func (m *Model) autosaveSession() {
 		Mode:      m.mode.String(),
 		Workspace: workspaceRoot(),
 		Messages:  append([]api.Message(nil), m.history...),
+		// The log alone is not the state: without the boundaries a resumed
+		// session hands the model back every message compaction already paid to
+		// summarize away.
+		ArchiveSummary:  m.archiveSummary,
+		ArchivedThrough: m.archivedThrough,
+		PrunedThrough:   m.prunedThrough,
 	}
 	if m.notes != nil {
 		s.Notes = m.notes.get()
@@ -97,6 +103,7 @@ func (m *Model) restoreSession(id string) {
 	}
 
 	m.history = append([]api.Message(nil), s.Messages...)
+	m.archiveSummary, m.archivedThrough, m.prunedThrough = s.ArchiveSummary, s.ArchivedThrough, s.PrunedThrough
 	m.turnRecords = nil // timings belong to the process that produced them
 	if m.notes != nil && s.Notes != "" {
 		m.notes.set(s.Notes)

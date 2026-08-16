@@ -36,17 +36,43 @@ func (m *Model) assembleMessages(ragBlock string) []api.Message {
 	dyn := api.Message{Role: "system", Content: m.buildDynamicContext(ragBlock)}
 	base := estimateMsgTokens(sys) + estimateMsgTokens(dyn)
 
-	start := historyWindow(m.history, budget-base)
+	visible := m.deriveModelMessages()
+	start := historyWindow(visible, budget-base)
 	if start > 0 {
 		// This is context loss with NO archive summary behind it — compaction
 		// should have run before it came to this. It shipped silent; say it out loud.
 		m.toast = fmt.Sprintf("context full — dropped %d oldest messages", start)
 	}
 
-	out := make([]api.Message, 0, len(m.history)-start+2)
+	out := make([]api.Message, 0, len(visible)-start+2)
 	out = append(out, sys)
-	out = append(out, m.history[start:]...)
+	out = append(out, visible[start:]...)
 	out = append(out, dyn)
+	return out
+}
+
+// deriveModelMessages projects the model's view out of the append-only log: the
+// messages after the compaction boundary, with tool results older than the
+// prune boundary reduced to their envelope headline. It is the ONLY place the
+// log becomes model input. Anything reading m.history directly — the
+// transcript, the citation gate, the turn anchor — is reading the RECORD, which
+// is a different question and must not be confused for this one.
+//
+// ponytail: re-derived per call rather than cached. The window is bounded by
+// the context limit, so this is a few hundred pointer copies plus a stub encode
+// for the pruned tail. If a profiler ever disagrees, cache it against
+// len(m.history) plus the two boundaries — exactly the key that invalidates
+// correctly.
+func (m *Model) deriveModelMessages() []api.Message {
+	start := min(m.archivedThrough, len(m.history))
+	out := make([]api.Message, 0, len(m.history)-start)
+	for i := start; i < len(m.history); i++ {
+		msg := m.history[i]
+		if msg.Role == "tool" && i < m.prunedThrough {
+			msg.Content = prunedToolContent(msg.Content)
+		}
+		out = append(out, msg)
+	}
 	return out
 }
 
@@ -98,10 +124,10 @@ func (m *Model) observePromptEval(n int) {
 // whenever it is larger, because it sees the messages appended since the last
 // measurement.
 func (m *Model) shouldCompact() bool {
-	if len(m.history) < 6 {
+	if len(m.history)-m.archivedThrough < 6 {
 		return false
 	}
-	pressure := estimateMsgsTokens(m.history)
+	pressure := estimateMsgsTokens(m.deriveModelMessages())
 	if measured := min(m.lastPromptEval, m.prevPromptEval); measured > pressure {
 		pressure = measured
 	}
@@ -118,7 +144,7 @@ func (m *Model) shouldCompact() bool {
 // provider cares about, and 40 short messages replaced by one longer summary
 // would pass a count check while overflowing identically.
 func (m *Model) requestEstimate() int {
-	return estimateMsgsTokens(m.history) + estimateTokens(m.archiveSummary)
+	return estimateMsgsTokens(m.deriveModelMessages()) + estimateTokens(m.archiveSummary)
 }
 
 // keepIntactToolResults is how many of the newest tool results survive pruning
@@ -127,40 +153,50 @@ func (m *Model) requestEstimate() int {
 // with room to spare.
 const keepIntactToolResults = 8
 
-// pruneToolResults shrinks the BODIES of old tool-result messages in place,
-// leaving the envelope's ok+summary (and the spill path, if the output was
-// saved) as the one-line stub: the model still knows the call happened and how
-// it went. Old tool output is where a long session's tokens actually go, and
-// reclaiming it costs no model round-trip.
+// pruneToolResults advances the prune boundary past everything older than the
+// newest keepIntactToolResults tool results. Old tool output is where a long
+// session's tokens actually go, and reclaiming it costs no model round-trip.
 //
-// Nothing is added, removed or reordered and ToolName/ToolCalls are untouched,
-// so the assistant-call->result pairing, historyWindow's leading-"tool" nudge,
-// the OpenAI adapter's positional tool_call_id correlation and the index-keyed
-// turn timings all keep working with no extra bookkeeping. Dropping
-// evidence/data/hint outright (rather than writing a marker) is what makes a
-// second pass a no-op instead of nesting stubs. Returns how many it pruned.
-func pruneToolResults(history []api.Message) int {
-	pruned, kept := 0, 0
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != "tool" {
+// A boundary, not a rewrite: the log keeps the full result, so the transcript
+// still shows what the tool said, /undo and a saved session still carry it, and
+// re-pruning is idempotent by construction rather than by a marker check. The
+// projection stubs; the record never loses anything. Reports whether the
+// boundary moved.
+func (m *Model) pruneToolResults() bool {
+	boundary := 0
+	kept := 0
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role != "tool" {
 			continue
 		}
-		if kept < keepIntactToolResults {
-			kept++
-			continue
+		kept++
+		if kept > keepIntactToolResults {
+			boundary = i + 1
+			break
 		}
-		env, ok := tools.DecodeToolResult(history[i].Content)
-		if !ok || (len(env.Evidence) == 0 && len(env.Data) == 0 && env.Hint == "") {
-			continue // not an envelope, or already pruned — nothing left to drop
-		}
-		stub, err := json.Marshal(tools.ResultEnvelope{
-			OK: env.OK, Summary: env.Summary, Truncated: true, SpillPath: env.SpillPath,
-		})
-		if err != nil || len(stub) >= len(history[i].Content) {
-			continue
-		}
-		history[i].Content = string(stub)
-		pruned++
 	}
-	return pruned
+	if boundary <= m.prunedThrough {
+		return false
+	}
+	m.prunedThrough = boundary
+	return true
+}
+
+// prunedToolContent is the projected form of an aged tool result: the
+// envelope's ok+summary, plus the spill path when the full output was saved to
+// disk, so the model still knows the call happened, how it went, and where to
+// read the detail back from. Content it cannot decode as an envelope is passed
+// through — better a large unpruned result than a mangled one.
+func prunedToolContent(content string) string {
+	env, ok := tools.DecodeToolResult(content)
+	if !ok || (len(env.Evidence) == 0 && len(env.Data) == 0 && env.Hint == "") {
+		return content
+	}
+	stub, err := json.Marshal(tools.ResultEnvelope{
+		OK: env.OK, Summary: env.Summary, Truncated: true, SpillPath: env.SpillPath,
+	})
+	if err != nil || len(stub) >= len(content) {
+		return content
+	}
+	return string(stub)
 }

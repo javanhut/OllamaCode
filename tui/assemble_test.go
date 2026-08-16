@@ -136,18 +136,34 @@ func toolHistory(n int) []api.Message {
 	return h
 }
 
-func TestPruneToolResultsKeepsNewestIntact(t *testing.T) {
+func TestPruneToolResultsStubsOnlyTheProjection(t *testing.T) {
 	const rounds = 12
-	h := toolHistory(rounds)
-	if got := pruneToolResults(h); got != rounds-keepIntactToolResults {
-		t.Fatalf("pruned %d results, want %d", got, rounds-keepIntactToolResults)
+	m := &Model{history: toolHistory(rounds)}
+	logBefore := make([]string, len(m.history))
+	for i := range m.history {
+		logBefore[i] = m.history[i].Content
 	}
+
+	if !m.pruneToolResults() {
+		t.Fatal("prune boundary did not move")
+	}
+
+	// The RECORD keeps every byte: the transcript still shows what the tool
+	// said, and a saved session still carries it.
+	for i := range m.history {
+		if m.history[i].Content != logBefore[i] {
+			t.Fatalf("pruning rewrote the log at %d", i)
+		}
+	}
+
+	// The PROJECTION is what shrinks.
 	seen := 0
-	for i := len(h) - 1; i >= 0; i-- {
-		if h[i].Role != "tool" {
+	visible := m.deriveModelMessages()
+	for i := len(visible) - 1; i >= 0; i-- {
+		if visible[i].Role != "tool" {
 			continue
 		}
-		env, ok := tools.DecodeToolResult(h[i].Content)
+		env, ok := tools.DecodeToolResult(visible[i].Content)
 		if !ok {
 			t.Fatalf("message %d stopped decoding as an envelope", i)
 		}
@@ -165,48 +181,46 @@ func TestPruneToolResultsKeepsNewestIntact(t *testing.T) {
 		}
 		seen++
 	}
+	if seen != rounds {
+		t.Fatalf("projected %d tool results, want %d", seen, rounds)
+	}
 }
 
 func TestPruneToolResultsIdempotent(t *testing.T) {
-	h := toolHistory(12)
-	pruneToolResults(h)
-	before := make([]string, len(h))
-	for i := range h {
-		before[i] = h[i].Content
+	m := &Model{history: toolHistory(12)}
+	if !m.pruneToolResults() {
+		t.Fatal("first pass did not move the boundary")
 	}
-	if got := pruneToolResults(h); got != 0 {
-		t.Fatalf("second pass pruned %d, want 0 — stubs are being re-stubbed", got)
+	boundary := m.prunedThrough
+	if m.pruneToolResults() {
+		t.Fatal("second pass moved the boundary again with no new results")
 	}
-	for i := range h {
-		if h[i].Content != before[i] {
-			t.Fatalf("second pass rewrote message %d", i)
-		}
+	if m.prunedThrough != boundary {
+		t.Fatalf("boundary drifted: %d -> %d", boundary, m.prunedThrough)
 	}
 }
 
 func TestPruneToolResultsPreservesToolPairing(t *testing.T) {
-	h := toolHistory(12)
+	m := &Model{history: toolHistory(12)}
 	type shape struct {
 		role, name string
 		calls      int
 	}
-	before := make([]shape, len(h))
-	for i, mm := range h {
+	before := make([]shape, len(m.history))
+	for i, mm := range m.history {
 		before[i] = shape{mm.Role, mm.ToolName, len(mm.ToolCalls)}
 	}
 
-	pruneToolResults(h)
+	m.pruneToolResults()
 
-	if len(h) != len(before) {
-		t.Fatalf("pruning changed history length: %d -> %d", len(before), len(h))
+	visible := m.deriveModelMessages()
+	if len(visible) != len(before) {
+		t.Fatalf("projection changed length: %d -> %d", len(before), len(visible))
 	}
-	for i, mm := range h {
+	for i, mm := range visible {
 		if (shape{mm.Role, mm.ToolName, len(mm.ToolCalls)}) != before[i] {
 			t.Fatalf("message %d changed shape: %+v", i, mm)
 		}
-	}
-	if start := historyWindow(h, 200); start < len(h) && h[start].Role == "tool" {
-		t.Fatalf("window begins on a dangling tool result after pruning (start=%d)", start)
 	}
 }
 

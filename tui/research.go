@@ -64,9 +64,9 @@ func researchTodos() []todoItem {
 }
 
 // researchThreadActive reports whether the recipe is already in the history.
-// Limitation: this is a history scan, so /clear (or a compaction aggressive
-// enough to drop the system message) ends the thread and a bare /research
-// falls back to the usage toast.
+// It scans the LOG, not the model's view, so compaction no longer ends a
+// thread it archived away — only /clear does, and a bare /research then falls
+// back to the usage toast.
 func (m *Model) researchThreadActive() bool {
 	for _, msg := range m.history {
 		if msg.Role == "system" && strings.HasPrefix(msg.Content, researchMarker) {

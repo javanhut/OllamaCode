@@ -44,29 +44,38 @@ func TestTimingFooterSplitsThinkAndTools(t *testing.T) {
 	}
 }
 
-// A turn's timing has to survive compaction, which drops messages off the front
-// of history and shifts every index that timings are keyed by.
-func TestRebaseTurnTimesAfterCompaction(t *testing.T) {
-	m := &Model{
-		turnAnchor: 6,
-		turnRecords: map[int]turnRecord{
-			0: {total: time.Second},
-			4: {total: 2 * time.Second},
-			6: {total: 3 * time.Second},
-		},
+// A turn's timing is keyed by its position in the log, and compaction no longer
+// moves anything: it advances a boundary. The rebasing this test used to cover
+// existed because compaction sliced the front off history, and every index-keyed
+// reader had to be told. Nothing to tell now — that is the point.
+func TestTurnTimesSurviveCompaction(t *testing.T) {
+	m := overflowTestModel(t)
+	m.turnRecords = map[int]turnRecord{
+		0: {total: time.Second},
+		4: {total: 2 * time.Second},
+		6: {total: 3 * time.Second},
 	}
-	m.rebaseTurnTimes(4)
-	if _, ok := m.turnRecords[0]; !ok || m.turnRecords[0].total != 2*time.Second {
-		t.Errorf("index 4 did not move to 0: %v", m.turnRecords)
+	m.turnAnchor = 6
+	logged := len(m.history)
+
+	m.Update(compactDoneMsg{summary: "the earlier conversation", index: 4})
+
+	if len(m.history) != logged {
+		t.Fatalf("compaction mutated the log: %d -> %d", logged, len(m.history))
 	}
-	if m.turnRecords[2].total != 3*time.Second {
-		t.Errorf("index 6 did not move to 2: %v", m.turnRecords)
+	if m.archivedThrough != 4 {
+		t.Fatalf("archive boundary = %d, want 4", m.archivedThrough)
 	}
-	if len(m.turnRecords) != 2 {
-		t.Errorf("dropped turns should be forgotten: %v", m.turnRecords)
+	if len(m.deriveModelMessages()) != logged-4 {
+		t.Fatalf("model view = %d messages, want %d", len(m.deriveModelMessages()), logged-4)
 	}
-	if m.turnAnchor != 2 {
-		t.Errorf("live anchor = %d, want 2", m.turnAnchor)
+	for _, key := range []int{0, 4, 6} {
+		if _, ok := m.turnRecords[key]; !ok {
+			t.Errorf("timing at index %d was disturbed: %v", key, m.turnRecords)
+		}
+	}
+	if m.turnAnchor != 6 {
+		t.Errorf("turn anchor moved to %d", m.turnAnchor)
 	}
 }
 

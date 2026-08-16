@@ -62,6 +62,13 @@ session notes), so a session survives the process that ran it.
   restores the last completed turn and announces the recovery in a toast.
 - `--resume` with nothing saved starts fresh and says "nothing to resume" —
   it never fails.
+- `/rewind` and `/fork` move the conversation, not the files. `/rewind 2` drops
+  your last two turns and everything that answered them, then continues from
+  there; the discarded tail is saved as a `rewind_<timestamp>` session first, so
+  it is never a one-way door. `/fork 2 try-b` writes that same point to a named
+  session and leaves the live conversation alone — `/load try-b` picks the
+  branch up later. Neither reverts a file edit; that is `/undo`, which pops one
+  checkpoint at a time and knows exactly what it wrote.
 - `/undo` survives restarts: the checkpoint stack is persisted per workspace
   (capped at 25 turns, newest first), so after `--resume` you can still rewind
   file changes made before the process exited.
@@ -205,6 +212,8 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/load <name>` | Restore one |
 | `/sessions` | List saved sessions |
 | `/archive` | Retrieve compacted history from the KV archive |
+| `/rewind [n]` | Drop the last n of your turns and continue from there (default 1) |
+| `/fork [n] [name]` | Save the conversation as it stood n turns back as a new session |
 | `/undo` | Revert the file changes from the last turn |
 | `/diff` | View the last turn's diffs full-screen |
 | `/copy` | Copy the last response to the clipboard |
