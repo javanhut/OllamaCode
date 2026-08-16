@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -74,5 +77,64 @@ func TestApplyEdit_MultilineWhitespace(t *testing.T) {
 	}
 	if !strings.Contains(got, "        doNew()") {
 		t.Fatalf("expected re-indented doNew, got %q", got)
+	}
+}
+
+// A preview with a side effect would be worse than the bug it fixes: the
+// permission modal runs PreviewEdit before the user has approved anything.
+func TestPreviewEdit_DoesNotTouchDisk(t *testing.T) {
+	root := t.TempDir()
+	pinJail(t, root)
+	path := filepath.Join(root, "sample.txt")
+	before := "func f() {\n\treturn 1\n}\n"
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tier 2: the model's old_string is indented with spaces, the file uses a tab.
+	diff, ok := PreviewEdit(path, jailArgs(t, map[string]any{
+		"path": path, "old_string": "    return 1", "new_string": "return 2",
+	}))
+	if !ok {
+		t.Fatal("expected the edit to resolve")
+	}
+	if !strings.Contains(diff, "-\treturn 1") {
+		t.Fatalf("preview should show the file's real tab-indented line:\n%s", diff)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != before {
+		t.Fatalf("PreviewEdit wrote to disk:\n got %q\nwant %q", after, before)
+	}
+}
+
+// A 6000-line file used to blow past unifiedDiff's size guard, so the approval
+// modal showed only "(diff omitted: file too large)" — less than the
+// claim-based preview it replaced.
+func TestPreviewEdit_LargeFile(t *testing.T) {
+	root := t.TempDir()
+	pinJail(t, root)
+	path := filepath.Join(root, "huge.txt")
+	lines := make([]string, 6000)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, ok := PreviewEdit(path, jailArgs(t, map[string]any{
+		"path": path, "old_string": "line 3000", "new_string": "LINE THREE THOUSAND",
+	}))
+	if !ok {
+		t.Fatal("expected the edit to resolve")
+	}
+	if !strings.Contains(diff, "-line 3000") || !strings.Contains(diff, "+LINE THREE THOUSAND") {
+		t.Fatalf("preview should show the replaced line:\n%s", diff)
+	}
+	if !strings.Contains(diff, "@@ -2998,") {
+		t.Fatalf("hunk header should keep the file's real line numbers:\n%s", diff)
 	}
 }

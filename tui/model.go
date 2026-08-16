@@ -21,6 +21,7 @@ import (
 	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/internal/calibration"
 	"github.com/javanhut/ollama_code/internal/companion"
+	"github.com/javanhut/ollama_code/internal/lsp"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/semantic"
 	"github.com/javanhut/ollama_code/internal/storage"
@@ -139,10 +140,14 @@ type config struct {
 	Welcome       *bool                      `json:"welcome,omitempty"`        // nil/true = show welcome panel on empty chat
 	Verify        *bool                      `json:"verify,omitempty"`         // nil/true = auto compile-check on file edits
 	VerifyCmd     string                     `json:"verify_cmd,omitempty"`     // override the auto-detected check
+	Format        *bool                      `json:"format,omitempty"`         // nil/true = run the file's formatter on write
+	LSP           *bool                      `json:"lsp,omitempty"`            // nil/true = use installed language servers for code intelligence
+	LSPServers    map[string]lsp.Server      `json:"lsp_servers,omitempty"`    // extra/override language servers, keyed by name
 	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
 	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
 	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
 	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
+	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
 	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by model name
 	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
 	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
@@ -310,6 +315,11 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// deferredAdvisory holds a harness message that arrived while a tool batch
+	// was in flight (an /undo typed mid-turn). It is appended once the batch's
+	// results are in history, so it never splices between a tool_calls message
+	// and the results that belong to it.
+	deferredAdvisory string
 	// denialFeedbackTool is set when the user rejects a permission prompt. The
 	// next message is treated as feedback about that denial, and the rejected
 	// tool stays unavailable for that turn so the model cannot immediately ask
@@ -546,6 +556,13 @@ func New() *Model {
 	if cfg.ShellSandbox != nil {
 		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
 	}
+	if cfg.Format != nil {
+		tools.SetFormatEnabled(*cfg.Format)
+	}
+	// Language servers are started lazily on the first code intelligence
+	// question, so configuring the tier here costs nothing in a session that
+	// never asks one.
+	tools.ConfigureLSP(cfg.LSP == nil || *cfg.LSP, workspaceRoot(), cfg.LSPServers)
 	// ... (host setup ...)
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)

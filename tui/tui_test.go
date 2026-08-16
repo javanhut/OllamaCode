@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -600,5 +603,76 @@ func TestNoteFetchedContent(t *testing.T) {
 	)
 	if m.fetchedContent {
 		t.Error("expected no fetchedContent for non-web tool results")
+	}
+}
+
+// The permission modal is the control boundary (docs/safety.md), so its text has
+// to describe the change that will actually land. It used to diff the model's
+// claimed old_string against new_string, which rendered a bare "-" for a
+// start_line/end_line edit no matter how many lines it deleted, and echoed the
+// model's indentation instead of the file's whenever applyEdit matched at
+// tier 2/3 and replaced different text than the claim.
+func TestComputePreviewEditFileResolvesAgainstTheFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	// PreviewEdit reads through jailCheck; another test in this package may have
+	// left the root pinned at the repo.
+	tools.SetWorkspaceRoot(dir)
+	t.Cleanup(func() { tools.SetWorkspaceRoot("") })
+
+	rangePath := filepath.Join(dir, "big.txt")
+	var lines []string
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	if err := os.WriteFile(rangePath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tierPath := filepath.Join(dir, "tier2.txt")
+	if err := os.WriteFile(tierPath, []byte("func f() {\n\treturn 1\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		args string
+		want []string
+	}{
+		{
+			name: "line range shows the deleted lines",
+			args: `{"path":"` + rangePath + `","start_line":4,"end_line":9,"new_string":"small"}`,
+			want: []string{"-line 4", "-line 9", "+small"},
+		},
+		{
+			name: "whitespace-tolerant match shows the file's real text",
+			args: `{"path":"` + tierPath + `","old_string":"    return 1","new_string":"return 2"}`,
+			want: []string{"-\treturn 1", "+\treturn 2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computePreview(tools.ToolCall{Function: tools.ToolCallFunction{
+				Name: "edit_file", Arguments: json.RawMessage(tt.args),
+			}})
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Fatalf("preview missing %q:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
+// parallel_edit fans out subagents that write many files; it used to fall
+// through computePreview's default and show the user nothing but the tool name.
+func TestComputePreviewParallelEditNamesTargetFiles(t *testing.T) {
+	got := computePreview(tools.ToolCall{Function: tools.ToolCallFunction{
+		Name:      "parallel_edit",
+		Arguments: json.RawMessage(`{"tasks":[{"task":"rename X in api","files":["api/a.go","api/b.go"]},{"task":"rename X in tui"}]}`),
+	}})
+	for _, want := range []string{"rename X in api", "api/a.go", "api/b.go", "rename X in tui", "not declared"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("preview missing %q:\n%s", want, got)
+		}
 	}
 }

@@ -99,7 +99,7 @@ func (m *Model) reconcileTodosAtTurnEnd() int {
 	}
 	limit := m.turnStepLimit()
 	if m.mode == AutoMode {
-		limit = 100
+		limit = autoModeMaxSteps
 	}
 	if m.stepCount >= limit || (m.verifyAttempts >= maxVerifyAttempts && m.lastVerification == "") {
 		return 0

@@ -93,6 +93,9 @@ func main() {
 	// ordinary exit. The os.Exit error paths below skip this, as does a crash —
 	// that is what the budget cap and the OS reaper are for.
 	defer tools.CleanupSpills()
+	// Language servers are child processes; without this they outlive the
+	// session that started them.
+	defer tools.CloseLSP()
 	debugPath := ""
 	if f.debug {
 		debugPath, err = filepath.Abs("ocode.log")

@@ -68,6 +68,16 @@ func (m *Model) deriveModelMessages() []api.Message {
 	out := make([]api.Message, 0, len(m.history)-start)
 	for i := start; i < len(m.history); i++ {
 		msg := m.history[i]
+		// Reasoning is display-and-record only, but api.Message tags it
+		// `json:"thinking"` and ChatRequest.Messages reuses that same struct, so
+		// an unstripped copy ships the model its own prior reasoning on every
+		// request — often several times longer than the answer it belongs to,
+		// and several open-weight thinking models degrade when fed it back.
+		// estimateMsgTokens() doesn't count Thinking either, so leaving it in
+		// makes shouldCompact/historyWindow undercount what was actually sent.
+		// Cleared on the copy: m.history keeps it for the transcript,
+		// /show_thinking and saved sessions.
+		msg.Thinking = ""
 		if msg.Role == "tool" && i < m.prunedThrough {
 			msg.Content = prunedToolContent(msg.Content)
 		}

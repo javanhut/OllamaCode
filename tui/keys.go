@@ -386,6 +386,18 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pending.allowAll = true
 		m.state = stateChat
 		return m, m.processPendingTools()
+	case "A":
+		// Persist the decision, then behave exactly like "y". This widens the
+		// safety boundary beyond the current turn, so the rule it saves is shown
+		// in the modal before the key is pressed.
+		i := m.pending.index
+		call := m.pending.calls[i]
+		rule := tools.PermissionRuleFor(call)
+		m.savePermissionRule(rule)
+		m.recordPermission(call, "allowed_by_new_rule")
+		m.pending.started[i] = true
+		m.state = stateChat
+		return m, m.invokeToolCmd(m.pending.gen, i, call)
 	case "n", "esc":
 		i := m.pending.index
 		call := m.pending.calls[i]
@@ -635,9 +647,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			summary, touched := m.undoLast()
 			m.toast = summary
+			slices.Sort(touched) // snaps is a map; keep the advisory's path order stable
 			for _, p := range touched {
 				m.noteFileChanged([]string{p}) // keep the RAG index in sync
 			}
+			m.noteUndoToModel(touched)
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			return m, nil

@@ -43,6 +43,10 @@ type Options struct {
 	// it to checkpoint a child's file-mutating calls into the PARENT turn's
 	// /undo bank, so one undo rewinds a whole delegation. Nil means no hook.
 	Before func(tools.ToolCall)
+	// Permissions forwards the user's configured rules to the executor, so a
+	// deny holds inside a headless run and inside a spawned subagent, not only
+	// at the interactive prompt.
+	Permissions []tools.PermissionRule
 }
 
 // Result is the outcome of a headless run.
@@ -100,7 +104,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 
 	var res Result
 	executor := Executor{Registry: reg, Host: host, Model: opts.Model, NumCtx: opts.NumCtx, StructuredResults: opts.StructuredResults,
-		Before: opts.Before,
+		Before: opts.Before, Permissions: opts.Permissions,
 		Observe: func(event ExecutionEvent) {
 			if opts.Trace == nil {
 				return

@@ -19,6 +19,12 @@ const (
 	recentOutcomesKept  = 12 // round outcome ring length for oscillation detection
 	maxAutoContinues    = 3  // times we nudge the model to keep going on open todos before yielding
 	maxStreamRetries    = 2  // transient stream errors auto-retried per turn before surfacing
+	// autoModeMaxSteps replaces the per-turn round budget in auto mode, which is
+	// meant to run unattended to completion. Every reader of the budget must use
+	// this same number: the step gate, the text-form tool-call fallback and the
+	// turn-end todo reconcile each ask "did this turn run out of budget?", and two
+	// literals drifting apart silently changes whether stale todos get closed.
+	autoModeMaxSteps = 100
 )
 
 func maxStepsFromConfig(c config) int {

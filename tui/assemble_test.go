@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -262,5 +263,33 @@ func TestCompactContextSummarizesWhenNothingToPrune(t *testing.T) {
 	}
 	if !m.compacting {
 		t.Fatal("summarization path must mark the model busy compacting")
+	}
+}
+
+func TestDeriveModelMessagesStripsThinking(t *testing.T) {
+	const reasoning = "SECRET_REASONING_TOKENS"
+	m := &Model{history: []api.Message{
+		msg("user", "question"),
+		{Role: "assistant", Content: "answer", Thinking: reasoning},
+	}}
+
+	for _, v := range m.deriveModelMessages() {
+		if v.Thinking != "" {
+			t.Fatalf("projection carried reasoning back to the model: %q", v.Thinking)
+		}
+	}
+
+	// The RECORD keeps it — the transcript and /show_thinking read this.
+	if m.history[1].Thinking != reasoning {
+		t.Fatalf("log lost its reasoning: %q", m.history[1].Thinking)
+	}
+
+	// The property that actually matters: the wire request must not contain it.
+	body, err := json.Marshal(api.ChatRequest{Model: "m", Messages: m.deriveModelMessages()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), reasoning) {
+		t.Fatalf("reasoning serialized into the request: %s", body)
 	}
 }

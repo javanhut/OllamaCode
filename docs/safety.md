@@ -20,8 +20,14 @@ git operations.
 ```
 y / Enter   allow once
 a           allow every pending call this turn
+A           always allow — saves a rule to config.json
 n / Esc     deny
 ```
+
+`A` is the only answer that outlives the session. The modal prints the exact
+rule it will write before you press it: a bare tool name for most tools, and for
+`run_shell` a prefix rule on the command's first word (`npm *`), because a rule
+pinned to one exact command line would never match again.
 
 Denial ends the current model turn immediately. Calls in the same batch that
 have not started are cancelled, Ocode asks what should change or why the call
@@ -31,6 +37,20 @@ model can retry or rephrase.
 
 In auto mode, prompts are suppressed only for paths **inside the working
 directory**. Anything outside still asks.
+
+## Permission rules
+
+`permissions` in `config.json` narrows or widens the prompt per tool, path, or
+command — see [configuration](configuration.md#permissions) for the fields.
+`deny` outranks `ask`, which outranks `allow`, regardless of the order the rules
+appear in, so a broad allow can never widen past a narrow deny written earlier.
+
+A `deny` rule is the one decision enforced everywhere rather than only at the
+prompt: it also stops the call in a headless run and inside a spawned subagent,
+neither of which has anyone to ask. It also outranks the batch-wide `a`, so a
+key pressed for one call cannot waive a rule for another. `allow` and `ask` only
+answer the question "should this prompt?", which is the interactive session's
+question alone.
 
 ## Workspace confinement
 
@@ -155,16 +175,23 @@ the part it can ignore.
 
 If a turn touched files, it doesn't end on broken code. Go changes run tests for
 the affected package directories before `go build ./...`; Rust runs
-`cargo test --no-run` before `cargo check`; TypeScript runs `tsc --noEmit`.
-`verify_cmd` remains an explicit user override. Each result is bound to a hash
+`cargo test --no-run` before `cargo check`; TypeScript runs `tsc --noEmit`;
+Python byte-compiles the changed files and runs `pytest` on any changed test
+files. `verify_cmd` remains an explicit user override.
+
+Type checkers are deliberately not part of the pass/fail gate. `pyright` and
+`mypy` report findings in code the turn never touched, and gating on those would
+trap the model repairing someone else's annotations; they belong in the
+informational channel below instead. Each result is bound to a hash
 of the changed files, so an edit made during or after a check invalidates stale
 evidence. On failure the model is re-invoked with the errors, up to 4 attempts.
 
-When a linter is installed (`staticcheck` for Go), the gate also runs it scoped
-to the changed packages and folds capped per-file diagnostics into the repair
-message, so the model gets specifics rather than just "build failed". Lint
-findings never decide pass/fail — they are informational, and a missing linter
-binary is silent. In `treesitter` builds, projects with no manifest check get a
+When a linter is installed (`staticcheck` for Go, `ruff` for Python), the gate
+also runs it scoped to the changed files and folds capped per-file diagnostics
+into the repair message, so the model gets specifics rather than just "build
+failed". Language server diagnostics ride the same channel when a server is
+running, which covers languages no linter here knows. Neither ever decides
+pass/fail — they are informational, and a missing binary is silent. In `treesitter` builds, projects with no manifest check get a
 weaker objective signal instead: syntax errors in changed files fail the gate
 the same way.
 

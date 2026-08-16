@@ -321,12 +321,15 @@ func WriteFileTool() Tool {
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()
 			}
-			if err := os.WriteFile(a.Path, []byte(a.Content), mode); err != nil {
+			// Format after the syntax gate, before the write: the byte count,
+			// hash, and diff below then describe what landed on disk.
+			content := string(formatBytes(a.Path, []byte(a.Content)))
+			if err := os.WriteFile(a.Path, []byte(content), mode); err != nil {
 				return "", err
 			}
 			hash, _ := calculateHash(a.Path)
-			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash)
-			if diff := unifiedDiff(string(old), a.Content, a.Path); diff != "" {
+			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(content), a.Path, hash)
+			if diff := unifiedDiff(string(old), content, a.Path); diff != "" {
 				result += "\n" + diff
 			}
 			return result, nil

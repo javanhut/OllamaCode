@@ -819,7 +819,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// native call (guarded by the step budget so it can't loop forever).
 		limit := m.turnStepLimit()
 		if m.mode == AutoMode {
-			limit = 100
+			limit = autoModeMaxSteps
 		}
 		parsedRaw := m.tools.ParseToolCallsFromContent(finalAssistant)
 		parsed := dedupeCalls(parsedRaw)

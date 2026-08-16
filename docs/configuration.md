@@ -34,6 +34,10 @@ outranks a stored key. Prefer that over typing the key.
 | `dream` | `false` disables idle reflection |
 | `verify` | `false` disables the compile check after edits |
 | `verify_cmd` | Override the auto-detected check, e.g. `"go build ./... && go test ./..."` |
+| `format` | `false` disables running the file's formatter on write; on by default when the formatter is installed |
+| `lsp` | `false` disables language-server-backed code intelligence; on by default when a server is installed |
+| `lsp_servers` | Extra or overriding language servers, see below |
+| `permissions` | Allow/ask/deny rules for tool calls, see below |
 | `trace` | Opt in to redacted JSONL execution tracing (off by default) |
 | `trace_path` | Optional trace destination; defaults to the OS cache directory |
 | `shell_sandbox` | `false` disables the OS-level sandbox around `run_shell` (sandbox-exec on macOS, bwrap on Linux); on by default |
@@ -185,6 +189,70 @@ Unclassified MCP tools default to Write/Auto mode and require approval. Marking
 a whole server read-only is a trust decision because MCP annotations are
 advisory rather than a security boundary. Servers advertising tool-list change
 notifications are refreshed atomically while the session is running.
+
+## `permissions`
+
+Rules narrow or widen the approval prompt for a tool call. Without any rules the
+built-in behavior is unchanged: the mode decides what is available, and every
+destructive call in write mode asks.
+
+```json
+"permissions": [
+  { "tool": "run_shell", "cmd": "npm *", "effect": "allow" },
+  { "tool": "write_file", "effect": "allow" },
+  { "tool": "*", "path": "*.env", "effect": "deny" },
+  { "tool": "git_push", "effect": "ask" }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `tool` | Glob over the tool name: `write_file`, `git_*`, `*` |
+| `path` | Glob matched against the call's target paths. `secrets/**` is a subtree; a pattern with no `/` matches the base name at any depth |
+| `cmd` | Prefix match against `run_shell`'s command when it ends in `*`, otherwise an exact match |
+| `effect` | `allow` skips the prompt, `ask` forces it, `deny` rejects the call |
+
+`deny` outranks `ask`, which outranks `allow`, regardless of the order rules are
+written in — a broad `allow` can never widen past a narrow `deny`. A rule naming
+`path` or `cmd` only matches calls that actually carry that kind of resource.
+
+`deny` is the only effect enforced outside the prompt: it also stops the call in
+a headless run (`ocode -p`) and inside a spawned subagent, where there is nobody
+to ask. A malformed glob matches nothing, so a typo fails closed.
+
+Pressing `A` at the permission prompt writes an `allow` rule for the current
+call and saves it here. The modal shows the exact rule before you press it.
+
+## `lsp_servers`
+
+Language servers back `code_definition`, `code_references`, `code_hover`, and
+the diagnostics folded into a failed verification. `gopls`, `pyright-langserver`,
+`typescript-language-server`, and `rust-analyzer` are known without
+configuration; a server that is not installed is skipped silently and the
+grep-based path answers instead.
+
+```json
+"lsp_servers": {
+  "zls": {
+    "command": "zls",
+    "extensions": [".zig"],
+    "root_markers": ["build.zig"],
+    "language_id": "zig"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | Binary to launch; skipped when not on PATH |
+| `args` | Arguments, e.g. `["--stdio"]` |
+| `extensions` | File extensions this server answers for, including the dot |
+| `root_markers` | Files identifying the project root; the nearest match walking up from the file wins, otherwise the workspace root |
+| `language_id` | Protocol language identifier; derived from the extension when omitted |
+
+Using a built-in's name (`gopls`, `pyright`, `typescript`, `rust-analyzer`)
+replaces it — useful when the binary lives somewhere unusual. Servers start on
+the first code intelligence question, not at boot, and are shut down on exit.
 
 ## Other state
 

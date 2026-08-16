@@ -35,6 +35,12 @@ type Executor struct {
 	Before            func(tools.ToolCall)
 	Observe           func(ExecutionEvent)
 	StructuredResults *bool // nil/true=envelopes; false is eval-only legacy comparison
+	// Permissions are the user's configured allow/ask/deny rules. Only deny is
+	// enforced here: allow and ask are answers to "should the UI prompt?", which
+	// is the caller's question, but a deny has to hold for every caller — a rule
+	// that stopped a write in the TUI and not in a spawned subagent would be a
+	// hole in exactly the boundary it was written to close.
+	Permissions []tools.PermissionRule
 }
 
 func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEvent {
@@ -48,6 +54,17 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 	}
 	call.Function.Arguments = tools.SalvageJSON(call.Function.Arguments)
 	event.Call = call
+	// Salvage first, then check: a deny rule matches on the call's real
+	// arguments, not on whatever malformed JSON the model emitted around them.
+	if effect, ok := tools.EvaluatePermission(e.Permissions, call); ok && effect == tools.PermissionDeny {
+		event.Err = fmt.Errorf("denied by a permission rule in the user's config")
+		event.Result = tools.EncodeToolFailure("denied by a permission rule in the user's config",
+			"Do NOT retry this call or a minor variant — take a different approach, or tell the user which rule is in your way.", false)
+		if e.Observe != nil {
+			e.Observe(event)
+		}
+		return event
+	}
 	if e.Before != nil {
 		e.Before(call)
 	}

@@ -24,6 +24,10 @@ type Options struct {
 	System   string // DefaultSystem when empty
 	MaxSteps int    // tool-call rounds; 0 = agent default
 	Trace    *tracepkg.Recorder
+	// Permissions are the user's configured rules. A headless run has no prompt
+	// to gate, so only deny rules bite here — but they must, since -p is exactly
+	// the mode where nobody is watching.
+	Permissions []tools.PermissionRule
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -50,10 +54,11 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 		opts.System = DefaultSystem
 	}
 	return agent.Run(ctx, host, reg, prompt, agent.Options{
-		Model:    opts.Model,
-		System:   opts.System,
-		MaxSteps: opts.MaxSteps,
-		Trace:    opts.Trace,
+		Model:       opts.Model,
+		System:      opts.System,
+		MaxSteps:    opts.MaxSteps,
+		Trace:       opts.Trace,
+		Permissions: opts.Permissions,
 	})
 }
 

@@ -26,6 +26,15 @@ Legend: **E** explore · **P** plan · **W** write · **A** auto
 | `make_directory` / `touch` | | | ✓ | ✓ |
 | `parallel_edit` | | | ✓ | ✓ |
 
+`write_file` and `edit_file` run the file's formatter before writing — `gofmt`,
+`rustfmt`, `ruff format`, or `prettier`, chosen by extension. The formatter is
+driven over stdin, so a formatter that rejects the input cannot leave a
+truncated file behind, and one that is not installed is silently skipped. The
+byte count, hash, and diff reported back describe the formatted result, so what
+the model is told matches what is on disk. `append_file` is not formatted: it
+carries fragments of a file that may not parse yet. Set `format: false` to
+disable.
+
 ## Code intelligence
 
 | Tool | E | P | W | A |
@@ -39,6 +48,22 @@ Legend: **E** explore · **P** plan · **W** write · **A** auto
 
 `code_index` and `semantic_search` use embeddings and always run against the
 local Ollama daemon, never a routed provider.
+
+### Language servers
+
+`code_definition`, `code_references`, and `code_hover` ask a real language
+server first when one is installed for the file's language: `gopls`,
+`pyright-langserver`, `typescript-language-server`, and `rust-analyzer` are
+known without configuration, and more can be declared in
+[`lsp_servers`](configuration.md#lsp_servers). A compiler's index knows which
+same-named identifiers actually are the symbol, which neither the tree-sitter
+path nor the word-boundary grep below it can tell.
+
+Servers start on the first code intelligence question, not at boot, and are
+shut down when the session exits. Every failure — no server installed, a server
+that will not start, one that does not answer in time — declines to the next
+tier rather than erroring, so this is never a dependency. `lsp: false` in the
+config turns the tier off entirely.
 
 ### Tree-sitter precision (optional build)
 

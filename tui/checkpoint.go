@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/javanhut/ollama_code/tools"
@@ -60,6 +62,12 @@ func (m *Model) snapshotBeforeMutate(paths []string) {
 		m.ckpt.pending = map[string]fileSnap{}
 	}
 	for _, p := range paths {
+		// The key is normalized because MutatedPaths hands back the raw JSON
+		// argument: {"path":"./a.go"} and {"path":"a.go"} are one file under two
+		// spellings, and two map entries for it break first-version-wins — the
+		// second spelling snapshots AFTER the first edit, then undoLast's map
+		// iteration decides at random which version lands on disk.
+		p = filepath.Clean(p)
 		if _, seen := m.ckpt.pending[p]; seen {
 			continue
 		}
@@ -182,6 +190,46 @@ func (m *Model) loadPersistedCheckpoints() {
 	m.ckpt.mu.Unlock()
 }
 
+// noteUndoToModel tells the model which files were rolled back. Its own tool
+// results from the undone turn are still in context ("edited main.go: replaced
+// 1 occurrence(s)", the new hash, the diff) and now describe a file state that
+// no longer exists; without this it keeps reasoning from them, and edit_file's
+// fuzzy tier will match old_string against the reverted file at 0.85 similarity
+// rather than failing clean.
+//
+// Slash commands are not queued while streaming (see updateChatKey), so /undo
+// can land mid-batch, with the assistant's tool_calls message already in history
+// and its results still pending. Appending there would splice a user turn
+// between a tool_calls message and its results — the exact hazard advisory()'s
+// doc comment warns about. So the message waits for the batch to finish, which
+// is where advisory() says callers should append it.
+func (m *Model) noteUndoToModel(touched []string) {
+	if len(touched) == 0 {
+		return
+	}
+	text := fmt.Sprintf("[UNDO] The user rolled back the last turn's file changes. These files were reverted to their state before that turn: %s. Your earlier edits to them no longer exist, and any file contents, hashes, or diffs you reported for them are stale. Re-read a file with read_file before editing or reasoning about it again.", strings.Join(touched, ", "))
+	if m.pending != nil {
+		m.deferredAdvisory = text
+		return
+	}
+	m.history = append(m.history, advisory(text))
+	// The popped checkpoint stack is already persisted; without this the
+	// advisory is the one part of the undo a resumed session would lose,
+	// putting the restored context right back at the defect this fixes.
+	m.autosaveSession()
+}
+
+// flushDeferredAdvisory appends an advisory that was held back while a tool
+// batch was in flight. Called once the batch's results are in history.
+func (m *Model) flushDeferredAdvisory() {
+	if m.deferredAdvisory == "" {
+		return
+	}
+	m.history = append(m.history, advisory(m.deferredAdvisory))
+	m.deferredAdvisory = ""
+	m.autosaveSession()
+}
+
 // undoLast restores the most recent turn's file changes. Returns a human summary
 // and the paths it touched (so the caller can refresh the RAG index).
 func (m *Model) undoLast() (string, []string) {
@@ -197,7 +245,9 @@ func (m *Model) undoLast() (string, []string) {
 	restored, deleted, skipped := 0, 0, 0
 	var touched []string
 	for path, s := range cp.snaps {
-		touched = append(touched, path)
+		// Only paths that were really put back go in touched: a skipped
+		// (too big to snapshot) or failed-write file is still the model's
+		// version on disk, and the caller tells the model these were reverted.
 		switch {
 		case s.tooBig:
 			skipped++
@@ -205,6 +255,7 @@ func (m *Model) undoLast() (string, []string) {
 			// File was created during the turn → remove it to undo.
 			if err := os.Remove(path); err == nil {
 				deleted++
+				touched = append(touched, path)
 			}
 		default:
 			mode := s.mode
@@ -213,6 +264,7 @@ func (m *Model) undoLast() (string, []string) {
 			}
 			if err := os.WriteFile(path, s.data, mode); err == nil {
 				restored++
+				touched = append(touched, path)
 			}
 		}
 	}

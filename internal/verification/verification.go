@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -31,11 +32,101 @@ func Detect(root string, changed []string, override string) (Plan, bool) {
 		steps := []string{"cargo test --no-run --quiet", "cargo check --quiet"}
 		return Plan{Command: strings.Join(steps, " && "), Label: "cargo test --no-run + check", Steps: steps}, true
 	}
+	if isPythonProject(root) {
+		if steps := pySteps(root, changed); len(steps) > 0 {
+			return Plan{Command: strings.Join(steps, " && "), Label: "python compile + targeted tests", Steps: steps}, true
+		}
+	}
 	if exists(filepath.Join(root, "tsconfig.json")) {
 		steps := []string{"npx --no-install tsc --noEmit"}
 		return Plan{Command: steps[0], Label: "tsc --noEmit", Steps: steps}, true
 	}
 	return Plan{}, false
+}
+
+// isPythonProject reports whether root carries a Python manifest. Checked after
+// the Go and Cargo arms so a polyglot repo still gets its primary build.
+func isPythonProject(root string) bool {
+	for _, name := range []string{"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"} {
+		if exists(filepath.Join(root, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pySteps builds the Python arm: a byte-compile of the changed files, which is
+// the cheapest objective "does this even parse" floor and the closest thing
+// Python has to `go build`, plus pytest scoped to the changed test files.
+//
+// Type checkers are deliberately absent here. pyright and mypy report findings
+// in code the turn never touched, and a pass/fail gate on those would trap the
+// model repairing someone else's annotations; they run as informational lint
+// instead (see lint.go). Returns nil when no .py file changed, which lets
+// Detect fall through to the remaining arms rather than claim a project it
+// cannot check.
+func pySteps(root string, changed []string) []string {
+	python := pythonBin()
+	if python == "" {
+		return nil
+	}
+	var files, testFiles []string
+	for _, path := range changed {
+		if filepath.Ext(path) != ".py" {
+			continue
+		}
+		rel, ok := relTo(root, path)
+		if !ok {
+			continue
+		}
+		files = append(files, rel)
+		if isPyTestFile(rel) {
+			testFiles = append(testFiles, rel)
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	sort.Strings(files)
+	sort.Strings(testFiles)
+	steps := []string{python + " -m compileall -q " + strings.Join(files, " ")}
+	if len(testFiles) > 0 {
+		if _, err := exec.LookPath("pytest"); err == nil {
+			steps = append(steps, "pytest -q "+strings.Join(testFiles, " "))
+		}
+	}
+	return steps
+}
+
+// pythonBin prefers python3 and falls back to python; "" when neither is
+// installed, which drops the Python arm entirely rather than emitting a command
+// that cannot run.
+func pythonBin() string {
+	for _, name := range []string{"python3", "python"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// isPyTestFile matches both pytest naming conventions.
+func isPyTestFile(rel string) bool {
+	base := filepath.Base(rel)
+	return strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py")
+}
+
+// relTo expresses path relative to root, reporting ok=false for anything that
+// escapes it.
+func relTo(root, path string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 func goSteps(root string, changed []string) []string {

@@ -59,12 +59,28 @@ func lineDiffOps(a, b []string) []diffOp {
 func unifiedDiff(oldStr, newStr, path string) string {
 	a := strings.Split(oldStr, "\n")
 	b := strings.Split(newStr, "\n")
+
+	const context = 3
+	// Trim the identical head and tail (keeping the context window) before the
+	// O(n*m) LCS below. A one-line edit in a 6000-line file used to trip the
+	// size guard and render as nothing but "(diff omitted)", so both the model
+	// and the approval modal were told the file changed but not how.
+	head := 0
+	for head < len(a) && head < len(b) && a[head] == b[head] {
+		head++
+	}
+	tail := 0
+	for tail < len(a)-head && tail < len(b)-head && a[len(a)-1-tail] == b[len(b)-1-tail] {
+		tail++
+	}
+	head = max(head-context, 0)
+	tail = max(tail-context, 0)
+	a, b = a[head:len(a)-tail], b[head:len(b)-tail]
 	if len(a) > 5000 || len(b) > 5000 {
-		return fmt.Sprintf("(diff omitted: file too large, %d -> %d lines)", len(a), len(b))
+		return fmt.Sprintf("(diff omitted: changed region too large, %d -> %d lines)", len(a), len(b))
 	}
 	ops := lineDiffOps(a, b)
 
-	const context = 3
 	keep := make([]bool, len(ops))
 	changed := false
 	for i, op := range ops {
@@ -84,7 +100,7 @@ func unifiedDiff(oldStr, newStr, path string) string {
 	// 1-based line number each op occupies in the old and new files.
 	oldNo := make([]int, len(ops))
 	newNo := make([]int, len(ops))
-	on, nn := 1, 1
+	on, nn := head+1, head+1
 	for i, op := range ops {
 		oldNo[i], newNo[i] = on, nn
 		if op.kind != '+' {

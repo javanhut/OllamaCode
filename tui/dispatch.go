@@ -66,7 +66,7 @@ func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message
 	m.logActivity("Tool: " + call.Function.Name)
 	executor := agent.Executor{
 		Registry: m.tools, Host: m.host, Model: m.modelName, NumCtx: m.contextLimit,
-		Before: m.checkpointBeforeCall(),
+		Before: m.checkpointBeforeCall(), Permissions: m.cfg.Permissions,
 		Observe: func(event agent.ExecutionEvent) {
 			if m.trace == nil {
 				return
@@ -99,6 +99,20 @@ func (m *Model) recordPermission(call tools.ToolCall, decision string) {
 	}
 	_ = m.trace.Record(tracepkg.Event{Kind: "permission", Turn: m.turnGen, Model: m.modelName,
 		Tool: call.Function.Name, Arguments: call.Function.Arguments, Metadata: map[string]any{"decision": decision}})
+}
+
+// savePermissionRule adds a rule to the live config and writes it to disk, so
+// the decision survives the session. A rule already present is not duplicated.
+func (m *Model) savePermissionRule(rule tools.PermissionRule) {
+	for _, existing := range m.cfg.Permissions {
+		if existing.Equal(rule) {
+			m.toast = "rule already saved: " + rule.String()
+			return
+		}
+	}
+	m.cfg.Permissions = append(m.cfg.Permissions, rule)
+	saveConfig(m.cfg)
+	m.toast = "saved permission rule: " + rule.String()
 }
 
 func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
@@ -181,6 +195,9 @@ func (m *Model) processPendingTools() tea.Cmd {
 		batchResults := m.pending.results
 		deniedTool := m.pending.deniedTool
 		m.history = append(m.history, batchResults...)
+		// The batch is now whole, so anything held back to avoid splicing into
+		// it (an /undo typed mid-turn) can land here.
+		m.flushDeferredAdvisory()
 		m.noteFetchedContent(batchCalls, batchResults)
 		m.pending = nil
 		m.markToolsDone()
@@ -279,7 +296,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		m.stepCount++
 		limit := m.turnStepLimit()
 		if m.mode == AutoMode {
-			limit = 100
+			limit = autoModeMaxSteps
 		}
 		if m.stepCount >= limit {
 			m.history = append(m.history, advisory("[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed."))
@@ -450,6 +467,22 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
+		// Config permission rules. A deny rule is absolute: it rejects here,
+		// before any prompt and before the batch-wide "allow all" the permission
+		// modal can set, so a rule the user wrote cannot be waived by a key they
+		// pressed for a different call.
+		if effect, ok := tools.EvaluatePermission(m.cfg.Permissions, call); ok && effect == tools.PermissionDeny {
+			m.recordPermission(call, "denied_by_rule")
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  "denied by a permission rule in the user's config. Do NOT retry this call or a minor variant — take a different approach, or tell the user which rule is in your way.",
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+			continue
+		}
+
 		// Explore-mode run_shell calls are prechecked above and are read-only,
 		// so they don't need a permission prompt.
 		exploreReadOnly := m.mode == ExploreMode && call.Function.Name == "run_shell"
@@ -532,6 +565,9 @@ func computePreview(call tools.ToolCall) string {
 	case "write_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)
+		// write_file formats before it writes, so an unformatted preview would
+		// not be the content the user is approving.
+		content = string(tools.FormatPreview(path, []byte(content)))
 		old, err := os.ReadFile(path)
 		if err != nil {
 			return "(new file " + path + ")\n" + addedLines(truncatePreview(content, 20))
@@ -539,9 +575,36 @@ func computePreview(call tools.ToolCall) string {
 		return simpleDiff(string(old), content, 10)
 	case "edit_file":
 		path, _ := args["path"].(string)
+		if diff, ok := tools.PreviewEdit(path, call.Function.Arguments); ok {
+			return diff
+		}
+		// The edit could not be resolved against the file (no match, unreadable);
+		// the model's claim is still more than an empty modal.
 		oldStr, _ := args["old_string"].(string)
 		newStr, _ := args["new_string"].(string)
 		return path + "\n" + simpleDiff(oldStr, newStr, 3)
+	case "parallel_edit":
+		tasks, _ := args["tasks"].([]any)
+		var b strings.Builder
+		fmt.Fprintf(&b, "parallel_edit: %d subtask(s), each applied through the write path\n", len(tasks))
+		for i, t := range tasks {
+			tm, _ := t.(map[string]any)
+			task, _ := tm["task"].(string)
+			fmt.Fprintf(&b, "%d. %s\n", i+1, truncatePreview(strings.TrimSpace(task), 3))
+			var files []string
+			fl, _ := tm["files"].([]any)
+			for _, f := range fl {
+				if s, ok := f.(string); ok {
+					files = append(files, s)
+				}
+			}
+			if len(files) == 0 {
+				b.WriteString("   files: not declared — this worker may touch any file\n")
+				continue
+			}
+			fmt.Fprintf(&b, "   files: %s\n", strings.Join(files, ", "))
+		}
+		return strings.TrimRight(b.String(), "\n")
 	case "append_file":
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)
@@ -675,6 +738,14 @@ func (m *Model) noteFetchedContent(calls []tools.ToolCall, results []api.Message
 }
 
 func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
+	// Config rules answer first, so an allow rule spares the prompt for a call
+	// the user has already blessed, and an ask rule can pull a non-destructive
+	// tool into the prompt. Deny is handled before this point (it must outrank
+	// allowAll) and reaching it here would mean that check was bypassed — prompt,
+	// which is the fail-safe answer.
+	if effect, ok := tools.EvaluatePermission(m.cfg.Permissions, call); ok {
+		return effect != tools.PermissionAllow
+	}
 	if m.pending.allowAll {
 		return false
 	}

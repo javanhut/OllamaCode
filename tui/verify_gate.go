@@ -103,6 +103,10 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 		// when per-diagnostic signal helps most. Informational only — it never
 		// decides pass/fail, and a missing linter binary is silent.
 		lint := verification.Lint(ctx, ".", m.changedPaths())
+		// Language server diagnostics ride the same channel and the same
+		// contract. They cover languages no linter here knows, and they are
+		// per-symbol where a compiler error is per-file.
+		lint = joinDiagnostics(lint, tools.LSPDiagnostics(ctx, m.changedPaths()))
 		current := verification.Fingerprint(".", m.changedPaths())
 		if current != fingerprint {
 			err = context.Canceled
@@ -118,6 +122,18 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 				Result: text, Error: errText, Metadata: map[string]any{"command": command, "label": label, "fingerprint": fingerprint[:12], "ok": err == nil, "lint": lint}})
 		}
 		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text, lint: lint}
+	}
+}
+
+// joinDiagnostics merges two diagnostic blocks, tolerating either being empty.
+func joinDiagnostics(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "\n" + b
 	}
 }
 

@@ -79,3 +79,83 @@ func TestToolCallTimeoutByClass(t *testing.T) {
 func callOf(name, args string) ToolCall {
 	return ToolCall{Function: ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
 }
+
+func permCall(name, args string) ToolCall {
+	return ToolCall{Function: ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
+}
+
+func TestEvaluatePermissionNoRules(t *testing.T) {
+	if _, ok := EvaluatePermission(nil, permCall("write_file", `{"path":"a.go"}`)); ok {
+		t.Fatal("empty ruleset must not match; callers keep their built-in behavior")
+	}
+}
+
+func TestEvaluatePermissionDenyOutranksAllow(t *testing.T) {
+	rules := []PermissionRule{
+		{Tool: "*", Effect: PermissionAllow},
+		{Tool: "write_file", Path: "secrets/**", Effect: PermissionDeny},
+	}
+	if effect, ok := EvaluatePermission(rules, permCall("write_file", `{"path":"secrets/keys.json"}`)); !ok || effect != PermissionDeny {
+		t.Fatalf("deny must win regardless of rule order, got %q ok=%v", effect, ok)
+	}
+	if effect, ok := EvaluatePermission(rules, permCall("write_file", `{"path":"src/main.go"}`)); !ok || effect != PermissionAllow {
+		t.Fatalf("path outside the deny subtree should stay allowed, got %q ok=%v", effect, ok)
+	}
+}
+
+func TestEvaluatePermissionAskOutranksAllow(t *testing.T) {
+	rules := []PermissionRule{
+		{Tool: "git_*", Effect: PermissionAllow},
+		{Tool: "git_push", Effect: PermissionAsk},
+	}
+	if effect, _ := EvaluatePermission(rules, permCall("git_push", `{}`)); effect != PermissionAsk {
+		t.Fatalf("ask must outrank allow, got %q", effect)
+	}
+	if effect, _ := EvaluatePermission(rules, permCall("git_add", `{"path":"a.go"}`)); effect != PermissionAllow {
+		t.Fatalf("glob should still allow siblings, got %q", effect)
+	}
+}
+
+func TestEvaluatePermissionCommandPrefix(t *testing.T) {
+	rules := []PermissionRule{{Tool: "run_shell", Cmd: "npm *", Effect: PermissionAllow}}
+	// A trailing * spans separators: path.Match would miss this one.
+	if _, ok := EvaluatePermission(rules, permCall("run_shell", `{"command":"npm run build --prefix ./web"}`)); !ok {
+		t.Fatal("command prefix rule should match an argument containing a slash")
+	}
+	if _, ok := EvaluatePermission(rules, permCall("run_shell", `{"command":"rm -rf /"}`)); ok {
+		t.Fatal("command prefix rule matched an unrelated command")
+	}
+}
+
+func TestEvaluatePermissionBareNamePattern(t *testing.T) {
+	rules := []PermissionRule{{Tool: "*", Path: "*.env", Effect: PermissionDeny}}
+	if _, ok := EvaluatePermission(rules, permCall("write_file", `{"path":"config/prod.env"}`)); !ok {
+		t.Fatal("a separator-free pattern should match the base name at any depth")
+	}
+}
+
+// A resource-scoped rule must not match a call that carries no such resource,
+// or "deny path:secrets/**" would silently deny unrelated toolless calls.
+func TestEvaluatePermissionResourceRuleNeedsResource(t *testing.T) {
+	rules := []PermissionRule{{Tool: "*", Path: "secrets/**", Effect: PermissionDeny}}
+	if _, ok := EvaluatePermission(rules, permCall("git_status", `{}`)); ok {
+		t.Fatal("path rule matched a call with no mutated paths")
+	}
+}
+
+func TestPermissionRuleForShellWidensToFirstWord(t *testing.T) {
+	rule := PermissionRuleFor(permCall("run_shell", `{"command":"npm test -- --watch"}`))
+	if rule.Cmd != "npm *" || rule.Effect != PermissionAllow {
+		t.Fatalf("unexpected shell rule: %+v", rule)
+	}
+	if rule := PermissionRuleFor(permCall("write_file", `{"path":"a.go"}`)); rule.Tool != "write_file" || rule.Cmd != "" || rule.Path != "" {
+		t.Fatalf("unexpected file rule: %+v", rule)
+	}
+}
+
+func TestPermissionRuleMalformedPatternFailsClosed(t *testing.T) {
+	rules := []PermissionRule{{Tool: "[", Effect: PermissionAllow}}
+	if _, ok := EvaluatePermission(rules, permCall("write_file", `{"path":"a.go"}`)); ok {
+		t.Fatal("a malformed glob must match nothing rather than everything")
+	}
+}

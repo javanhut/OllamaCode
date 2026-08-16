@@ -182,6 +182,111 @@ func absInt(x int) int {
 	return x
 }
 
+// editArgs is edit_file's argument set, shared by the handler and PreviewEdit.
+type editArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line"`
+}
+
+// resolveEdit computes what edit_file would write, without writing it: the
+// start_line/end_line branch, the old_string branch via applyEdit, the
+// verify-before-write syntax gate, and the formatter. The permission preview
+// calls this too — a preview that recomputed the edit its own way would drift
+// from the handler and re-create the bug where the modal describes a change
+// other than the one that lands.
+func resolveEdit(a editArgs) (oldContent, updated string, count, tier int, err error) {
+	if a.Path == "" {
+		return "", "", 0, 0, fmt.Errorf("path is required")
+	}
+	if err := jailCheck(a.Path); err != nil {
+		return "", "", 0, 0, err
+	}
+	data, err := os.ReadFile(a.Path)
+	if err != nil {
+		return "", "", 0, 0, err
+	}
+
+	if a.StartLine != 0 || a.EndLine != 0 {
+		if a.StartLine < 1 || a.EndLine < 1 {
+			return "", "", 0, 0, fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
+		}
+		lines := strings.Split(string(data), "\n")
+		if a.StartLine > len(lines) || a.EndLine > len(lines) {
+			return "", "", 0, 0, fmt.Errorf("start_line %d or end_line %d exceeds file length %d", a.StartLine, a.EndLine, len(lines))
+		}
+		if a.StartLine > a.EndLine {
+			return "", "", 0, 0, fmt.Errorf("start_line %d is greater than end_line %d", a.StartLine, a.EndLine)
+		}
+		var newLines []string
+		newLines = append(newLines, lines[:a.StartLine-1]...)
+		newLines = append(newLines, a.NewString)
+		newLines = append(newLines, lines[a.EndLine:]...)
+		updated = strings.Join(newLines, "\n")
+		count = 1
+		tier = 1
+	} else {
+		if a.OldString == "" {
+			return "", "", 0, 0, fmt.Errorf("old_string is required when start_line/end_line are not specified (use write_file to replace or write new content)")
+		}
+		var editErr error
+		updated, count, tier, editErr = applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
+		if editErr != nil {
+			if tier >= 2 {
+				return "", "", count, tier, fmt.Errorf("%w in %s", editErr, a.Path)
+			}
+			return "", "", count, tier, fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
+		}
+	}
+
+	// Verify-before-write: if the file parsed cleanly before the edit,
+	// reject (don't write) an edit that would break its syntax.
+	if verifyBytes(a.Path, data) == nil {
+		if verr := verifyBytes(a.Path, []byte(updated)); verr != nil {
+			return "", "", count, tier, fmt.Errorf("edit rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix start_line/end_line/new_string and retry", a.Path, verr)
+		}
+	}
+	// Format after the syntax gate, before the write: the hash and diff
+	// reported to the model describe what actually landed on disk.
+	updated = string(formatBytes(a.Path, []byte(updated)))
+	return string(data), updated, count, tier, nil
+}
+
+// PreviewEdit renders the diff edit_file would actually apply, resolved against
+// the file on disk. The approval modal used to diff old_string against
+// new_string, which showed a bare "-" for a start_line/end_line edit (no
+// deletion visible at all) and showed the model's claimed snippet rather than
+// the file's real text whenever applyEdit matched at tier 2 or 3. ok=false means
+// the edit could not be resolved (no match, unreadable file); callers should
+// fall back to the claim-based preview rather than showing nothing.
+func PreviewEdit(path string, args json.RawMessage) (diff string, ok bool) {
+	var a editArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", false
+	}
+	if path != "" {
+		a.Path = path
+	}
+	oldContent, updated, _, _, err := resolveEdit(a)
+	if err != nil {
+		return "", false
+	}
+	diff = unifiedDiff(oldContent, updated, a.Path)
+	// A diff big enough to be omitted describes nothing; the caller's
+	// claim-based fallback at least names the text being replaced.
+	if strings.HasPrefix(diff, "(diff omitted") {
+		return "", false
+	}
+	return diff, diff != ""
+}
+
+// FormatPreview exposes the write path's formatter so a permission preview can
+// diff the bytes that will really land on disk, not the model's unformatted text.
+func FormatPreview(path string, data []byte) []byte { return formatBytes(path, data) }
+
 func EditFileTool() Tool {
 	return Tool{
 		Type: "function",
@@ -202,70 +307,13 @@ func EditFileTool() Tool {
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			var a struct {
-				Path       string `json:"path"`
-				OldString  string `json:"old_string"`
-				NewString  string `json:"new_string"`
-				ReplaceAll bool   `json:"replace_all"`
-				StartLine  int    `json:"start_line"`
-				EndLine    int    `json:"end_line"`
-			}
+			var a editArgs
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
-			if a.Path == "" {
-				return "", fmt.Errorf("path is required")
-			}
-			if err := jailCheck(a.Path); err != nil {
-				return "", err
-			}
-			data, err := os.ReadFile(a.Path)
+			data, updated, count, tier, err := resolveEdit(a)
 			if err != nil {
 				return "", err
-			}
-
-			var updated string
-			var count int
-			var tier int
-
-			if a.StartLine != 0 || a.EndLine != 0 {
-				if a.StartLine < 1 || a.EndLine < 1 {
-					return "", fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
-				}
-				lines := strings.Split(string(data), "\n")
-				if a.StartLine > len(lines) || a.EndLine > len(lines) {
-					return "", fmt.Errorf("start_line %d or end_line %d exceeds file length %d", a.StartLine, a.EndLine, len(lines))
-				}
-				if a.StartLine > a.EndLine {
-					return "", fmt.Errorf("start_line %d is greater than end_line %d", a.StartLine, a.EndLine)
-				}
-				var newLines []string
-				newLines = append(newLines, lines[:a.StartLine-1]...)
-				newLines = append(newLines, a.NewString)
-				newLines = append(newLines, lines[a.EndLine:]...)
-				updated = strings.Join(newLines, "\n")
-				count = 1
-				tier = 1
-			} else {
-				if a.OldString == "" {
-					return "", fmt.Errorf("old_string is required when start_line/end_line are not specified (use write_file to replace or write new content)")
-				}
-				var editErr error
-				updated, count, tier, editErr = applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
-				if editErr != nil {
-					if tier >= 2 {
-						return "", fmt.Errorf("%w in %s", editErr, a.Path)
-					}
-					return "", fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
-				}
-			}
-
-			// Verify-before-write: if the file parsed cleanly before the edit,
-			// reject (don't write) an edit that would break its syntax.
-			if verifyBytes(a.Path, data) == nil {
-				if verr := verifyBytes(a.Path, []byte(updated)); verr != nil {
-					return "", fmt.Errorf("edit rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix start_line/end_line/new_string and retry", a.Path, verr)
-				}
 			}
 			info, err := os.Stat(a.Path)
 			mode := os.FileMode(0o644)
@@ -288,7 +336,7 @@ func EditFileTool() Tool {
 				}
 			}
 			result := fmt.Sprintf("edited %s: replaced %d occurrence(s)%s\nNew Hash: %s", a.Path, count, tierNote, hash)
-			if diff := unifiedDiff(string(data), updated, a.Path); diff != "" {
+			if diff := unifiedDiff(data, updated, a.Path); diff != "" {
 				result += "\n" + diff
 			}
 			return result, nil

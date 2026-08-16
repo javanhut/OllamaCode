@@ -132,6 +132,7 @@ func (m *Model) subagentOptions(before func(tools.ToolCall), onMutation func()) 
 		ConstrainToolCalls: constrain,
 		Constraints:        constraintCache,
 		Before:             before,
+		Permissions:        m.cfg.Permissions,
 	}
 }
 

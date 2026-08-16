@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/javanhut/ollama_code/tools"
@@ -43,7 +44,30 @@ func LintCommand(root string, changed []string) (cmd string, ok bool) {
 			}
 		}
 	}
+	if isPythonProject(root) {
+		if _, err := exec.LookPath("ruff"); err == nil {
+			if files := pyChangedFiles(root, changed); len(files) > 0 {
+				return "ruff check " + strings.Join(files, " "), true
+			}
+		}
+	}
 	return "", false
+}
+
+// pyChangedFiles is the lint-side scope: changed .py files inside root, sorted
+// for a deterministic command line.
+func pyChangedFiles(root string, changed []string) []string {
+	var files []string
+	for _, path := range changed {
+		if filepath.Ext(path) != ".py" {
+			continue
+		}
+		if rel, ok := relTo(root, path); ok {
+			files = append(files, rel)
+		}
+	}
+	sort.Strings(files)
+	return files
 }
 
 // Lint runs the available linter scoped to the changed files and returns

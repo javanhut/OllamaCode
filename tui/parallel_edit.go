@@ -330,6 +330,7 @@ func (m *Model) parallelEditTool() tools.Tool {
 						NumCtx:             m.contextLimit,
 						ConstrainToolCalls: constrain,
 						Constraints:        constraintCache,
+						Permissions:        m.cfg.Permissions,
 					})
 					results[i].output = res.Output
 					results[i].err = err

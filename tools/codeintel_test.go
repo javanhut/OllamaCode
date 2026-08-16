@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -39,5 +40,34 @@ func TestFilterCodeMatches_Caps(t *testing.T) {
 	out := filterCodeMatches(strings.Join(lines, "\n"), 3)
 	if !strings.Contains(out, "truncated at 3") {
 		t.Fatalf("expected truncation footer:\n%s", out)
+	}
+}
+
+func TestLSPTierInertWhenDisabled(t *testing.T) {
+	ConfigureLSP(false, ".", nil)
+	t.Cleanup(func() { ConfigureLSP(false, ".", nil) })
+	if _, ok := lspDefinitionAt(context.Background(), "main.go", 1, 1); ok {
+		t.Fatal("disabled LSP tier answered a definition query")
+	}
+	if _, ok := lspHoverAt(context.Background(), "main.go", 1, 1); ok {
+		t.Fatal("disabled LSP tier answered a hover query")
+	}
+	if got := LSPDiagnostics(context.Background(), []string{"main.go"}); got != "" {
+		t.Fatalf("disabled LSP tier reported diagnostics: %q", got)
+	}
+}
+
+func TestSymbolAtSkipsKeywordsAndReportsColumn(t *testing.T) {
+	sym, col, ok := symbolAt("func handleRequest(w http.ResponseWriter) {", defKeywords)
+	if !ok || sym != "ResponseWriter" {
+		t.Fatalf("got %q ok=%v", sym, ok)
+	}
+	// Column is one-based and points at the symbol, which is what the LSP tier
+	// converts to a position; an off-by-one here asks about the wrong token.
+	if line := "func handleRequest(w http.ResponseWriter) {"; line[col-1:col-1+len(sym)] != sym {
+		t.Fatalf("column %d does not point at %q", col, sym)
+	}
+	if _, _, ok := symbolAt("   ...   ", defKeywords); ok {
+		t.Fatal("a line with no identifier should report no symbol")
 	}
 }

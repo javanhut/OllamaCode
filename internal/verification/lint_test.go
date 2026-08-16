@@ -57,6 +57,29 @@ func TestLintCommandScopesToChangedPackages(t *testing.T) {
 	}
 }
 
+func TestLintCommandRuffScopesToChangedPythonFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ruff"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[project]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd, ok := LintCommand(root, []string{"pkg/b.py", "a.py", "README.md"})
+	if !ok {
+		t.Fatal("expected a ruff command for changed Python files")
+	}
+	if cmd != "ruff check a.py pkg/b.py" {
+		t.Fatalf("unexpected scoping: %q", cmd)
+	}
+	if _, ok := LintCommand(root, []string{"README.md"}); ok {
+		t.Fatal("expected no lint command when no Python files changed")
+	}
+}
+
 func TestLintReportsOnlyChangedFiles(t *testing.T) {
 	fakeStaticcheck(t, "#!/bin/sh\n"+
 		"echo 'main.go:12:5: this value of err is never used (SA4006)'\n"+

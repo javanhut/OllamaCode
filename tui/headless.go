@@ -79,6 +79,11 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 	if cfg.ShellSandbox != nil {
 		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
 	}
+	if cfg.Format != nil {
+		tools.SetFormatEnabled(*cfg.Format)
+	}
+	tools.ConfigureLSP(cfg.LSP == nil || *cfg.LSP, workspaceRoot(), cfg.LSPServers)
+	defer tools.CloseLSP()
 
 	spec := strings.TrimSpace(opts.Model)
 	if spec == "" {
@@ -99,9 +104,10 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 		maxSteps = maxStepsFromConfig(cfg)
 	}
 	res, err := headless.Run(ctx, host, registry, opts.Prompt, headless.Options{
-		Model:    model,
-		MaxSteps: maxSteps,
-		Trace:    recorder,
+		Model:       model,
+		MaxSteps:    maxSteps,
+		Trace:       recorder,
+		Permissions: cfg.Permissions,
 	})
 	if err != nil {
 		return err

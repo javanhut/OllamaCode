@@ -2,6 +2,9 @@ package tools
 
 import (
 	"encoding/json"
+	"path"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -186,6 +189,183 @@ func PolicyForName(name string) ToolPolicy {
 	p := policy(ModeMutable, false, true, true, ToolCostHigh)
 	p.Timeout = DefaultToolTimeout
 	return p
+}
+
+// Permission effects, in precedence order: a deny anywhere in the ruleset wins
+// outright, then ask, then allow. Precedence is fixed rather than first-match
+// so that adding a broad allow rule can never silently widen past a narrow deny
+// the user wrote earlier.
+const (
+	PermissionAllow = "allow"
+	PermissionAsk   = "ask"
+	PermissionDeny  = "deny"
+)
+
+// PermissionRule is one user-configured decision about a tool call, from
+// config.json's "permissions". It lives beside the policy table because the
+// same answer has to reach every caller — TUI dispatch, the headless Executor,
+// and subagents — and those three had already drifted once over questions this
+// table now answers in one place.
+//
+// Tool is a glob over the tool name ("write_file", "git_*", "*"). Path is a
+// glob matched against the call's mutated paths, Cmd a glob matched against
+// run_shell's command. A rule with neither Path nor Cmd matches every call to
+// the named tool; a rule with one of them matches only when the call actually
+// carries that kind of resource.
+type PermissionRule struct {
+	Tool   string `json:"tool"`
+	Path   string `json:"path,omitempty"`
+	Cmd    string `json:"cmd,omitempty"`
+	Effect string `json:"effect"`
+}
+
+// EvaluatePermission resolves a call against the ruleset. matched=false means no
+// rule applies and the caller keeps its built-in behavior (mode gating plus the
+// approval prompt) unchanged — rules narrow or widen that default, they do not
+// replace it.
+func EvaluatePermission(rules []PermissionRule, call ToolCall) (effect string, matched bool) {
+	found := ""
+	for _, rule := range rules {
+		if !ruleMatches(rule, call) {
+			continue
+		}
+		switch rule.Effect {
+		case PermissionDeny:
+			return PermissionDeny, true // absolute; nothing outranks it
+		case PermissionAsk:
+			found = PermissionAsk
+		case PermissionAllow:
+			if found == "" {
+				found = PermissionAllow
+			}
+		}
+	}
+	return found, found != ""
+}
+
+// PermissionRuleFor derives the rule an "always allow" answer writes for a call.
+// run_shell widens to the command's first word, because a rule pinned to one
+// exact command line would never match anything again; every other tool becomes
+// a bare tool-name rule. Callers show the result to the user before saving it —
+// this is a widening of the safety boundary and should never be silent.
+func PermissionRuleFor(call ToolCall) PermissionRule {
+	rule := PermissionRule{Tool: call.Function.Name, Effect: PermissionAllow}
+	if call.Function.Name == "run_shell" {
+		if fields := strings.Fields(shellCallCommand(call.Function.Arguments)); len(fields) > 0 {
+			rule.Cmd = fields[0] + " *"
+		}
+	}
+	return rule
+}
+
+// String renders a rule the way it is shown in the permission modal.
+func (r PermissionRule) String() string {
+	tool := r.Tool
+	if tool == "" {
+		tool = "*"
+	}
+	out := r.Effect + " " + tool
+	if r.Cmd != "" {
+		out += " cmd:" + r.Cmd
+	}
+	if r.Path != "" {
+		out += " path:" + r.Path
+	}
+	return out
+}
+
+// Equal reports whether two rules express the same decision, so saving a rule
+// twice does not grow the config file.
+func (r PermissionRule) Equal(other PermissionRule) bool {
+	return r.Tool == other.Tool && r.Path == other.Path && r.Cmd == other.Cmd && r.Effect == other.Effect
+}
+
+func ruleMatches(rule PermissionRule, call ToolCall) bool {
+	if rule.Effect == "" {
+		return false
+	}
+	pattern := strings.TrimSpace(rule.Tool)
+	if pattern == "" {
+		pattern = "*"
+	}
+	if !matchGlob(pattern, call.Function.Name) {
+		return false
+	}
+	if cmd := strings.TrimSpace(rule.Cmd); cmd != "" {
+		command := shellCallCommand(call.Function.Arguments)
+		if command == "" || !matchCommand(cmd, command) {
+			return false
+		}
+	}
+	if p := strings.TrimSpace(rule.Path); p != "" {
+		paths := MutatedPaths(call.Function.Name, call.Function.Arguments)
+		if len(paths) == 0 {
+			return false
+		}
+		hit := false
+		for _, target := range paths {
+			if matchPath(p, target) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
+	return true
+}
+
+// shellCallCommand pulls run_shell's command argument; "" for any other call.
+func shellCallCommand(args json.RawMessage) string {
+	var a struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal(args, &a)
+	return strings.TrimSpace(a.Command)
+}
+
+// matchGlob is path.Match over a value with no path structure (a tool name, a
+// shell command line). A malformed pattern matches nothing rather than
+// erroring, so a typo in config fails closed.
+func matchGlob(pattern, s string) bool {
+	if pattern == "*" {
+		return true
+	}
+	ok, err := path.Match(pattern, s)
+	return err == nil && ok
+}
+
+// matchCommand matches a shell command line. A trailing * is a prefix match on
+// everything before it and an exact comparison otherwise. path.Match is wrong
+// here: its * stops at a separator, so "npm *" would match "npm test" but not
+// "npm run build --prefix ./web" — silently narrower than the rule reads, which
+// is the dangerous direction for a rule to be misread in.
+func matchCommand(pattern, command string) bool {
+	if prefix, ok := strings.CutSuffix(pattern, "*"); ok {
+		return strings.HasPrefix(command, prefix)
+	}
+	return pattern == command
+}
+
+// matchPath matches a path glob the way people actually write them: a trailing
+// /** is a subtree prefix, a pattern with no separator matches the base name
+// (so "*.env" catches any directory's .env), and anything else is path.Match
+// against the slash-normalized path. path.Match alone would fail all three,
+// because its * never crosses a separator.
+func matchPath(pattern, target string) bool {
+	target = filepath.ToSlash(filepath.Clean(target))
+	pattern = filepath.ToSlash(pattern)
+	if subtree, ok := strings.CutSuffix(pattern, "/**"); ok {
+		return target == subtree || strings.HasPrefix(target, subtree+"/")
+	}
+	if !strings.Contains(pattern, "/") {
+		if ok, err := path.Match(pattern, filepath.Base(target)); err == nil && ok {
+			return true
+		}
+	}
+	ok, err := path.Match(pattern, target)
+	return err == nil && ok
 }
 
 // ToolCallTimeout is the deadline for one call, for every caller: TUI dispatch
