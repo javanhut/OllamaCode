@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -73,18 +74,42 @@ func detectShellSandbox() string {
 // newShellCommand builds `sh -c command`, wrapped in the OS sandbox when one
 // is available and enabled. Callers still apply configureShellCommand, so
 // process-group kill semantics are identical wrapped or not.
+//
+// The credential scrub lives here rather than at each caller because this is
+// the one place every model-chosen shell is born: a future third spawn site
+// cannot forget it. Both sandbox wrappers pass the environment straight
+// through, so all three argv shapes are covered.
 func newShellCommand(command string) *exec.Cmd {
+	argv := shellArgv(command)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = scrubbedEnvironment()
+	return cmd
+}
+
+// NewShellCommand is newShellCommand for the harness's own spawns, which need a
+// deadline. The verification gate and the linter run code the MODEL just wrote
+// (`go test ./pkg` over a package whose test file it authored this turn), so a
+// test body is a shell the model controls by another route. They get the same
+// credential scrub and the same OS sandbox run_shell gets — otherwise the scrub
+// is a lock on one door with the next one standing open.
+func NewShellCommand(ctx context.Context, command string) *exec.Cmd {
+	argv := shellArgv(command)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = scrubbedEnvironment()
+	return cmd
+}
+
+func shellArgv(command string) []string {
 	if shellSandboxEnabled() {
 		switch detectShellSandbox() {
 		case "sandbox-exec":
-			return exec.Command("sandbox-exec", "-p", seatbeltProfile(sandboxWritableDirs()), "sh", "-c", command)
+			return []string{"sandbox-exec", "-p", seatbeltProfile(sandboxWritableDirs()), "sh", "-c", command}
 		case "bwrap":
 			// bwrap bind-mounts must exist, unlike seatbelt subpath rules.
-			argv := bwrapArgv(command, existingDirs(sandboxWritableDirs()))
-			return exec.Command(argv[0], argv[1:]...)
+			return bwrapArgv(command, existingDirs(sandboxWritableDirs()))
 		}
 	}
-	return exec.Command("sh", "-c", command)
+	return []string{"sh", "-c", command}
 }
 
 // sandboxWritableDirs is the writeable set for both sandboxes: every jail

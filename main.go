@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/javanhut/ollama_code/tools"
 	"github.com/javanhut/ollama_code/tui"
 )
 
@@ -87,6 +88,11 @@ func main() {
 	if err != nil {
 		os.Exit(2)
 	}
+	// Oversized tool output spills to a private temp file; it is plaintext of
+	// whatever the model read, so it should not outlive the session on an
+	// ordinary exit. The os.Exit error paths below skip this, as does a crash —
+	// that is what the budget cap and the OS reaper are for.
+	defer tools.CleanupSpills()
 	debugPath := ""
 	if f.debug {
 		debugPath, err = filepath.Abs("ocode.log")

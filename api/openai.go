@@ -109,8 +109,10 @@ type oaCompletion struct {
 //
 // ponytail: ids are positional — the Nth pending call is answered by the Nth
 // following tool result. That holds because every producer of history appends
-// results in call order (pendingBatch.results is indexed by call). If a producer
-// ever interleaves them, put an explicit id on tools.ToolCall instead.
+// results in call order (pendingBatch.results is indexed by call), and any other
+// message landing before the next assistant turn is ignored by the count. If a
+// producer ever interleaves the results themselves, put an explicit id on
+// tools.ToolCall instead.
 //
 // Unbalanced pairs are dropped rather than sent: OpenAI providers reject the
 // whole request with a 400 when a tool result has no matching call, or a call
@@ -154,18 +156,17 @@ func toOpenAIMessages(msgs []Message) []oaMessage {
 	return out
 }
 
-// toolResultsAfter counts the results answering the call at index i. System
-// messages are skipped: the loop guards splice advisories between an assistant's
-// tool calls and their results.
+// toolResultsAfter counts the results answering the call at index i. Only the
+// next assistant message can own new calls, so anything else interleaved — a
+// mode-handoff note, a background sub-agent notification, a loop-guard advisory
+// — is stepped over rather than ending the count, whatever role it carries.
 func toolResultsAfter(msgs []Message, i int) int {
 	n := 0
 	for j := i + 1; j < len(msgs); j++ {
 		switch msgs[j].Role {
 		case "tool":
 			n++
-		case "system":
-			continue
-		default:
+		case "assistant":
 			return n
 		}
 	}

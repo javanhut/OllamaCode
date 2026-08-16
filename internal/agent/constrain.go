@@ -208,12 +208,52 @@ func (c *ConstraintCache) Downgrade(key string) bool {
 // the format payload — Ollama answers schema->grammar conversion failures with
 // a 400 whose body names the schema — as opposed to a transient transport
 // failure, which must not move the rung cache.
+//
+// A context overflow is excluded here rather than at the call sites: this reads
+// ANY 400, and a host answering an oversized prompt with one is not objecting
+// to the schema. Treating it as a rejection steps the rung cache down
+// permanently for that model+host over a format nobody complained about, and in
+// the sub-agent ladder (agent.go) burns every rung on a request that overflows
+// identically at all of them.
 func IsFormatRejection(err error) bool {
-	if err == nil {
+	if err == nil || IsContextOverflow(err) {
 		return false
 	}
 	s := err.Error()
 	return strings.Contains(s, "status code: 400") || strings.Contains(s, "schema conversion failed")
+}
+
+// contextOverflowMarkers are the phrases providers put in the BODY of an
+// oversized-prompt refusal (llama.cpp, Ollama, OpenAI, Anthropic). The status
+// code can't classify it — the same 400 also carries schema rejections — so the
+// match is on the body, which api.statusError and the OpenAI adapter both embed
+// in the error string.
+var contextOverflowMarkers = []string{
+	"context_length_exceeded",
+	"context length exceeded",
+	"maximum context length",
+	"exceeds the available context size",
+	"exceeds context length",
+	"input length exceeds",
+	"exceeds the context window",
+	"prompt is too long",
+}
+
+// IsContextOverflow reports whether err is the provider refusing a prompt that
+// does not fit its context window. Unlike a transport failure this is not
+// transient — the identical request fails identically every time — so the only
+// useful response is to shrink the request, never to retry it unchanged.
+func IsContextOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range contextOverflowMarkers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // UnwrapConstrainedProse recovers a prose answer from the constrained envelope:

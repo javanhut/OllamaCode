@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func RunShellTool() Tool {
@@ -30,11 +29,10 @@ func RunShellTool() Tool {
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var a struct {
-				Command    string  `json:"command"`
-				WorkingDir string  `json:"working_dir"`
-				TimeoutSec float64 `json:"timeout_sec"`
-				Stdin      string  `json:"stdin"`
-				Background bool    `json:"background"`
+				Command    string `json:"command"`
+				WorkingDir string `json:"working_dir"`
+				Stdin      string `json:"stdin"`
+				Background bool   `json:"background"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -57,14 +55,9 @@ func RunShellTool() Tool {
 				return withSandboxNotice(fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
 					job.id, job.pid, shortCommand(a.Command), job.id, job.id)), nil
 			}
-			timeout := 30 * time.Second
-			if a.TimeoutSec > 0 {
-				timeout = time.Duration(a.TimeoutSec * float64(time.Second))
-			}
-			if timeout > 300*time.Second {
-				timeout = 300 * time.Second
-			}
-			res, err := runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, timeout)
+			// One copy of the default/cap arithmetic, shared with the deadline
+			// every caller arms on the outside (tools.ToolCallTimeout).
+			res, err := runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, shellCallTimeout(args))
 			return withSandboxNotice(res), err
 		},
 	}

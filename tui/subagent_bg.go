@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // This file is the background half of spawn_subagent (async=true, the
@@ -26,7 +28,7 @@ const maxBackgroundSubagentJobs = 4
 
 // subagentJobTimeout caps one background job's wall-clock run, matching the
 // budget the sync path gets from invokeToolCmd.
-var subagentJobTimeout = longRunningToolTimeout
+var subagentJobTimeout = tools.PolicyForName("spawn_subagent").Timeout
 
 // subagentJob is one background spawn_subagent call (one or more tasks).
 type subagentJob struct {

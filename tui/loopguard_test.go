@@ -160,6 +160,106 @@ func TestBannedToolIsRefusedInDispatch(t *testing.T) {
 	}
 }
 
+// Guard advisories are turn messages, not mid-history system messages: many
+// open-weight chat templates only honor a leading system message, and the
+// advisory that breaks a loop is the one that must not be dropped.
+func TestGuardAdvisoriesAreUserTurnsAfterResults(t *testing.T) {
+	m := interruptTestModel()
+	m.todos = &todoList{}
+	m.profile.SupportsTools = true
+	m.history = []api.Message{{Role: "user", Content: "find the bug"}}
+	// Two reads of a.go already happened this turn, so this batch's third read
+	// trips both the re-read advisory and its stop.
+	m.turnReads = map[string]int{"read_file\x01a.go": 2}
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{tc("read_file", `{"path":"a.go"}`)},
+		results: []api.Message{{Role: "tool", ToolName: "read_file", Content: "contents"}},
+		started: []bool{true},
+		done:    1,
+	}
+
+	m.processPendingTools()
+	if m.stream != nil {
+		m.stream.cancel()
+	}
+
+	lastTool, firstAdvisory := -1, -1
+	var advisories []api.Message
+	for i, msg := range m.history {
+		switch {
+		case msg.Role == "tool":
+			lastTool = i
+		case msg.Advisory:
+			if firstAdvisory < 0 {
+				firstAdvisory = i
+			}
+			advisories = append(advisories, msg)
+		}
+	}
+	if lastTool < 0 {
+		t.Fatalf("batch results never reached history: %+v", m.history)
+	}
+	if firstAdvisory < lastTool {
+		t.Fatalf("advisory at %d splices into the batch's results (last result at %d)", firstAdvisory, lastTool)
+	}
+	want := []string{
+		`[RE-READ DETECTED] You already read "a.go" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.`,
+		"[LOOP BROKEN] You keep re-reading files you already have the contents of. Tools are disabled for your next message — answer the user in plain text with what you know.",
+	}
+	if len(advisories) != len(want) {
+		t.Fatalf("expected %d advisories, got %+v", len(want), advisories)
+	}
+	for i, msg := range advisories {
+		if msg.Content != want[i] {
+			t.Errorf("advisory %d text changed:\n got %q\nwant %q", i, msg.Content, want[i])
+		}
+		if msg.Role != "user" {
+			t.Errorf("advisory %d has role %q, want user", i, msg.Role)
+		}
+		if isUserTurn(msg) {
+			t.Errorf("advisory %d reads as something the human typed", i)
+		}
+	}
+	// The stop is only real if the next request actually goes out tool-less.
+	if m.stream == nil || !m.stream.toolsSuppressed {
+		t.Fatal("re-read stop did not suppress tools for the next message")
+	}
+}
+
+// The role flip's obvious failure mode: a scan for "the last thing the user
+// asked for" stopping on the guards' own output.
+func TestAdvisoryIsNotTheUsersLastMessage(t *testing.T) {
+	m := &Model{history: []api.Message{
+		{Role: "user", Content: "Fix the parser"},
+		{Role: "assistant", ToolCalls: []tools.ToolCall{tc("read_file", `{"path":"a.go"}`)}},
+		{Role: "tool", ToolName: "read_file", Content: "contents"},
+		advisory("[LOOP BROKEN] You keep re-reading files you already have."),
+	}}
+	if got := m.latestUserRequest(); got != "fix the parser" {
+		t.Fatalf("tool-relevance query picked up an advisory: %q", got)
+	}
+
+	// The flag, not the text, is what separates the two — a human is free to
+	// open their message with "[LOOP BROKEN]" and still own the turn.
+	cases := []struct {
+		name string
+		msg  api.Message
+		want bool
+	}{
+		{"advisory", advisory("[LOOP BROKEN] stop"), false},
+		{"advisory with em-dash tag", advisory("[TURN ENDED — NO PROGRESS] done"), false},
+		{"human quoting an advisory tag", api.Message{Role: "user", Content: "[LOOP BROKEN] stop"}, true},
+		{"plain request", api.Message{Role: "user", Content: "fix the parser"}, true},
+		{"assistant", api.Message{Role: "assistant", Content: "hello"}, false},
+		{"tool result", api.Message{Role: "tool", Content: "contents"}, false},
+	}
+	for _, c := range cases {
+		if got := isUserTurn(c.msg); got != c.want {
+			t.Errorf("%s: isUserTurn=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestRepeatedOutcomeWarnsAtThreeAndStopsAtFive(t *testing.T) {
 	m := &Model{}
 	calls := []tools.ToolCall{tc("edit_file", `{"path":"same.go","old_string":"x","new_string":"y"}`)}
@@ -625,7 +725,7 @@ func TestSuppressedRequestDropsTextToolCall(t *testing.T) {
 		}
 	}
 	last := m.history[len(m.history)-1]
-	if last.Role != "system" || !strings.Contains(last.Content, "NOT executed") {
+	if !last.Advisory || !strings.Contains(last.Content, "NOT executed") {
 		t.Fatalf("model was not told its call was dropped: %+v", last)
 	}
 

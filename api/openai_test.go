@@ -49,17 +49,29 @@ func TestToOpenAIMessagesCorrelatesToolIDs(t *testing.T) {
 
 // The loop guards splice system advisories between an assistant's tool calls and
 // their results; the correlation has to see through them.
-func TestToOpenAIMessagesSkipsInterleavedSystem(t *testing.T) {
-	got := toOpenAIMessages([]Message{
-		{Role: "assistant", ToolCalls: []tools.ToolCall{call("grep", `{}`)}},
-		{Role: "system", Content: "[REPEATING ACTION] ..."},
-		{Role: "tool", ToolName: "grep", Content: "hit"},
-	})
-	if len(got[0].ToolCalls) != 1 {
-		t.Fatal("tool call was dropped despite having a result")
-	}
-	if got[2].ToolCallID != got[0].ToolCalls[0].ID {
-		t.Errorf("result not correlated across the system message")
+// A message landing between an assistant's calls and their results must not
+// break the correlation, whatever role it carries: the mode handoff appends a
+// system message mid-batch, a background sub-agent notifies mid-batch, and the
+// loop guards now speak as the user.
+func TestToOpenAIMessagesCorrelatesAcrossInterleavedTurns(t *testing.T) {
+	for _, interleaved := range []Message{
+		{Role: "system", Content: "Plan Summary from Session Notes ..."},
+		{Role: "user", Content: "[REPEATING ACTION] ..."},
+		{Role: "user", Content: "actually, check the parser too"},
+	} {
+		t.Run(interleaved.Role+"/"+interleaved.Content[:8], func(t *testing.T) {
+			got := toOpenAIMessages([]Message{
+				{Role: "assistant", ToolCalls: []tools.ToolCall{call("grep", `{}`)}},
+				interleaved,
+				{Role: "tool", ToolName: "grep", Content: "hit"},
+			})
+			if len(got[0].ToolCalls) != 1 {
+				t.Fatal("tool call was dropped despite having a result")
+			}
+			if got[2].ToolCallID != got[0].ToolCalls[0].ID {
+				t.Errorf("result not correlated across the interleaved %s message", interleaved.Role)
+			}
+		})
 	}
 }
 

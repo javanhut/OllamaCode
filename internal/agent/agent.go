@@ -269,7 +269,10 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 // finalize asks the model, with NO tools available, to write up whatever it
 // gathered. Passing no tools forces a prose answer rather than another tool call.
 func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, int, int) {
-	msgs = append(msgs, api.Message{Role: "user", Content: "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."})
+	// Advisory: the harness wrote this, not the user. Without the flag the trace
+	// exporter reads it as the sub-agent's task and every limit-hitting
+	// trajectory trains on the nudge instead of the real prompt.
+	msgs = append(msgs, api.Message{Role: "user", Advisory: true, Content: "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."})
 	req := api.ChatRequest{
 		Model:    opts.Model,
 		Messages: msgs,

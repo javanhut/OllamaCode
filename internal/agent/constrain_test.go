@@ -201,6 +201,35 @@ func TestIsFormatRejection(t *testing.T) {
 	if IsFormatRejection(nil) {
 		t.Fatal("nil error is not a rejection")
 	}
+	// An oversized prompt is not the host refusing the schema; classifying it as
+	// one steps the rung cache down over something nobody objected to.
+	if IsFormatRejection(fmt.Errorf(`unexpected status code: 400: {"error":{"code":"context_length_exceeded"}}`)) {
+		t.Fatal("context overflow 400 must not read as a format rejection")
+	}
+}
+
+func TestIsContextOverflow(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"llamacpp", fmt.Errorf("unexpected status code: 400: the request exceeds the available context size, try increasing it"), true},
+		{"ollama", fmt.Errorf("unexpected status code: 400: input length exceeds maximum context length"), true},
+		{"openai code", fmt.Errorf(`unexpected status code: 400: {"error":{"code":"context_length_exceeded"}}`), true},
+		{"openai prose", fmt.Errorf("unexpected status code: 400: This model's maximum context length is 8192 tokens"), true},
+		{"anthropic", fmt.Errorf("unexpected status code: 400: prompt is too long: 205000 tokens > 200000 maximum"), true},
+		{"mixed case", fmt.Errorf("Prompt Is Too Long"), true},
+		{"schema rejection", schemaRejection(), false},
+		{"server error", fmt.Errorf("unexpected status code: 500: internal error"), false},
+		{"transport", fmt.Errorf("http request failed: connection reset"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsContextOverflow(c.err); got != c.want {
+			t.Errorf("%s: IsContextOverflow(%v) = %v, want %v", c.name, c.err, got, c.want)
+		}
+	}
 }
 
 func TestConstrainedDecodingSupported(t *testing.T) {

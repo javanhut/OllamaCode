@@ -198,7 +198,10 @@ func (t *trajectory) extractContext(ev Event) {
 		t.system = msgs[0].Content
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "user" {
+		// Advisory skipped: a recorded request carries the loop guards'
+		// user-role nudges too, and "[REPEATING ACTION] …" is not the turn's
+		// prompt for a training record.
+		if msgs[i].Role == "user" && !msgs[i].Advisory {
 			t.prompt = msgs[i].Content
 			return
 		}

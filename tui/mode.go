@@ -256,6 +256,22 @@ func (m *Model) planGateMessage() string {
 	return msg
 }
 
+// markPlanPresented checkpoints the plan the user is now looking at, so their
+// next message counts as the review that opens the write gate. Any turn that
+// ends in plan mode with a plan recorded has presented it — the model may ask
+// for confirmation with ask_user or just summarize it in prose, and only the
+// first path used to record the checkpoint. Without it "yes" changed nothing
+// and switch_mode("write") looped against the gate until the turn ran out.
+// A turn a guard stopped is the exception: it ends with "explain the blocker",
+// not with a plan. Arming the checkpoint there let the user's next message — an
+// unrelated follow-up question — count as the review of a plan they never saw,
+// and switch_mode("write") was granted on it.
+func (m *Model) markPlanPresented() {
+	if m.mode == PlanMode && m.planRecorded() && !m.turnStoppedByGuard {
+		m.planReviewRequested = strings.TrimSpace(m.notes.get())
+	}
+}
+
 // planRecorded reports whether a plan has been written to notes since plan mode
 // was entered. Emptiness alone is not enough: notes left over from an earlier
 // task would pass the check while describing the wrong work.
@@ -337,9 +353,12 @@ func (m *Model) toolsForMode() []tools.Tool {
 	return out
 }
 
+// latestUserRequest is the relevance query for selectRelevantTools, so it has
+// to be the human's request: a loop-guard advisory rides the user role too, and
+// letting one through would silently rewrite which tools a small model can see.
 func (m *Model) latestUserRequest() string {
 	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role == "user" {
+		if isUserTurn(m.history[i]) {
 			return strings.ToLower(m.history[i].Content)
 		}
 	}

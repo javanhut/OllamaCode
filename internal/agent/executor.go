@@ -52,14 +52,14 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 		e.Before(call)
 	}
 
-	out, err := invokeWithTimeout(ctx, e.Registry, call, ToolTimeout(call))
+	out, err := invokeWithTimeout(ctx, e.Registry, call, tools.ToolCallTimeout(call))
 	if err != nil && tools.ShouldFormatRepair(call, err) && e.Host != nil {
 		event.ArgumentFailure = true
 		event.RepairAttempted = true
 		if fixed, ok := RepairArgsViaFormat(ctx, e.Host, e.Registry, e.Model, e.NumCtx, call); ok {
 			call.Function.Arguments = fixed
 			event.Call = call
-			out, err = invokeWithTimeout(ctx, e.Registry, call, ToolTimeout(call))
+			out, err = invokeWithTimeout(ctx, e.Registry, call, tools.ToolCallTimeout(call))
 			if err == nil {
 				event.RepairSucceeded = true
 			}
@@ -87,7 +87,22 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 	structured := e.StructuredResults == nil || *e.StructuredResults
 	if err != nil && structured {
 		hint := tools.RepairHint(call, err)
-		event.Result = tools.EncodeToolFailure(call.Function.Name+" failed", hint, isRetryableToolError(err))
+		// Handlers that shell out return the command's own output alongside the
+		// error (`return string(out), err`) precisely so the model can read why
+		// it failed. Dropping it left every git_* failure reading "error: exit
+		// status 1" while the real answer — "not an Ivaldi repository", a
+		// rejected push, a merge conflict — sat in `out`, so the model retried
+		// blind instead of reporting the blocker.
+		//
+		// It rides the envelope's evidence rather than the hint, through the same
+		// encoder every other result uses: concatenating it into the hint sent it
+		// down the one path that skips evidence splitting and spilling, so a
+		// 300KB merge conflict lost its middle with no spill_path to read back.
+		if diag := strings.TrimSpace(out); diag != "" {
+			event.Result = tools.EncodeToolFailureWithOutput(call.Function.Name+" failed", hint, isRetryableToolError(err), diag)
+		} else {
+			event.Result = tools.EncodeToolFailure(call.Function.Name+" failed", hint, isRetryableToolError(err))
+		}
 	} else if err == nil && structured {
 		event.Result = tools.EncodeToolSuccess(call.Function.Name, out)
 	} else if err != nil {

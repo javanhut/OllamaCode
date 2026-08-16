@@ -141,9 +141,9 @@ func TestSwitchModeToolSequencesFollowingCallsAgainstNewMode(t *testing.T) {
 }
 
 func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
-	oldTimeout := defaultToolCallTimeout
-	defaultToolCallTimeout = 50 * time.Millisecond
-	defer func() { defaultToolCallTimeout = oldTimeout }()
+	oldTimeout := tools.DefaultToolTimeout
+	tools.DefaultToolTimeout = 50 * time.Millisecond
+	defer func() { tools.DefaultToolTimeout = oldTimeout }()
 
 	m := &Model{
 		tools: tools.NewRegistry(),
@@ -183,46 +183,8 @@ func TestInvokeToolCmdTimesOutStuckHandler(t *testing.T) {
 	}
 }
 
-func TestToolCallTimeoutPolicy(t *testing.T) {
-	tests := []struct {
-		name string
-		call tools.ToolCall
-		want time.Duration
-	}{
-		{
-			name: "compat git_show is short",
-			call: tools.ToolCall{Function: tools.ToolCallFunction{
-				Name:      "git_show",
-				Arguments: json.RawMessage(`{}`),
-			}},
-			want: localInspectToolTimeout,
-		},
-		{
-			name: "shell requested timeout gets cleanup grace",
-			call: tools.ToolCall{Function: tools.ToolCallFunction{
-				Name:      "run_shell",
-				Arguments: json.RawMessage(`{"timeout_sec":1}`),
-			}},
-			want: time.Second + shellToolTimeoutGrace,
-		},
-		{
-			name: "unknown tools do not get long budget",
-			call: tools.ToolCall{Function: tools.ToolCallFunction{
-				Name:      "custom_tool",
-				Arguments: json.RawMessage(`{}`),
-			}},
-			want: defaultToolCallTimeout,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := toolCallTimeout(tt.call); got != tt.want {
-				t.Fatalf("expected %s, got %s", tt.want, got)
-			}
-		})
-	}
-}
+// The per-tool timeout classification moved onto tools.ToolPolicy; its table
+// test lives in tools/policy_test.go now.
 
 func TestSelectedTranscriptLineUsesSelectionRange(t *testing.T) {
 	m := &Model{

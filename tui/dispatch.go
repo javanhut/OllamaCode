@@ -108,7 +108,7 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 			req, _ = parseModeSwitchArgs(call.Function.Arguments)
 		}
 
-		timeout := toolCallTimeout(call)
+		timeout := tools.ToolCallTimeout(call)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
@@ -144,44 +144,6 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 			}
 		}
 	}
-}
-
-func toolCallTimeout(call tools.ToolCall) time.Duration {
-	switch call.Function.Name {
-	case "run_shell":
-		return shellToolCallTimeout(call)
-	case "git_status", "git_diff", "git_log", "git_show", "git_branch",
-		"read_file", "list_directory", "find_files", "grep", "find_symbol", "file_info",
-		"get_working_directory", "process_list", "disk_usage", "system_info",
-		"read_session_notes", "recall":
-		return localInspectToolTimeout
-	case "write_file", "edit_file", "append_file", "delete_file", "move_file",
-		"copy_file", "make_directory", "touch", "git_add", "git_commit", "git_checkout",
-		"git_stash", "git_merge", "git_reset", "git_remote", "process_kill",
-		"update_session_notes", "append_session_notes", "remember", "forget":
-		return localMutatingToolTimeout
-	case "web_search", "web_fetch", "code_index", "semantic_search":
-		return networkToolTimeout
-	case "spawn_subagent", "parallel_edit":
-		return longRunningToolTimeout
-	default:
-		return defaultToolCallTimeout
-	}
-}
-
-func shellToolCallTimeout(call tools.ToolCall) time.Duration {
-	var a struct {
-		TimeoutSec float64 `json:"timeout_sec"`
-	}
-	_ = json.Unmarshal(call.Function.Arguments, &a)
-	timeout := 30 * time.Second
-	if a.TimeoutSec > 0 {
-		timeout = time.Duration(a.TimeoutSec * float64(time.Second))
-	}
-	if timeout > 300*time.Second {
-		timeout = 300 * time.Second
-	}
-	return timeout + shellToolTimeoutGrace
 }
 
 func (m *Model) processPendingTools() tea.Cmd {
@@ -240,9 +202,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			return nil
 		}
 		if questionIndex >= 0 {
-			if m.mode == PlanMode && m.planRecorded() {
-				m.planReviewRequested = strings.TrimSpace(m.notes.get())
-			}
+			m.markPlanPresented()
 			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
 			m.finalizeCheckpoint(m.lastUserMessage())
 			m.finishTurnClock()
@@ -258,31 +218,19 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// trips when the observable evidence is repeating, not merely when the
 		// model uses the same pair of tools productively.
 		if warnOscillation && !m.oscillationWarned {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[NO PROGRESS DETECTED] You are alternating between the same actions and receiving the same results. Stop, state your blocker explicitly, and try a materially different approach.",
-			})
+			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] You are alternating between the same actions and receiving the same results. Stop, state your blocker explicitly, and try a materially different approach."))
 			m.oscillationWarned = true
 		}
 		if stopOscillation {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[LOOP BROKEN] The same A/B outcomes continued after the warning. Tools are disabled for your next message — explain the blocker and summarize what you know.",
-			})
-			m.suppressToolsOnce = true
+			m.history = append(m.history, advisory("[LOOP BROKEN] The same A/B outcomes continued after the warning. Tools are disabled for your next message — explain the blocker and summarize what you know."))
+			m.stopForBlockerReport()
 		}
 		if warnStagnant {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[NO PROGRESS DETECTED] Your last three rounds of tool calls returned nothing this turn has not already seen. Use the evidence you have, take a materially different action, or state the blocker.",
-			})
+			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] Your last three rounds of tool calls returned nothing this turn has not already seen. Use the evidence you have, take a materially different action, or state the blocker."))
 		}
 		if stopStagnant {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command.",
-			})
-			m.suppressToolsOnce = true
+			m.history = append(m.history, advisory("[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command."))
+			m.stopForBlockerReport()
 			// A tool-less message is not an ending on its own: the auto-continue on
 			// open todos and the citation gate each pull the model straight back in,
 			// which is exactly what kept the logged loop fed. This flag closes those
@@ -299,39 +247,30 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// model talks itself back into the loop. Whichever fires, only one speaks.
 		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls, madeProgress)
 		if warnRepeat && !warnStagnant {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak),
-			})
+			m.history = append(m.history, advisory(fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak)))
 		}
 		if announceStop && !stopStagnant {
 			content := fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak)
 			if m.bannedTools[batchTool] {
 				content = fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", batchTool, m.sameToolStreak)
 			}
-			m.history = append(m.history, api.Message{Role: "system", Content: content})
+			m.history = append(m.history, advisory(content))
 		}
 		if stopRepeat {
-			m.suppressToolsOnce = true
+			m.stopForBlockerReport()
 		}
 
 		// Re-read guard: the streak guard above resets on any interleaved call,
 		// so it misses a model re-reading files it already has. Re-reading a
 		// file nothing has mutated is always wasted work.
 		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`)),
-			})
+			m.history = append(m.history, advisory(fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`))))
 			if stopRereads {
 				if !m.rereadStopAnnounced {
 					m.rereadStopAnnounced = true
-					m.history = append(m.history, api.Message{
-						Role:    "system",
-						Content: "[LOOP BROKEN] You keep re-reading files you already have the contents of. Tools are disabled for your next message — answer the user in plain text with what you know.",
-					})
+					m.history = append(m.history, advisory("[LOOP BROKEN] You keep re-reading files you already have the contents of. Tools are disabled for your next message — answer the user in plain text with what you know."))
 				}
-				m.suppressToolsOnce = true
+				m.stopForBlockerReport()
 			}
 		}
 
@@ -343,11 +282,8 @@ func (m *Model) processPendingTools() tea.Cmd {
 			limit = 100
 		}
 		if m.stepCount >= limit {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed.",
-			})
-			m.suppressToolsOnce = true
+			m.history = append(m.history, advisory("[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed."))
+			m.stopForBlockerReport()
 		}
 
 		cmd := m.startStream()

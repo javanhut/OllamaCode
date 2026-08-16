@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Linting is opt-in by presence: a linter that is not installed is not an
@@ -54,7 +56,7 @@ func Lint(ctx context.Context, root string, changed []string) string {
 	if !ok {
 		return ""
 	}
-	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	c := tools.NewShellCommand(ctx, cmd)
 	c.Dir = root
 	out, err := c.CombinedOutput()
 	if err == nil {

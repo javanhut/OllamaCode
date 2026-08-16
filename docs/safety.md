@@ -41,7 +41,12 @@ workspace root — the enclosing repo, or the launch directory outside one.
 `~` is not expanded by the tools, and absolute paths outside the root are
 rejected unless the user listed them in `jail_allowlist`. The rejection is a
 normal retryable tool error, so the model is told to retry inside the
-workspace rather than silently redirected.
+workspace rather than silently redirected. The only other readable location is
+the harness's own spill directory — a random 0700 directory created under
+`$TMPDIR` at first use, files created `O_EXCL` at 0600 — which holds oversized
+tool output the harness itself wrote so the model can read it back; it is not
+part of the `run_shell` sandbox's writable set, and it is removed when ocode
+exits normally.
 
 `run_shell` commands are additionally wrapped in the OS sandbox when one is
 available — `sandbox-exec` (seatbelt) on macOS, `bwrap` on Linux: reads,
@@ -51,6 +56,26 @@ string itself is not parsed or confined — in auto mode that is precisely why
 the sandbox exists. With neither binary on PATH the command runs as before
 and the first result carries a one-time warning; `shell_sandbox: false` in
 config is the explicit opt-out.
+
+Every shell the model can reach — `run_shell` foreground and background, the
+verification gate's compile check, and the linter, all three of which run code
+the model just wrote — starts with a scrubbed environment: variables whose name
+contains `key`, `secret`, `token`, `password`, `passwd`, `credential`, `_pat`
+or `dsn` are dropped, as is any value shaped like a URL with a password in it
+(`postgres://app:s3cr3t@host/db`). `env_list` and `env_get` apply the same
+filter, so there is no second door. `PATH`, `HOME`, `LANG`, `TERM` and the rest
+are untouched.
+
+This stops casual environment dumping — `env`, a build script that prints its
+environment, a test that reads `os.Getenv`. It is not a boundary against a
+shell that goes looking: on Linux, `bwrap` shares the host PID namespace, so
+`/proc/<ocode-pid>/environ` still holds the unscrubbed set. Treat it as
+defence in depth, not containment.
+
+The cost is real — a command that authenticates from an environment credential
+(`gh` with `GH_TOKEN`, `aws` with `AWS_SESSION_TOKEN`, `curl` with `$API_KEY`)
+now sees it unset and must use a config-file or keychain login instead. There
+is deliberately no opt-out.
 
 ## Untrusted web content
 

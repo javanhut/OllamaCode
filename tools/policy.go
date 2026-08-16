@@ -1,5 +1,10 @@
 package tools
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // ToolMode is a provider-independent mode bitmask. Keeping policy beside the
 // registry gives every caller (TUI, subagents, MCP adapters) one source of
 // truth without making the tools package depend on the UI package.
@@ -31,7 +36,34 @@ type ToolPolicy struct {
 	Destructive    bool
 	Network        bool
 	Cost           ToolCost
+	// Timeout is how long a caller waits before declaring the handler wedged.
+	// It rides on the policy because the TUI dispatcher and the headless
+	// Executor both need it, and the two name switches that used to answer this
+	// question had already drifted apart (one defaulted to 90s, the other to
+	// 2m) while a newly registered tool silently got whichever it hit.
+	Timeout time.Duration
 }
+
+// Deadline classes. These are stuck-handler budgets, not performance targets.
+// They are applied by name below rather than folded into the capability groups
+// because the two classifications are genuinely orthogonal: get_project_tree is
+// a lean read that can walk a huge repo, git_branch is destructive but instant.
+const (
+	inspectTimeout = 30 * time.Second // local read-only lookup
+	mutateTimeout  = 90 * time.Second // local write or git plumbing
+	networkTimeout = 2 * time.Minute  // leaves the machine
+	longTimeout    = 10 * time.Minute // runs a whole nested agent
+	// run_shell kills at its own deadline and then reports; the harness
+	// deadline has to outlive that or the report loses the race.
+	shellDefaultTimeout = 30 * time.Second
+	shellMaxTimeout     = 300 * time.Second
+	shellGrace          = 5 * time.Second
+)
+
+// DefaultToolTimeout covers anything unclassified, including external/MCP tools.
+// A var, not a const, so the watchdog test can shrink it (it is read at call
+// time only on the unknown-tool path; the table below bakes its value at init).
+var DefaultToolTimeout = 2 * time.Minute
 
 func (p ToolPolicy) Allows(mode ToolMode) bool { return p.Modes&mode != 0 }
 
@@ -103,8 +135,46 @@ var toolPolicies = func() map[string]ToolPolicy {
 	for _, name := range []string{"stage_edit", "stage_write", "stage_delete"} {
 		m[name] = policy(ModeMutable, false, false, false, ToolCostLow)
 	}
+
+	setTimeout(m, inspectTimeout,
+		"read_file", "list_directory", "find_files", "grep", "file_info",
+		"get_working_directory", "git_status", "git_diff", "git_log", "git_branch",
+		"find_symbol", "process_list", "disk_usage", "read_session_notes", "recall")
+	setTimeout(m, mutateTimeout,
+		"write_file", "edit_file", "append_file", "delete_file", "move_file",
+		"copy_file", "make_directory", "touch", "git_add", "git_commit", "git_checkout",
+		"git_stash", "git_merge", "git_reset", "git_remote", "process_kill",
+		"update_session_notes", "append_session_notes", "remember", "forget")
+	setTimeout(m, networkTimeout,
+		"web_search", "web_search_api", "web_fetch", "web_crawl", "code_index", "semantic_search")
+	setTimeout(m, longTimeout, "spawn_subagent", "parallel_edit")
+	// The ceiling, for a caller holding only the name — ToolCallTimeout reads
+	// the call's own timeout_sec instead.
+	setTimeout(m, shellMaxTimeout+shellGrace, "run_shell")
+
+	// Everything left is a default-budget tool. Doing it here rather than at
+	// each lookup means a zero Timeout in the table is impossible, so nobody
+	// can arm a context.WithTimeout(0) by forgetting a name.
+	for name, p := range m {
+		if p.Timeout <= 0 {
+			p.Timeout = DefaultToolTimeout
+			m[name] = p
+		}
+	}
 	return m
 }()
+
+// setTimeout stamps a deadline class onto tools already in the table. Names not
+// in it are skipped rather than created: a bare Timeout with no Modes would read
+// as "allowed nowhere" and quietly shadow PolicyForName's conservative default.
+func setTimeout(m map[string]ToolPolicy, d time.Duration, names ...string) {
+	for _, name := range names {
+		if p, ok := m[name]; ok {
+			p.Timeout = d
+			m[name] = p
+		}
+	}
+}
 
 // PolicyForName returns the built-in policy. Unknown tools default to the
 // conservative external-tool posture: write/auto only, destructive, and not
@@ -113,5 +183,33 @@ func PolicyForName(name string) ToolPolicy {
 	if p, ok := toolPolicies[name]; ok {
 		return p
 	}
-	return policy(ModeMutable, false, true, true, ToolCostHigh)
+	p := policy(ModeMutable, false, true, true, ToolCostHigh)
+	p.Timeout = DefaultToolTimeout
+	return p
+}
+
+// ToolCallTimeout is the deadline for one call, for every caller: TUI dispatch
+// and the headless Executor. It used to be a name switch at each of those two
+// sites, duplicating the classification this table already carries — so a newly
+// registered tool got the default at one site and something else at the other.
+func ToolCallTimeout(call ToolCall) time.Duration {
+	// run_shell is the exception: the model picks its own budget per call, and
+	// the handler kills at exactly that number.
+	if call.Function.Name == "run_shell" {
+		return shellCallTimeout(call.Function.Arguments) + shellGrace
+	}
+	return PolicyForName(call.Function.Name).Timeout
+}
+
+// shellCallTimeout is the budget the run_shell handler will enforce on itself
+// for these arguments. Callers arming an outer deadline add shellGrace.
+func shellCallTimeout(args json.RawMessage) time.Duration {
+	var a struct {
+		TimeoutSec float64 `json:"timeout_sec"`
+	}
+	_ = json.Unmarshal(args, &a)
+	if a.TimeoutSec <= 0 {
+		return shellDefaultTimeout
+	}
+	return min(time.Duration(a.TimeoutSec*float64(time.Second)), shellMaxTimeout)
 }

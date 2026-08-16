@@ -1,6 +1,9 @@
 package tools
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func firstCall(t *testing.T, calls []ToolCall) ToolCall {
 	t.Helper()
@@ -93,5 +96,40 @@ func TestParse_PlainTextReturnsNil(t *testing.T) {
 	r := DefaultRegistry()
 	if got := r.ParseToolCallsFromContent("I've finished the task. The fix is in place."); got != nil {
 		t.Fatalf("plain text should return nil, got %v", got)
+	}
+}
+
+// A call parsed out of content is consumed into ToolCalls, so the JSON must not
+// survive in the message's text — echoed back it reads as the model's answer and
+// gets repeated verbatim on the next round.
+func TestStripToolCalls_ConsumesWholeMessageCall(t *testing.T) {
+	raw := "{\n  \"arguments\": {\"path\": \".\"},\"name\": \"list_directory\"}"
+	if got := StripToolCalls(raw); got != "" {
+		t.Errorf("StripToolCalls = %q, want empty", got)
+	}
+	fenced := "Checking the directory.\n```json\n{\"name\": \"grep\", \"arguments\": {\"pattern\": \"TODO\"}}\n```"
+	if got := StripToolCalls(fenced); got != "Checking the directory." {
+		t.Errorf("StripToolCalls dropped the prose: %q", got)
+	}
+}
+
+// A model that answers with code AND a tagged tool call must keep its code.
+// StripToolCalls used to drop every fenced block, so the answer arrived at the
+// transcript — and at every later request — as the sentence before the fence.
+func TestStripToolCallsKeepsUnrelatedCodeFences(t *testing.T) {
+	content := "Here is the fix:\n\n```go\nfunc f() {}\n```\n\n<tool_call>{\"name\":\"edit_file\",\"arguments\":{}}</tool_call>"
+	got := StripToolCalls(content)
+	if !strings.Contains(got, "func f() {}") {
+		t.Errorf("code fence dropped: %q", got)
+	}
+	if strings.Contains(got, "edit_file") {
+		t.Errorf("tool call survived: %q", got)
+	}
+}
+
+func TestStripToolCallsDropsJSONFenceCall(t *testing.T) {
+	content := "```json\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.go\"}}\n```"
+	if got := StripToolCalls(content); got != "" {
+		t.Errorf("json fence call not stripped: %q", got)
 	}
 }

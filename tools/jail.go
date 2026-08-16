@@ -144,6 +144,14 @@ func jailCheck(p string) error {
 			return nil
 		}
 	}
+	// The spill dir holds output this process wrote itself, and the envelope's
+	// hint tells the model to read_file or grep that exact path — jailing it away
+	// would make the locator a dead end. Checked here and deliberately NOT added
+	// to jailRoots(): that is also the sandbox's writable set, and run_shell's
+	// write permissions must not widen because of a result-encoding detail.
+	if dir := spillDirIfCreated(); dir != "" && pathWithin(dir, resolved) {
+		return nil
+	}
 	roots := jailRoots()
 	return fmt.Errorf("path %q resolves to %q, outside the workspace root %q — file access is confined to the workspace; retry with a path inside it, or ask the user to add the location to jail_allowlist in config",
 		p, resolved, roots[0])

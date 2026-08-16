@@ -41,6 +41,13 @@ func (m *Model) resetTurnGuards() {
 	m.startTurnClock()
 	m.stepCount = 0
 	m.streamRetries = 0
+	// Overflow recovery is scoped to the USER TURN, not the session — without
+	// this reset a session gets exactly one forced compaction ever. It is also
+	// what makes esc safe: interruptTurn comes through here, so a compactDoneMsg
+	// landing after an abandoned turn finds no retry owed.
+	m.overflowErr = nil
+	m.overflowTokens = 0
+	m.overflowRetried = false
 	m.recentOutcomes = m.recentOutcomes[:0]
 	m.oscillationStreak = 0
 	m.stagnantRounds = 0
@@ -52,6 +59,7 @@ func (m *Model) resetTurnGuards() {
 	m.oscillationWarned = false
 	m.suppressToolsOnce = false
 	m.endTurnAfterReply = false
+	m.turnStoppedByGuard = false
 	m.lastStepRepeatKey = ""
 	m.sameToolStreak = 0
 	m.sameToolWarned = false
@@ -86,6 +94,26 @@ func (m *Model) resetTurnGuards() {
 	m.lastPreamble = ""
 	m.preambleStreak = 0
 	m.preambleWarned = false
+}
+
+// advisory builds a loop-guard message addressed to the model. It rides the
+// "user" role rather than "system" because many open-weight chat templates
+// (Qwen, Llama and Mistral variants) only honor a LEADING system message and
+// reorder, merge, or silently drop one that shows up mid-conversation — and the
+// message that breaks a loop is the one that must not be dropped. Callers append
+// it after the batch's tool results, so it reads as an ordinary turn instead of
+// splicing into a call/result pair the way a system message did.
+func advisory(content string) api.Message {
+	return api.Message{Role: "user", Content: content, Advisory: true}
+}
+
+// isUserTurn reports whether a message is something the human actually typed,
+// as opposed to an advisory riding the same role. Every backwards scan looking
+// for "the last thing the user asked for" wants this: checkpoint labels, the
+// turn anchor, the citation gate's once-per-turn latch. Role == "user" alone
+// now stops on the guards' own output.
+func isUserTurn(msg api.Message) bool {
+	return msg.Role == "user" && !msg.Advisory
 }
 
 // dedupeCalls: see tools.DedupeCalls (shared with the headless sub-agent loop).
@@ -415,3 +443,15 @@ func (m *Model) observePreamble(preamble string) (warn, stop bool) {
 // shouldFormatRepair to tools too (SalvageJSON/RepairHint/ShouldFormatRepair), so
 // the headless sub-agent loop reuses the same tool-call safety. See
 // tools/loopguard.go and tools/repair.go.
+
+// stopForBlockerReport disables tools for the model's next message because a
+// guard stopped this turn — a loop, no progress, the step budget, a check that
+// will not go green. The reply that follows is a blocker report.
+//
+// Separate from the bare suppressToolsOnce the citation gate sets: that one
+// withholds tools to re-ask for the SAME answer with citations, which is still
+// an ordinary answer. The distinction is what markPlanPresented reads.
+func (m *Model) stopForBlockerReport() {
+	m.suppressToolsOnce = true
+	m.turnStoppedByGuard = true
+}

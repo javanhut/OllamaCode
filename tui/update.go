@@ -143,7 +143,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastVerification = fmt.Sprintf("%s (`%s`, checkpoint %s)", msg.label, msg.command, msg.fingerprint)
 			if m.profile.reviewPass() && !m.reviewedThisTurn {
 				m.reviewedThisTurn = true
-				m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf("[ADVERSARIAL REVIEW] Verification passed: %s. Before finishing, inspect the actual diff as a skeptical reviewer. Look for incorrect assumptions, missing edge cases, unsafe behavior, and inadequate tests. If you find a real issue, fix it and verify again. If not, state that the review found no blocking issue and finish.", m.lastVerification)})
+				m.history = append(m.history, advisory(fmt.Sprintf("[ADVERSARIAL REVIEW] Verification passed: %s. Before finishing, inspect the actual diff as a skeptical reviewer. Look for incorrect assumptions, missing edge cases, unsafe behavior, and inadequate tests. If you find a real issue, fix it and verify again. If not, state that the review found no blocking issue and finish.", m.lastVerification)))
 				m.busySince = time.Now()
 				m.refreshTranscript()
 				return m, m.startStream()
@@ -158,14 +158,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.verifyAttempts++
 		if m.verifyAttempts >= maxVerifyAttempts {
-			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
+			m.history = append(m.history, advisory(fmt.Sprintf(
 				"[VERIFICATION STILL FAILING after %d attempts] `%s` does not pass:\n\n%s\n\nStop editing. Explain to the user in plain text what is broken and why you couldn't fix it — do not claim it works.",
-				m.verifyAttempts, msg.label, repairDetail(msg.output, msg.lint))})
-			m.suppressToolsOnce = true
+				m.verifyAttempts, msg.label, repairDetail(msg.output, msg.lint))))
+			m.stopForBlockerReport()
 		} else {
-			m.history = append(m.history, api.Message{Role: "system", Content: fmt.Sprintf(
+			m.history = append(m.history, advisory(fmt.Sprintf(
 				"[VERIFICATION FAILED] You are NOT done — `%s` failed. Read the errors, fix the actual cause (don't blame the tools), then it will be re-checked:\n\n%s",
-				msg.label, repairDetail(msg.output, msg.lint))})
+				msg.label, repairDetail(msg.output, msg.lint))))
 		}
 		m.busySince = time.Now()
 		cmds = append(cmds, m.startStream())
@@ -638,10 +638,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// parses them regardless would walk straight past the text-form drop below
 		// and keep a stopped turn running. Hand the reply to the normal end-of-turn
 		// path with the calls gone, so the answer still reaches the user.
+		// Observed AFTER this branch: the suppressed path re-enters as
+		// chatDoneMsg, which observes the same count again, and two samples of one
+		// number defeat the outlier smoothing shouldCompact relies on.
 		if m.stream != nil && m.stream.toolsSuppressed {
-			m.history = append(m.history, api.Message{Role: "system", Content: droppedToolCallNotice(msg.calls)})
+			m.history = append(m.history, advisory(droppedToolCallNotice(msg.calls)))
 			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount})
 		}
+		m.observePromptEval(msg.promptEval)
 		m.recordModelResponse(msg.gen, preamble, msg.calls, msg.promptEval, msg.evalCount)
 		calls := dedupeCalls(msg.calls)
 		if m.trace != nil && len(calls) != len(msg.calls) {
@@ -657,16 +661,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// slightly different words before every tool call. Call it out once;
 		// if it keeps going, force a plain-text answer.
 		if warn, stopEcho := m.observePreamble(preamble); warn {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[REPEATING YOURSELF] That message restates your previous one. Do not re-announce or rephrase your intent — if you need information, call the tool; if you already have the answer, give it. No narration before tool calls.",
-			})
+			m.history = append(m.history, advisory("[REPEATING YOURSELF] That message restates your previous one. Do not re-announce or rephrase your intent — if you need information, call the tool; if you already have the answer, give it. No narration before tool calls."))
 		} else if stopEcho {
-			m.history = append(m.history, api.Message{
-				Role:    "system",
-				Content: "[LOOP BROKEN] You keep restating the same message. Tools are disabled for your next response — answer the user in plain text.",
-			})
-			m.suppressToolsOnce = true
+			m.history = append(m.history, advisory("[LOOP BROKEN] You keep restating the same message. Tools are disabled for your next response — answer the user in plain text."))
+			m.stopForBlockerReport()
 		}
 		m.pending = &pendingBatch{
 			calls:   calls,
@@ -793,6 +791,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = ""
 		}
 		m.totalTokens = msg.promptEval + msg.evalCount
+		m.observePromptEval(msg.promptEval)
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.thinking != "" {
 			m.recordThinking(msg.thinking)
@@ -839,7 +838,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_dropped_suppressed", Turn: msg.gen, Model: m.modelName,
 					Metadata: map[string]any{"dropped": len(parsed), "calls": parsedRaw}})
 			}
-			m.history = append(m.history, api.Message{Role: "system", Content: droppedToolCallNotice(parsed)})
+			m.history = append(m.history, advisory(droppedToolCallNotice(parsed)))
 			// Drop the call, keep the answer that came with it. A reply is often a
 			// finished answer plus one self-check call, and blanking the whole
 			// message discarded the corrected answer the citation gate asked for.
@@ -850,9 +849,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.trace.Record(tracepkg.Event{Kind: "tool_calls_parsed_from_content", Turn: msg.gen, Model: m.modelName,
 					Metadata: map[string]any{"received": len(parsedRaw), "kept": len(parsed), "calls": parsedRaw}})
 			}
+			// The call now lives in ToolCalls, so keep only the prose that came
+			// with it. Leaving the raw JSON in Content too echoed the call back to
+			// the model as its own answer on the next request — it read as an
+			// unanswered call and got repeated verbatim, and it rendered as JSON
+			// noise in the transcript.
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
-				Content:   finalAssistant,
+				Content:   tools.StripToolCalls(finalAssistant),
 				ToolCalls: parsed,
 			})
 			m.pending = &pendingBatch{
@@ -883,6 +887,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Role:    "assistant",
 					Content: finalAssistant,
 				})
+			} else if suppressed {
+				// A forced re-answer (citation gate, loop breaker) that comes back
+				// empty is not an interrupted stream either. The answer it was told
+				// to revise is already in the transcript, so the turn still has
+				// output and blaming the connection is simply wrong.
+				m.logActivity("WARNING: empty reply to a forced re-answer; keeping the answer already shown")
 			} else if !dropped {
 				// A dropped tool call is not an interrupted stream: the reply
 				// arrived intact, it just wasn't allowed to be a tool call, and
@@ -905,11 +915,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the stalled model kept rewriting, so nudging it there re-opens the loop.
 			if !m.endTurnAfterReply && m.todos.openCount() > 0 && m.autoContinues < maxAutoContinues && m.stepCount < limit {
 				m.autoContinues++
-				m.history = append(m.history, api.Message{
-					Role: "system",
-					Content: fmt.Sprintf("[CONTINUE] %d todo item(s) are still open:\n%s\nKeep working — take the next item now, and mark items completed via todo_write as you finish them. Only stop when every item is completed, or state your blocker explicitly.",
-						m.todos.openCount(), m.todos.openSummary()),
-				})
+				m.history = append(m.history, advisory(fmt.Sprintf("[CONTINUE] %d todo item(s) are still open:\n%s\nKeep working — take the next item now, and mark items completed via todo_write as you finish them. Only stop when every item is completed, or state your blocker explicitly.",
+					m.todos.openCount(), m.todos.openSummary())))
 				cmds = append(cmds, m.startStream())
 				m.refreshTranscript()
 				break
@@ -961,7 +968,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.archiveSummary = msg.summary
 		m.history = append([]api.Message(nil), m.history[idx:]...)
 		m.rebaseTurnTimes(idx)
+		// The measured counts describe the PRE-compaction prompt, and so does the
+		// in-flight turn's (compaction starts before the request goes out).
+		// Leaving them would re-fire compaction from endTurnTail and halve the
+		// history twice. Fall back to the estimate until a fresh count lands.
+		m.lastPromptEval, m.prevPromptEval = 0, 0
 		m.refreshTranscript()
+
+		// The turn was killed mid-flight by a context-overflow refusal and is
+		// waiting on this pass. Re-issue it ONLY if the request actually got
+		// smaller: a summary as long as the history it replaced overflows
+		// identically, and retrying that forever is worse than the error.
+		// Sending retryStreamMsg (rather than calling startStream here) keeps the
+		// retry sequenced after the history rewrite above, and the gen capture
+		// means an interrupt in between drops it.
+		if err := m.overflowErr; err != nil {
+			m.overflowErr = nil
+			gen := m.turnGen
+			if tokens := m.requestEstimate(); tokens < m.overflowTokens {
+				cmds = append(cmds, func() tea.Msg { return retryStreamMsg{gen: gen} })
+			} else {
+				m.logActivity(fmt.Sprintf("compaction freed nothing, surfacing context overflow: %v", err))
+				cmds = append(cmds, func() tea.Msg { return chatErrMsg{gen: gen, err: err} })
+			}
+		}
 
 	case ragLoadedMsg:
 		m.applyRagLoaded(msg)
@@ -994,6 +1024,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			_ = m.trace.Record(tracepkg.Event{Kind: "stream_error", Turn: msg.gen, Model: m.modelName, Error: msg.err.Error(), Metadata: metadata})
 		}
+		// A context overflow is the one error the retry ladder can never win: the
+		// identical request overflows identically all three times, so the backoff
+		// spends ~12s to end the turn anyway. Compaction is forced here because
+		// the proactive 80% threshold never fired — m.contextLimit is only a guess
+		// on an OpenAI-compatible host. Note m.streaming is deliberately left set:
+		// the status line and the transcript spinner both rank compacting above
+		// streaming, so this paints exactly like a proactive pass.
+		overflow := agent.IsContextOverflow(msg.err)
+		if overflow && !m.overflowRetried {
+			m.overflowRetried = true // hard cap: one recovery per turn, never a loop
+			tokens := m.requestEstimate()
+			// force: the PROVIDER refused this request, so our own 80% threshold
+			// has already been proved wrong. A prune that clears that threshold is
+			// not evidence the request now fits — accepting it would spend the one
+			// recovery re-sending a request a few tokens smaller, and the turn dies
+			// on the second 400 with the summarization never having run.
+			cmd := m.compactContext(true)
+			m.streamBuf.Reset() // discard the partial response; the retry regenerates it
+			if cmd != nil || m.compacting {
+				// Summarization is in flight (ours, or a proactive pass we ride on).
+				// The retry is sequenced on compactDoneMsg, which owns the progress check.
+				m.overflowErr, m.overflowTokens = msg.err, tokens
+				m.logActivity(fmt.Sprintf("context overflow, compacting and retrying: %v", msg.err))
+				m.toast = "context overflow — compacting and retrying…"
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				m.refreshTranscript()
+				break
+			}
+			// Nothing left to compact — too short a history to halve. The original
+			// error is the honest outcome; fall through to the fatal path.
+		}
 		// A 400 against a schema-constrained request is the host refusing the
 		// format, not a transient failure: step down the fallback ladder and
 		// retry immediately rather than burning a stream retry (and its backoff)
@@ -1010,8 +1073,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Transient failure (connection reset, 5xx, idle timeout): retry the
 		// stream a bounded number of times before killing the turn, with a
 		// linear backoff so a struggling backend gets room to recover. History
-		// is intact, so the request simply regenerates from the same state.
-		if !m.compacting && m.streamRetries < maxStreamRetries {
+		// is intact, so the request simply regenerates from the same state. An
+		// overflow is excluded: it is not transient and must not spend this
+		// budget. It either already had its one compaction pass or compaction
+		// freed nothing, and either way the next stop is the surfaced error.
+		if !overflow && !m.compacting && m.streamRetries < maxStreamRetries {
 			m.streamRetries++
 			delay := time.Duration(m.streamRetries) * 2 * time.Second
 			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))
@@ -1030,6 +1096,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.stream = nil
 		m.compacting = false
+		// Without this, a turn killed while its overflow recovery rode on an
+		// in-flight proactive compaction would still get a retry when that pass
+		// lands, restarting a turn that already reported a fatal error.
+		m.overflowErr = nil
 		m.busySince = time.Time{}
 		m.finishTurnClock()
 		m.finalizeCheckpoint(m.lastUserMessage())

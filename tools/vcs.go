@@ -13,23 +13,29 @@ import (
 // tools actually run against.
 func DetectVCS() string { return detectVCS() }
 
-// detectVCS returns "ivaldi" if a .ivaldi directory exists in the current
-// working directory (or a parent), otherwise "git". The git_* MCP tools use
-// this to pick the right backend so they work transparently in either repo
-// type.
+// detectVCS walks up from the working directory and returns the backend whose
+// marker it meets FIRST — "ivaldi" for .ivaldi, "git" for .git — defaulting to
+// "git" when it reaches the root having seen neither.
+//
+// Nearest-marker-wins is what makes this correct. Scanning only for .ivaldi and
+// walking all the way to / meant ivaldi's own global config directory
+// (~/.ivaldi, holding config + identity — not a repo) captured EVERY project
+// under $HOME: every git_* tool in every git repo on the machine ran ivaldi,
+// which then correctly answered "not an Ivaldi repository" and exited 1. A
+// .ivaldi beside a .git still wins, so genuine dual repos keep preferring it.
 func detectVCS() string {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "git"
 	}
 	for {
-		if _, err := os.Stat(dir + "/.ivaldi"); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, ".ivaldi")); err == nil {
 			return "ivaldi"
 		}
-		parent := dir + "/.."
-		if resolved, err := filepath.Abs(parent); err == nil {
-			parent = resolved
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return "git"
 		}
+		parent := filepath.Dir(dir)
 		if parent == dir {
 			break
 		}

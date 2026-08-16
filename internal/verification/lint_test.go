@@ -17,7 +17,9 @@ func fakeStaticcheck(t *testing.T, script string) {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir)
+	// Prepended, not replaced: the fake still wins the lookup, but the shell the
+	// linter runs under is itself found on PATH.
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func writeGoMod(t *testing.T, root string) {

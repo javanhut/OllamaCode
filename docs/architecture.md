@@ -50,8 +50,10 @@ failing loudly:
   `/api/chat`, so the caller's stream loop needs no OpenAI awareness.
 - **`tool_call_id` correlation.** OpenAI demands it; Ollama correlates by name
   and position. IDs are synthesized positionally — the Nth pending call is
-  answered by the Nth following tool result — skipping the system advisories the
-  loop guards splice in between. Unbalanced pairs are dropped rather than sent,
+  answered by the Nth following tool result, counting results up to the next
+  assistant message so any interleaved turn (a mode-handoff system message, a
+  sub-agent notification, a loop-guard advisory) is stepped over whatever its
+  role. Unbalanced pairs are dropped rather than sent,
   since providers 400 the whole request and a truncated history window produces
   them.
 - **SSE, not newline-delimited JSON.** Comments, `event:` lines, unparseable
@@ -142,11 +144,14 @@ result envelopes, and trace events therefore share one implementation. A
 parity test runs the same call through both entry points.
 
 Tool results returned to models use a compact JSON envelope with stable
-`ok`, `summary`, `evidence`, `retryable`, `hint`, and optional `data` fields.
+`ok`, `summary`, `evidence`, `retryable`, `hint`, `spill_path`, and optional
+`data` fields.
 Line-oriented output remains separately bounded evidence, and trusted envelope
 guidance tells models to treat it as data while preserving an exact response
 format requested by the user. Large output retains its beginning and final
-diagnostic evidence.
+diagnostic evidence inline, and the complete text is written to a private
+per-session spill file whose path rides in `spill_path`, so the model can
+`read_file` or `grep` back the elided middle instead of losing it.
 
 ## Evaluation and replay
 

@@ -29,6 +29,12 @@ func GetEnvTool() Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", err
 			}
+			// Same predicate as the shell scrub. Scrubbing what run_shell can
+			// see and then handing the same variable over through a dedicated
+			// tool is not a boundary — the model would just ask twice.
+			if isSecretEnvName(a.Key) {
+				return fmt.Sprintf("%s is redacted: it looks like a credential", a.Key), nil
+			}
 			val := os.Getenv(a.Key)
 			if val == "" {
 				return fmt.Sprintf("%s is not set", a.Key), nil
@@ -74,11 +80,14 @@ func ListEnvTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "env_list",
-			Description: "List all environment variables. Warning: May contain sensitive info.",
+			Description: "List environment variables. Anything that looks like a credential is omitted.",
 			Parameters:  Schema{Type: "object", Properties: map[string]Property{}},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			return strings.Join(os.Environ(), "\n"), nil
+			// The same list the shell gets. This tool used to return os.Environ()
+			// verbatim, which put every credential into the transcript, the
+			// model's context on every later request, and the trace file.
+			return strings.Join(scrubbedEnvironment(), "\n"), nil
 		},
 	}
 }

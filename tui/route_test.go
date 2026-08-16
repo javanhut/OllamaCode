@@ -529,6 +529,55 @@ func TestPlanGate(t *testing.T) {
 		}
 	})
 
+	// Regression: the checkpoint used to be recorded only on the ask_user path, so
+	// a planner that summarized its plan in prose left the gate shut forever and
+	// switch_mode("write") looped until the turn budget ran out.
+	t.Run("a plan presented without ask_user still opens on the next message", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		plan := "1. edit tui/route.go\n2. add a test"
+		m.notes.set(plan)
+
+		m.markPlanPresented() // turn ends with the plan on screen, no ask_user call
+		if m.planReviewRequested != plan {
+			t.Fatalf("review checkpoint = %q, want plan", m.planReviewRequested)
+		}
+		m.planReviewed, m.planReviewRequested = m.planReviewRequested, "" // user replies
+		if m.planGateBlocks(WriteMode) {
+			t.Fatal("gate stayed shut after the user reviewed the plan")
+		}
+	})
+
+	// A guard-stopped turn ends with "explain the blocker", not with a plan. The
+	// checkpoint used to be armed there anyway, so the user's next message — an
+	// unrelated follow-up question — counted as reviewing a plan they never saw,
+	// and switch_mode("write") was granted.
+	t.Run("a turn a guard stopped presents nothing", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		m.notes.set("1. edit tui/route.go\n2. add a test")
+
+		m.stopForBlockerReport() // [LOOP BROKEN] — tools off, blocker report next
+		m.markPlanPresented()    // the turn ends
+
+		if m.planReviewRequested != "" {
+			t.Fatalf("checkpoint armed by a stopped turn: %q", m.planReviewRequested)
+		}
+		m.planReviewed = m.planReviewRequested
+		if !m.planGateBlocks(WriteMode) {
+			t.Fatal("write mode granted without the user ever seeing a plan")
+		}
+	})
+
+	t.Run("no plan recorded records no checkpoint", func(t *testing.T) {
+		m := routedModel(nil, "small")
+		m.applyModeTransition(PlanMode, "")
+		m.markPlanPresented()
+		if m.planReviewRequested != "" {
+			t.Errorf("checkpoint = %q, want none without a plan", m.planReviewRequested)
+		}
+	})
+
 	t.Run("changing a reviewed plan requires another review", func(t *testing.T) {
 		m := routedModel(nil, "small")
 		m.applyModeTransition(PlanMode, "")

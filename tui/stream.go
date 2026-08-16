@@ -93,7 +93,7 @@ func (m *Model) submit() tea.Cmd {
 	// instead of letting it get hard-dropped on later turns.
 	var cmds []tea.Cmd
 	if m.shouldCompact() {
-		if c := m.compactContext(); c != nil {
+		if c := m.compactContext(false); c != nil {
 			cmds = append(cmds, c)
 		}
 	}
@@ -199,9 +199,34 @@ func (m *Model) interruptTurn() tea.Cmd {
 	return nil
 }
 
-func (m *Model) compactContext() tea.Cmd {
+// compactContext prunes old tool output and, if that is not enough, summarizes
+// the older half. force skips the "pruning was enough" exit: the caller is the
+// overflow path, where the PROVIDER refused the request, so a prune that merely
+// clears our own threshold has not proved anything.
+func (m *Model) compactContext(force bool) tea.Cmd {
 	if len(m.history) < 6 || m.compacting {
 		return nil
+	}
+
+	// Prune before paying for a summary: stubbing old tool-result bodies is
+	// free, and on a tool-heavy turn it clears the threshold on its own so the
+	// model round-trip below never has to happen. Only what pruning can't
+	// reclaim falls through to summarization.
+	if before := estimateMsgsTokens(m.history); pruneToolResults(m.history) > 0 {
+		// The measured counts describe the PRE-prune request, but zeroing them
+		// hands the decision back to the estimate — which, whenever the
+		// measurement is what fired this pass, is BY DEFINITION below the
+		// threshold. A 43-token prune would then cancel a 28k/32k compaction, and
+		// keep cancelling it every time, while the real context grew to the
+		// provider's hard refusal. Subtract what pruning actually reclaimed and
+		// let the measurement stay authoritative.
+		reclaimed := before - estimateMsgsTokens(m.history)
+		m.lastPromptEval = max(0, m.lastPromptEval-reclaimed)
+		m.prevPromptEval = max(0, m.prevPromptEval-reclaimed)
+		if !force && !m.shouldCompact() {
+			m.toast = "context pruned — dropped old tool output"
+			return nil
+		}
 	}
 
 	m.compacting = true
@@ -549,7 +574,7 @@ TOOL RULES:
 1. Call ONE tool at a time. Wait for its result before the next call.
 2. Arguments must be a single valid JSON object with exactly the tool's declared fields. No markdown fences, no comments, no trailing commas.
 3. Read a file before editing it. For edit_file, copy old_string EXACTLY from the file (whitespace included), or use start_line/end_line from a numbered read.
-4. If a call fails, do NOT repeat it unchanged. Fix the arguments or take a different approach. If a system message says stop repeating, stop.
+4. If a call fails, do NOT repeat it unchanged. Fix the arguments or take a different approach. If a bracketed advisory says stop repeating, stop.
 5. Prefer specific tools over run_shell: grep over shell grep, edit_file over sed, git_status over "git status".
 6. After editing, verify: re-read the changed region or run a quick check (build/test) in write mode.
 

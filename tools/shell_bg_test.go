@@ -57,6 +57,29 @@ func TestBackgroundShellKill(t *testing.T) {
 	}
 }
 
+// The background path spawns its own child, so the scrub has to hold there too.
+func TestBackgroundShellDropsSecretsFromChildEnvironment(t *testing.T) {
+	t.Setenv("OCODE_FAKE_API_KEY", "planted-secret-value")
+	job, err := startBackgroundShell("env", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waitJob(job, 3*time.Second) {
+		t.Fatal("job did not finish")
+	}
+	args, _ := json.Marshal(map[string]int{"job": job.id})
+	out, err := ShellOutputTool().Handler(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "planted-secret-value") {
+		t.Error("background run_shell leaked a credential into job output")
+	}
+	if !strings.Contains(out, "PATH=") {
+		t.Errorf("PATH must survive the scrub:\n%s", out)
+	}
+}
+
 func TestRunShellBackgroundReturnsImmediately(t *testing.T) {
 	start := time.Now()
 	args, _ := json.Marshal(map[string]any{"command": "sleep 5", "background": true})

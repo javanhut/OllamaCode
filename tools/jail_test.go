@@ -198,3 +198,31 @@ func TestJailedHandlersAllowInRoot(t *testing.T) {
 		t.Fatalf("list_directory in root: %v", err)
 	}
 }
+
+// The spill dir is the one readable location outside the workspace: the
+// envelope hands the model a $TMPDIR path and tells it to read the elided
+// middle back, so jailCheck has to let that exact directory through — and
+// nothing else in tmp.
+func TestJailAllowsTheSpillDirOnly(t *testing.T) {
+	root := t.TempDir()
+	pinJail(t, root)
+	t.Chdir(root)
+	spillSandbox(t)
+
+	half := strings.Repeat("a", defaultResultLimit)
+	got, ok := DecodeToolResult(EncodeToolSuccess("run_shell", half+"NEEDLE-IN-THE-MIDDLE"+half))
+	if !ok || got.SpillPath == "" {
+		t.Fatalf("expected a spilled envelope: %#v", got)
+	}
+	if err := jailCheck(got.SpillPath); err != nil {
+		t.Fatalf("spill_path is a dead end — the model cannot read it back: %v", err)
+	}
+	out, err := ReadFileTool().Handler(context.Background(), jailArgs(t, map[string]string{"path": got.SpillPath}))
+	if err != nil || !strings.Contains(out, "NEEDLE-IN-THE-MIDDLE") {
+		t.Fatalf("read_file could not recover the elided middle: err=%v", err)
+	}
+	// The exemption is the spill dir, not all of tmp.
+	if err := jailCheck(filepath.Join(os.TempDir(), "unrelated.txt")); err == nil {
+		t.Error("jail let an unrelated tmp path through")
+	}
+}

@@ -98,6 +98,16 @@ func TestParseCitations(t *testing.T) {
 }
 
 func TestMakesCodeClaims(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"tui/mode.go", "config.toml"} {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	tests := []struct {
 		text string
 		want bool
@@ -107,9 +117,15 @@ func TestMakesCodeClaims(t *testing.T) {
 		{"A mutex serializes access to shared state.", false},
 		{"Exponential backoff doubles the wait each retry.", false},
 		{"No files mentioned, just ideas: parsers, lexers.", false},
+		// A file that isn't in the workspace has no citable line, so naming it
+		// is not a code claim — otherwise the gate demands the impossible.
+		{"There is no index.html yet — want me to create it?", false},
+		{"I'd add a new handler in tui/ghost.go for that.", false},
+		// One resolvable file among unresolvable ones is still a claim.
+		{"tui/mode.go:  the check lives there, not in tui/ghost.go.", true},
 	}
 	for _, tt := range tests {
-		if got := makesCodeClaims(tt.text); got != tt.want {
+		if got := makesCodeClaims(root, tt.text); got != tt.want {
 			t.Errorf("makesCodeClaims(%q) = %t, want %t", tt.text, got, tt.want)
 		}
 	}
@@ -166,7 +182,15 @@ func TestValidateCitations(t *testing.T) {
 
 func TestCitationProblemsMissingCitations(t *testing.T) {
 	root := t.TempDir()
-	// Names a source file, cites nothing → one "missing citations" problem.
+	p := filepath.Join(root, "tui/mode.go")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Names a source file that exists, cites nothing → one "missing citations"
+	// problem.
 	problems := citationProblems(root, "The gate in tui/mode.go refuses the switch.")
 	if len(problems) != 1 || !strings.Contains(problems[0], "path:line") {
 		t.Fatalf("expected a missing-citations problem, got %v", problems)
@@ -174,6 +198,15 @@ func TestCitationProblemsMissingCitations(t *testing.T) {
 	// Pure explanation: no files named → no problem even with zero citations.
 	if problems := citationProblems(root, "A mutex serializes access to shared state."); problems != nil {
 		t.Fatalf("pure explanation should pass, got %v", problems)
+	}
+	// Regression: this exact answer was challenged for "naming source files"
+	// when the file it names is the one it says does not exist. The demanded
+	// citation could never resolve, so complying meant deleting a true claim —
+	// and the forced re-answer came back empty, costing a whole round.
+	answer := "Based on my session notes, you asked me to create a Snake Game.\n\n" +
+		"The directory currently has no `index.html` yet (only the log file). Want me to build it?"
+	if problems := citationProblems(root, answer); problems != nil {
+		t.Fatalf("naming an absent file must not demand a citation, got %v", problems)
 	}
 }
 

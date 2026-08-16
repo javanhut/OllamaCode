@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -95,7 +94,7 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "/bin/sh", "-c", command).CombinedOutput()
+		out, err := tools.NewShellCommand(ctx, command).CombinedOutput()
 		text := strings.TrimSpace(string(out))
 		if len(text) > 4000 {
 			text = "…\n" + text[len(text)-4000:] // tail: compiler errors cluster at the end
@@ -142,6 +141,7 @@ func (m *Model) endTurnTail() []tea.Cmd {
 	if m.reconcileTodosAtTurnEnd() > 0 {
 		m.autosaveSession()
 	}
+	m.markPlanPresented()
 	if m.trace != nil {
 		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
 			Metadata: map[string]any{"reason": "completed", "steps": m.stepCount, "open_todos": m.todos.openCount(), "verification": m.lastVerification}})
@@ -157,7 +157,7 @@ func (m *Model) endTurnTail() []tea.Cmd {
 	}
 	m.lastActivity = time.Now()
 	if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
-		if c := m.compactContext(); c != nil {
+		if c := m.compactContext(false); c != nil {
 			cmds = append(cmds, c)
 		}
 	}

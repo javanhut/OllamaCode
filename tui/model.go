@@ -265,15 +265,9 @@ func (m *Model) logActivity(s string) {
 // not write into the new turn's state.
 
 var (
-	defaultToolCallTimeout   = 2 * time.Minute
-	localInspectToolTimeout  = 30 * time.Second
-	localMutatingToolTimeout = 90 * time.Second
-	networkToolTimeout       = 2 * time.Minute
-	longRunningToolTimeout   = 10 * time.Minute
-	shellToolTimeoutGrace    = 5 * time.Second
-	modelStreamIdleTimeout   = 3 * time.Minute
-	toolCallDrainTimeout     = 2 * time.Second
-	pullIdleTimeout          = 5 * time.Minute
+	modelStreamIdleTimeout = 3 * time.Minute
+	toolCallDrainTimeout   = 2 * time.Second
+	pullIdleTimeout        = 5 * time.Minute
 )
 
 type Model struct {
@@ -358,8 +352,15 @@ type Model struct {
 	height    int
 	ready     bool
 
-	totalTokens    int
-	contextLimit   int
+	totalTokens  int
+	contextLimit int
+	// The provider's real prompt_eval_count for the last two requests. The
+	// pressure check takes the SMALLER of the two, so one outlier turn (a giant
+	// one-off RAG block, a provider hiccup) can't fire a compaction on its own.
+	// 0 means "not measured yet" — the char estimate carries the decision.
+	lastPromptEval int
+	prevPromptEval int
+
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)
 	compacting     bool   // guards against overlapping compaction passes
 	retrieving     bool   // RAG retrieval is gating the model call for this turn
@@ -367,6 +368,9 @@ type Model struct {
 	// Loop safety (reset each user turn).
 	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
 	streamRetries       int             // transient stream errors retried this turn
+	overflowErr         error           // the context-overflow error a forced compaction is running for; non-nil means a retry is owed when it lands
+	overflowTokens      int             // ditto, in estimated tokens
+	overflowRetried     bool            // one forced compaction per turn; overflow recovery can never loop
 	stepCount           int             // tool-call rounds since the last user message
 	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
 	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
@@ -378,6 +382,7 @@ type Model struct {
 	oscillationWarned   bool            // corrective nudge emitted once per turn
 	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
 	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
+	turnStoppedByGuard  bool            // a guard ended this turn, so its last reply is a blocker report, not work
 	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
 	sameToolStreak      int             // consecutive steps repeating that identity
 	sameToolWarned      bool            // early repeat warning emitted this user turn

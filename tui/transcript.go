@@ -34,7 +34,15 @@ func (m *Model) refreshTranscript() {
 		}
 		for i < len(m.history) {
 			msg := m.history[i]
-			switch msg.Role {
+			// An advisory is addressed TO the model — it is not the user's turn,
+			// so it renders like the system message it replaced and must not
+			// re-anchor userIdx (that would break turn grouping and the timing
+			// footer).
+			role := msg.Role
+			if !isUserTurn(msg) && role == "user" {
+				role = "advisory"
+			}
+			switch role {
 			case "user":
 				flushTurn()
 				userIdx = i
@@ -387,7 +395,7 @@ func (m *Model) lastTurnDiffs() string {
 	var diffs []string
 	for i := len(m.history) - 1; i >= 0; i-- {
 		msg := m.history[i]
-		if msg.Role == "user" {
+		if isUserTurn(msg) {
 			break
 		}
 		if msg.Role == "tool" {
@@ -404,7 +412,7 @@ func (m *Model) lastTurnDiffs() string {
 
 func (m *Model) lastUserMessage() string {
 	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role == "user" {
+		if isUserTurn(m.history[i]) {
 			s := m.history[i].Content
 			if len(s) > 48 {
 				s = s[:48] + "…"

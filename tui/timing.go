@@ -19,7 +19,7 @@ import (
 func (m *Model) startTurnClock() {
 	m.turnAnchor = -1
 	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role == "user" {
+		if isUserTurn(m.history[i]) {
 			m.turnAnchor = i
 			break
 		}

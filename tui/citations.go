@@ -139,12 +139,28 @@ func hasASCIILetter(s string) bool {
 	return false
 }
 
-// makesCodeClaims reports whether an answer names at least one plausible
-// source file. Conservative on purpose: it is the only trigger for the
-// "missing citations" correction, so answers that explain concepts without
-// pointing at files pass through unchallenged.
-func makesCodeClaims(answer string) bool {
-	return codeClaimRe.MatchString(answer)
+// makesCodeClaims reports whether an answer names at least one source file that
+// RESOLVES against the workspace. Conservative on purpose: it is the only
+// trigger for the "missing citations" correction, so answers that explain
+// concepts without pointing at files pass through unchallenged.
+//
+// Existence is the load-bearing half. A file that isn't in the workspace has no
+// citable line — validateCitations rejects any `path:line` naming it — so
+// demanding a citation for it asks for something that cannot be produced. The
+// answer "there is no index.html yet" was challenged on exactly that basis, and
+// the only way to comply was to delete the true sentence. Naming a file that
+// isn't there is not a claim about code that exists; the gate stays out of it.
+func makesCodeClaims(root, answer string) bool {
+	for _, named := range codeClaimRe.FindAllString(answer, -1) {
+		path := named
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // validateCitations resolves each citation against root and returns one
@@ -204,7 +220,7 @@ func validateCitations(root string, cites []citation) []string {
 func citationProblems(root, answer string) []string {
 	cites := parseCitations(answer)
 	if len(cites) == 0 {
-		if !makesCodeClaims(answer) {
+		if !makesCodeClaims(root, answer) {
 			return nil
 		}
 		return []string{"the answer names source files but backs none of the claims with a path:line citation"}
@@ -219,7 +235,7 @@ func citationProblems(root, answer string) []string {
 func citationCorrectionIssued(history []api.Message) bool {
 	for i := len(history) - 1; i >= 0; i-- {
 		msg := history[i]
-		if msg.Role == "user" {
+		if isUserTurn(msg) {
 			return false
 		}
 		if msg.Role == "system" && strings.HasPrefix(msg.Content, citationCorrectionPrefix) {

@@ -21,6 +21,12 @@ type Message struct {
 	Thinking  string           `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
 	ToolName  string           `json:"tool_name,omitempty"`
 	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
+	// Advisory marks a harness-authored turn message riding the "user" role —
+	// the loop guards' [LOOP BROKEN] style nudges. Every backwards scan for
+	// "the last thing the human asked for" has to step over these, and the flag
+	// survives the session file and the trace payload, which a content
+	// heuristic in one package could not.
+	Advisory bool `json:"advisory,omitempty"`
 }
 
 type ChatRequest struct {

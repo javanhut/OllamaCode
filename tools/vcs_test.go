@@ -83,3 +83,57 @@ func TestGitURLToOwnerRepo(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectVCSNearestMarkerWins pins the rule that broke every git_* tool on a
+// machine where ivaldi's global config dir (~/.ivaldi) sits above the projects:
+// the walk found it, returned "ivaldi", and each git tool then ran `ivaldi` in a
+// git repo and exited 1. The nearest marker decides.
+func TestDetectVCSNearestMarkerWins(t *testing.T) {
+	chdir := func(t *testing.T, dir string) {
+		t.Helper()
+		prev, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(prev) })
+	}
+	mkdirs := func(t *testing.T, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("git repo under a stray parent .ivaldi", func(t *testing.T) {
+		home := t.TempDir()
+		project := filepath.Join(home, "dev", "proj")
+		mkdirs(t, filepath.Join(home, ".ivaldi"), filepath.Join(project, ".git"), filepath.Join(project, "sub"))
+		chdir(t, filepath.Join(project, "sub"))
+		if got := detectVCS(); got != "git" {
+			t.Errorf("detectVCS = %q, want git — a parent's .ivaldi hijacked a git repo", got)
+		}
+	})
+
+	t.Run("ivaldi repo still detected", func(t *testing.T) {
+		project := filepath.Join(t.TempDir(), "proj")
+		mkdirs(t, filepath.Join(project, ".ivaldi"), filepath.Join(project, "sub"))
+		chdir(t, filepath.Join(project, "sub"))
+		if got := detectVCS(); got != "ivaldi" {
+			t.Errorf("detectVCS = %q, want ivaldi", got)
+		}
+	})
+
+	t.Run("both markers at one level prefer ivaldi", func(t *testing.T) {
+		project := filepath.Join(t.TempDir(), "proj")
+		mkdirs(t, filepath.Join(project, ".ivaldi"), filepath.Join(project, ".git"))
+		chdir(t, project)
+		if got := detectVCS(); got != "ivaldi" {
+			t.Errorf("detectVCS = %q, want ivaldi", got)
+		}
+	})
+}
