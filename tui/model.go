@@ -110,6 +110,7 @@ const (
 	stateDiff
 	stateStats
 	stateRouteConfirm
+	stateQuestion
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -315,6 +316,11 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// question holds the pending ask_user call while its option picker is open.
+	// Options are the model's own labels, so an answer chosen here comes back as
+	// text the model already knows how to read.
+	question       tools.AskUserQuestion
+	questionCursor int
 	// readHashes is the stale-edit ledger: clean path -> the file's hash when the
 	// model last saw it. Session-scoped, so it is NOT cleared by resetTurnGuards
 	// the way turnReads is — see staleness.go.

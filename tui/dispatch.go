@@ -220,6 +220,14 @@ func (m *Model) processPendingTools() tea.Cmd {
 		}
 		if questionIndex >= 0 {
 			m.markPlanPresented()
+			// A question with options becomes a picker: the model gets back one of
+			// its own labels instead of prose it has to interpret, which is the
+			// difference between a decided turn and another clarifying round.
+			if q := tools.ParseAskUser(batchCalls[questionIndex].Function.Arguments); len(q.Options) > 0 {
+				m.question = q
+				m.questionCursor = 0
+				m.state = stateQuestion
+			}
 			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
 			m.finalizeCheckpoint(m.lastUserMessage())
 			m.finishTurnClock()

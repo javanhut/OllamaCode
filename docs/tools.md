@@ -204,6 +204,29 @@ the user replies. In plan mode, asking after recording notes establishes the
 review checkpoint required before requesting write mode; changing the notes
 requires another confirmation.
 
+A question that carries `options` opens a picker instead of waiting for typed
+prose:
+
+```
+┌─ The model is asking ──────────── esc=type instead ─┐
+│ Which database should I use?                        │
+│                                                     │
+│  1. postgres                                        │
+│  2. sqlite                                          │
+│  3. mysql                                           │
+│                                                     │
+│ ↑/↓ move   1-9 pick   enter send   esc answer freely │
+└─────────────────────────────────────────────────────┘
+```
+
+The chosen label is sent as your next message, so the model gets back one of its
+own strings rather than free-form text it has to interpret — which is the
+difference between a decided turn and another clarifying round, especially for a
+small model. `esc` closes the picker without answering, for when none of the
+options is the real answer; the model is still waiting either way. `options` is
+an array, though a pipe-separated string is still salvaged for models that send
+the older shape.
+
 ## Small-model toolset
 
 Models under 15B parameters get a trimmed set — file operations, directory and

@@ -558,6 +558,36 @@ func (m *Model) routeConfirmModal() string {
 	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
 }
 
+// questionModal renders an ask_user call as a pick-one list. The options are
+// the model's own labels, so whichever one is chosen comes back as text it
+// already knows how to read — which is the whole point of the picker over a
+// free-text reply it has to parse.
+func (m *Model) questionModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+
+	lines := []string{m.modalHeader("The model is asking", "esc=type instead", innerW), ""}
+	for _, line := range strings.Split(ansi.Wrap(m.question.Question, innerW, ""), "\n") {
+		lines = append(lines, modalBodyStyle.Render(line))
+	}
+	lines = append(lines, "")
+	for i, opt := range m.question.Options {
+		label := fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4))
+		if i == m.questionCursor {
+			lines = append(lines, modalSelectStyle.Render(" "+label+" "))
+			continue
+		}
+		lines = append(lines, modalBodyStyle.Render("  "+label))
+	}
+	lines = append(lines, "",
+		modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+			modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
+			modalMutedStyle.Render("enter ")+modalBodyStyle.Render("send   ")+
+			modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
+}
+
 func (m *Model) permissionModal() string {
 	w := m.modalWidth()
 	innerW := m.modalInner()

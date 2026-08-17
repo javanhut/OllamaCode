@@ -122,6 +122,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.notesModal()))
 	case statePermission:
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
+	case stateQuestion:
+		v.SetContent(m.overlayModal(base, m.questionModal()))
 	case stateRouteConfirm:
 		v.SetContent(m.overlayModal(base, m.routeConfirmModal()))
 	case stateDiff:

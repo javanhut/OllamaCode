@@ -364,6 +364,83 @@ func (m *Model) showModelInfo() {
 
 // cancelPull aborts an in-flight model download and clears the streaming state.
 
+// updateQuestion drives the ask_user option picker. Esc does not cancel the
+// question — there is nothing to cancel, the model is already waiting — it just
+// closes the picker so the answer can be typed instead, which is what an option
+// list that does not cover the real answer needs.
+func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	options := m.question.Options
+	if len(options) == 0 {
+		m.state = stateChat
+		m.input.Focus()
+		return m, nil
+	}
+	switch key := msg.String(); key {
+	case "up", "k":
+		if m.questionCursor > 0 {
+			m.questionCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.questionCursor < len(options)-1 {
+			m.questionCursor++
+		}
+		return m, nil
+	case "esc":
+		m.state = stateChat
+		m.input.Focus()
+		m.toast = "type your answer"
+		return m, nil
+	default:
+		choice, ok := chooseQuestionOption(key, m.questionCursor, options)
+		if !ok {
+			return m, nil
+		}
+		m.stageAnswer(choice)
+		cmd := m.submit()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		return m, cmd
+	}
+}
+
+// chooseQuestionOption maps a keypress to the option it selects. ok=false means
+// the key selects nothing — it is navigation, or a digit naming an option this
+// question does not have, which must do nothing rather than submit an
+// out-of-range choice.
+//
+// Separated from the send so the mapping is testable without a live model host.
+func chooseQuestionOption(key string, cursor int, options []string) (string, bool) {
+	if len(options) == 0 {
+		return "", false
+	}
+	if key == "enter" {
+		if cursor < 0 || cursor >= len(options) {
+			return "", false
+		}
+		return options[cursor], true
+	}
+	// Single digits pick directly; 1-9 only, because a two-key number would
+	// need a commit keystroke and this list is never that long.
+	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+		if i := int(key[0] - '1'); i < len(options) {
+			return options[i], true
+		}
+	}
+	return "", false
+}
+
+// stageAnswer closes the picker and puts the chosen label where a typed answer
+// would be. The send then goes through submit() rather than appending to
+// history directly, so a picked answer takes exactly the same path as a typed
+// one — queue, @-mentions, turn guards, dream context.
+func (m *Model) stageAnswer(choice string) {
+	m.state = stateChat
+	m.question = tools.AskUserQuestion{}
+	m.input.Focus()
+	m.input.SetValue(choice)
+}
+
 func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.pending == nil {
 		m.state = stateChat

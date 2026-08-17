@@ -396,6 +396,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case statePermission:
 			return m.updatePermission(msg)
+		case stateQuestion:
+			return m.updateQuestion(msg)
 		case stateRouteConfirm:
 			return m.updateRouteConfirm(msg)
 		case stateDiff:

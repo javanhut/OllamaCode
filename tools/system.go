@@ -63,30 +63,67 @@ func RunShellTool() Tool {
 	}
 }
 
+// AskUserQuestion is a parsed ask_user call. The TUI renders the options as a
+// selectable list and the handler renders them into the model-facing text, so
+// both read the arguments through ParseAskUser rather than each doing their own
+// decoding — a picker offering different options than the model believes it
+// asked about is worse than no picker.
+type AskUserQuestion struct {
+	Question string
+	Options  []string
+}
+
+// ParseAskUser decodes an ask_user call's arguments. `options` is an array, but
+// a pipe-separated string is accepted too: that was the old schema, and a small
+// model handed an array schema will still sometimes send the string. Salvaging
+// it here costs four lines and saves a wasted turn.
+func ParseAskUser(args json.RawMessage) AskUserQuestion {
+	var a struct {
+		Question string          `json:"question"`
+		Options  json.RawMessage `json:"options"`
+	}
+	_ = json.Unmarshal(args, &a)
+	out := AskUserQuestion{Question: strings.TrimSpace(a.Question)}
+
+	var list []string
+	if err := json.Unmarshal(a.Options, &list); err != nil {
+		var joined string
+		if err := json.Unmarshal(a.Options, &joined); err == nil {
+			list = strings.Split(joined, "|")
+		}
+	}
+	for _, opt := range list {
+		if opt = strings.TrimSpace(opt); opt != "" {
+			out.Options = append(out.Options, opt)
+		}
+	}
+	return out
+}
+
 func AskUserTool() Tool {
 	return Tool{
 		Type: "function",
 		Function: Function{
 			Name:        "ask_user",
-			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Include clear options in the question to make it easy for the user to answer. After calling this, STOP and wait — the user's next message will contain their answer.",
+			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as a list the user picks from with one keypress, so you get back exactly one of your own labels instead of free-form prose to interpret. After calling this, STOP and wait — the user's next message will contain their answer.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
 					"question": {Type: "string", Description: "The question to ask the user. Be specific and include context so they can give a quick answer."},
-					"options":  {Type: "string", Description: "Optional: list of suggested answers separated by '|' (e.g. 'yes|no|show me an example')."},
+					"options": {
+						Type:        "array",
+						Description: "Suggested answers, e.g. [\"yes\", \"no\", \"show me an example\"]. Keep each one short and distinct — the user picks one by number. Omit for an open question.",
+						Items:       &Property{Type: "string"},
+					},
 				},
 				Required: []string{"question"},
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			var a struct {
-				Question string `json:"question"`
-				Options  string `json:"options"`
-			}
-			json.Unmarshal(args, &a)
+			a := ParseAskUser(args)
 			msg := "QUESTION: " + a.Question
-			if a.Options != "" {
-				msg += "\nOptions: [" + a.Options + "]"
+			if len(a.Options) > 0 {
+				msg += "\nOptions: [" + strings.Join(a.Options, " | ") + "]"
 			}
 			msg += "\n\n(Stop here and wait for the user to answer before continuing.)"
 			return msg, nil
