@@ -560,6 +560,13 @@ func environmentBlock() string {
 	} else {
 		b.WriteString("- Version control: git\n")
 	}
+	// Date, deliberately not the time. Without it the model has only its
+	// training cutoff to date a changelog entry, a copyright header, or a claim
+	// about what the "current" version of something is. The clock is left out on
+	// purpose: this block is part of the static system prefix, and a value that
+	// changes every request would invalidate the KV cache on every turn to tell
+	// the model something it almost never needs.
+	b.WriteString("- Date: " + time.Now().Format("2006-01-02") + "\n")
 	b.WriteString("- Platform: " + runtime.GOOS + "/" + runtime.GOARCH + "\n")
 	b.WriteString("- Shell: " + shell + " (non-interactive; commands must not expect a TTY or a pager)\n")
 	return b.String()

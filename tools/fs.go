@@ -17,8 +17,10 @@ import (
 	"github.com/javanhut/ollama_code/internal/gitignore"
 )
 
-// calculateHash computes the SHA-256 hash of a file's content.
-func calculateHash(path string) (string, error) {
+// FileHash computes the SHA-256 hash of a file's content. Exported because the
+// staleness ledger in the TUI records it at read time and compares it before a
+// mutation, and that check has to hash the file exactly the way the tools do.
+func FileHash(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -59,7 +61,7 @@ func HashFileTool() Tool {
 			if err := jailCheck(a.Path); err != nil {
 				return "", err
 			}
-			hash, err := calculateHash(a.Path)
+			hash, err := FileHash(a.Path)
 			if err != nil {
 				return "", err
 			}
@@ -327,7 +329,7 @@ func WriteFileTool() Tool {
 			if err := os.WriteFile(a.Path, []byte(content), mode); err != nil {
 				return "", err
 			}
-			hash, _ := calculateHash(a.Path)
+			hash, _ := FileHash(a.Path)
 			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(content), a.Path, hash)
 			if diff := unifiedDiff(string(old), content, a.Path); diff != "" {
 				result += "\n" + diff
@@ -694,7 +696,7 @@ func AppendFileTool() Tool {
 				return "", err
 			}
 			f.Close()
-			hash, _ := calculateHash(a.Path)
+			hash, _ := FileHash(a.Path)
 			return fmt.Sprintf("appended %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash), nil
 		},
 	}

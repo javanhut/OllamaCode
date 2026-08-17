@@ -323,7 +323,7 @@ func EditFileTool() Tool {
 			if err := os.WriteFile(a.Path, []byte(updated), mode); err != nil {
 				return "", err
 			}
-			hash, _ := calculateHash(a.Path)
+			hash, _ := FileHash(a.Path)
 			tierNote := ""
 			if a.StartLine != 0 || a.EndLine != 0 {
 				tierNote = fmt.Sprintf(" (replaced lines %d to %d)", a.StartLine, a.EndLine)

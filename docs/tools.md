@@ -125,6 +125,7 @@ tools translate transparently. `detectVCS` walks up the tree and returns
 | `update_session_notes` / `append_session_notes` | ✓ | ✓ | ✓ | ✓ |
 | `remember` / `recall` / `forget` | ✓ | ✓ | ✓ | ✓ |
 | `todo_write` / `todo_read` | ✓ | ✓ | ✓ | ✓ |
+
 | `switch_mode` | ✓ | ✓ | ✓ | ✓ |
 | `ask_user` | ✓ | ✓ | ✓ | ✓ |
 | `spawn_subagent` | ✓ | ✓ | ✓ | ✓ |
@@ -180,6 +181,15 @@ Maintains a visible checklist (`todo_read` returns it as JSON in the same shape
 ends with items still open, the harness nudges the model to keep going rather
 than letting it stop mid-task — bounded, so a model that won't finish can't
 spin forever.
+
+An item can also be `blocked`, which is the model saying it tried and cannot
+proceed. Blocked items are excluded from the keep-going nudge — telling a model
+to "take the next item now" when the next item is the one it just reported it
+cannot do is how a nudge becomes a loop — and they stop the turn-end reconcile
+from force-completing anything, so a blocked task is never quietly recorded as
+done. The harness still falls back to reading the reply for blocker phrasing,
+for models that never set the status, but the declared status is the signal that
+actually means what it says.
 
 ### `switch_mode`
 

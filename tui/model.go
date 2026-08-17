@@ -315,6 +315,10 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// readHashes is the stale-edit ledger: clean path -> the file's hash when the
+	// model last saw it. Session-scoped, so it is NOT cleared by resetTurnGuards
+	// the way turnReads is — see staleness.go.
+	readHashes map[string]string
 	// deferredAdvisory holds a harness message that arrived while a tool batch
 	// was in flight (an /undo typed mid-turn). It is appended once the batch's
 	// results are in history, so it never splices between a tool_calls message

@@ -705,7 +705,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, path := range mutated {
 						m.turnChangedPaths[filepath.Clean(path)] = true
 					}
-					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
+					m.forgetReads(mutated)           // re-reading a just-changed file is legitimate
+					m.rememberMutatedHashes(mutated) // the model's own write is not third-party drift
 				} else if call.Function.Name == "spawn_subagent" && !subagentCallIsAsync(call) && (m.mode == WriteMode || m.mode == AutoMode) {
 					// A synchronous delegated writer uses the same registry but is
 					// not checkpointed call-by-call. Conservatively run the

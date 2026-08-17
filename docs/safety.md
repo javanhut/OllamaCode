@@ -52,6 +52,24 @@ key pressed for one call cannot waive a rule for another. `allow` and `ask` only
 answer the question "should this prompt?", which is the interactive session's
 question alone.
 
+## Stale-edit guard
+
+A file that changed on disk since the model last read it cannot be mutated until
+the model reads it again. The refusal names the file and says why.
+
+This exists because the failure is silent without it. You watch the agent work
+and tweak a file in your editor; the model's `old_string` came from a read taken
+before your change, and `edit_file`'s fuzzy tier commits at 0.85 similarity — so
+it does not fail cleanly, it finds something close enough and overwrites your
+edit. A `git_checkout` or `git_pull` the model ran itself trips the same guard,
+where re-reading first is equally the right answer.
+
+The ledger records a hash when a read tool opens a file and again when a tool
+successfully writes one, so the model's own edits are never mistaken for someone
+else's. It is session-scoped, not per-turn: editing from a read taken in an
+earlier turn is the more common version of this mistake. A file the model never
+read is not gated here — that is the plan gate's question, below.
+
 ## Workspace confinement
 
 Consent is not the boundary — enforcement is. Every filesystem tool resolves

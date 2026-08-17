@@ -17,6 +17,13 @@ const (
 	todoPending    todoStatus = "pending"
 	todoInProgress todoStatus = "in_progress"
 	todoCompleted  todoStatus = "completed"
+	// todoBlocked is the model SAYING it is stuck, rather than the harness
+	// inferring it from prose. responseReportsBlocker below still reads the
+	// assistant's text for models that never set this, but that is a phrase list
+	// against free-form English: it misses "I've run out of options here" and
+	// trips on "the user said they cannot complete the migration". A status the
+	// model sets is the signal that actually means what it says.
+	todoBlocked todoStatus = "blocked"
 )
 
 type todoItem struct {
@@ -54,7 +61,10 @@ func (t *todoList) get() []todoItem {
 	return append([]todoItem(nil), t.items...)
 }
 
-// openCount returns how many items are not yet completed.
+// openCount returns how many items are still actionable. A blocked item is not
+// completed, but it is also not something the model can be nudged into doing —
+// counting it here is what would make the [CONTINUE] nudge keep demanding work
+// on the one item the model already said it cannot do.
 func (t *todoList) openCount() int {
 	if t == nil {
 		return 0
@@ -63,11 +73,26 @@ func (t *todoList) openCount() int {
 	defer t.mu.Unlock()
 	n := 0
 	for _, it := range t.items {
-		if it.Status != todoCompleted {
+		if it.Status != todoCompleted && it.Status != todoBlocked {
 			n++
 		}
 	}
 	return n
+}
+
+// hasBlocked reports whether the model has declared any item blocked.
+func (t *todoList) hasBlocked() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, it := range t.items {
+		if it.Status == todoBlocked {
+			return true
+		}
+	}
+	return false
 }
 
 // completeOpen closes stale checklist entries after the model has repeatedly
@@ -104,7 +129,10 @@ func (m *Model) reconcileTodosAtTurnEnd() int {
 	if m.stepCount >= limit || (m.verifyAttempts >= maxVerifyAttempts && m.lastVerification == "") {
 		return 0
 	}
-	if responseReportsBlocker(m.latestAssistantContent()) {
+	// Either signal stops the force-complete, and the conservative direction is
+	// clear: a false positive leaves stale items open in the sidebar, while a
+	// false negative writes "completed" onto work that never happened.
+	if m.todos.hasBlocked() || responseReportsBlocker(m.latestAssistantContent()) {
 		return 0
 	}
 	return m.todos.completeOpen()
@@ -133,8 +161,10 @@ func responseReportsBlocker(s string) bool {
 	return false
 }
 
-// openSummary lists the not-yet-completed items, one per line, for the
-// keep-going nudge.
+// openSummary lists the still-actionable items, one per line, for the
+// keep-going nudge. Blocked items are left out for the same reason openCount
+// skips them: the nudge says "take the next item now", and the next item must
+// not be the one the model already reported it cannot do.
 func (t *todoList) openSummary() string {
 	if t == nil {
 		return ""
@@ -143,7 +173,7 @@ func (t *todoList) openSummary() string {
 	defer t.mu.Unlock()
 	var b strings.Builder
 	for _, it := range t.items {
-		if it.Status != todoCompleted {
+		if it.Status != todoCompleted && it.Status != todoBlocked {
 			fmt.Fprintf(&b, "- [%s] %s\n", it.Status, it.Content)
 		}
 	}
@@ -157,7 +187,7 @@ func todoWriteTool(list *todoList) tools.Tool {
 		Type: "function",
 		Function: tools.Function{
 			Name:        "todo_write",
-			Description: "Maintain a checklist for a multi-step task. Pass the FULL list each call — it replaces the previous one. Mark exactly ONE item \"in_progress\" while you work it, and flip it to \"completed\" the moment it's done, then start the next. Use this for any task with 3+ steps so progress is visible and nothing is dropped. Keep items short and concrete. Do NOT end your turn while items remain incomplete unless you're blocked.",
+			Description: "Maintain a checklist for a multi-step task. Pass the FULL list each call — it replaces the previous one. Mark exactly ONE item \"in_progress\" while you work it, and flip it to \"completed\" the moment it's done, then start the next. Use this for any task with 3+ steps so progress is visible and nothing is dropped. Keep items short and concrete. Do NOT end your turn while items remain incomplete. If you genuinely cannot proceed on an item, set its status to \"blocked\" rather than leaving it pending or claiming it is done.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
@@ -168,7 +198,7 @@ func todoWriteTool(list *todoList) tools.Tool {
 							Type: "object",
 							Properties: map[string]tools.Property{
 								"content": {Type: "string", Description: "Short, concrete description of the step."},
-								"status":  {Type: "string", Enum: []string{"pending", "in_progress", "completed"}, Description: "pending | in_progress | completed"},
+								"status":  {Type: "string", Enum: []string{"pending", "in_progress", "completed", "blocked"}, Description: "pending | in_progress | completed | blocked (you tried and cannot proceed — say why in your reply)"},
 							},
 							Required: []string{"content", "status"},
 						},
@@ -187,7 +217,7 @@ func todoWriteTool(list *todoList) tools.Tool {
 			done := 0
 			for i := range a.Todos {
 				switch a.Todos[i].Status {
-				case todoPending, todoInProgress, todoCompleted:
+				case todoPending, todoInProgress, todoCompleted, todoBlocked:
 				default:
 					a.Todos[i].Status = todoPending
 				}

@@ -158,3 +158,62 @@ func TestReconcileTodosPreservesBlockedOrBudgetStoppedWork(t *testing.T) {
 		t.Fatal("budget-stopped work was marked completed")
 	}
 }
+
+func TestBlockedTodoIsNotNudgedOrForceCompleted(t *testing.T) {
+	list := &todoList{}
+	list.set([]todoItem{
+		{Content: "wire the API", Status: todoCompleted},
+		{Content: "get the vendor key", Status: todoBlocked},
+	})
+	// The nudge fires on openCount and lists openSummary; a blocked item must
+	// appear in neither, or the model is told to "take the next item now" for the
+	// one thing it just said it cannot do.
+	if n := list.openCount(); n != 0 {
+		t.Fatalf("blocked item counted as actionable: openCount=%d", n)
+	}
+	if s := list.openSummary(); strings.Contains(s, "vendor key") {
+		t.Fatalf("blocked item listed in the keep-going nudge: %q", s)
+	}
+	if !list.hasBlocked() {
+		t.Fatal("hasBlocked did not see the blocked item")
+	}
+}
+
+// The declared status must stop the turn-end force-complete without relying on
+// the assistant's prose matching a phrase list.
+func TestBlockedStatusStopsForceCompleteWithoutProse(t *testing.T) {
+	m := &Model{
+		todos:            &todoList{},
+		autoContinues:    maxAutoContinues,
+		maxSteps:         40,
+		history:          []api.Message{{Role: "assistant", Content: "I've gone as far as I can here."}},
+		lastVerification: "ok",
+	}
+	if responseReportsBlocker(m.latestAssistantContent()) {
+		t.Fatal("precondition: this phrasing should evade the prose heuristic")
+	}
+	m.todos.set([]todoItem{
+		{Content: "step one", Status: todoPending},
+		{Content: "step two", Status: todoBlocked},
+	})
+	if closed := m.reconcileTodosAtTurnEnd(); closed != 0 {
+		t.Fatalf("force-completed %d item(s) on a declared-blocked turn", closed)
+	}
+	for _, it := range m.todos.get() {
+		if it.Status == todoCompleted {
+			t.Fatalf("item %q was marked completed but never was", it.Content)
+		}
+	}
+}
+
+func TestTodoWriteAcceptsBlockedStatus(t *testing.T) {
+	list := &todoList{}
+	out, err := todoWriteTool(list).Handler(context.Background(),
+		json.RawMessage(`{"todos":[{"content":"get the key","status":"blocked"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := list.get(); len(got) != 1 || got[0].Status != todoBlocked {
+		t.Fatalf("blocked status was not preserved: %#v (%s)", got, out)
+	}
+}

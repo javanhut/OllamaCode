@@ -280,6 +280,10 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Re-read guard: the streak guard above resets on any interleaved call,
 		// so it misses a model re-reading files it already has. Re-reading a
 		// file nothing has mutated is always wasted work.
+		// Baseline for the stale-edit guard, taken here because the batch's reads
+		// have now actually happened.
+		m.recordReadHashes(batchCalls)
+
 		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
 			m.history = append(m.history, advisory(fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`))))
 			if stopRereads {
@@ -442,6 +446,20 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Enforced half of plan verification: a file the plan named cannot be
 		// edited until it has been read this turn. The handoff message asks for
 		// this; a small local model may ignore a prompt, but not this.
+		// Stale-edit guard: the file changed under the model since it read it.
+		// Checked before the plan gate below because "your copy is out of date"
+		// is the more specific answer when both apply.
+		if reason := m.requireFreshRead(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
+			m.pending.results[i] = api.Message{
+				Role:     "tool",
+				ToolName: call.Function.Name,
+				Content:  reason,
+			}
+			m.pending.started[i] = true
+			m.pending.done++
+			continue
+		}
+
 		if reason := m.requireReadBeforeEdit(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
 			m.pending.results[i] = api.Message{
 				Role:     "tool",
