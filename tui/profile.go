@@ -1,5 +1,7 @@
 package tui
 
+import "fmt"
+
 // maxContextBudget caps how much context we ask Ollama to allocate, even if the
 // model reports a larger window — keeps memory/latency sane on local hardware.
 const maxContextBudget = 131072
@@ -147,4 +149,23 @@ func (m *Model) parallelToolLimit() int {
 		return 1
 	}
 	return m.profile.maxParallelToolCalls()
+}
+
+// syncContextCeiling lowers this model's num_ctx to the window the host has
+// actually been able to allocate. The api layer already retried a failed
+// request down to a size that loads; without adopting the result here the TUI
+// would keep assembling prompts for a window the server cannot give it, and
+// every turn would pay the search again. Persisted to the profile, so the next
+// session starts at the size that fits this machine.
+func (m *Model) syncContextCeiling() {
+	n := m.host.ContextCeiling(m.modelName)
+	if n <= 0 || n >= m.contextLimit {
+		return
+	}
+	previous := m.contextLimit
+	p := m.profile
+	p.NumCtx = n
+	m.saveProfile(p)
+	m.logActivity(fmt.Sprintf("host could not allocate a %d-token context; using %d", previous, n))
+	m.toast = fmt.Sprintf("context reduced to %d tokens — host ran out of memory", n)
 }

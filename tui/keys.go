@@ -265,6 +265,9 @@ func (m *Model) modelInfoCommand(args string) {
 		}
 		p := m.profile
 		p.NumCtx = n
+		// An explicit override outranks a ceiling learned from an earlier
+		// allocation failure — the GPU may have freed up since.
+		m.host.ForgetContextCeiling(m.modelName)
 		m.saveProfile(p)
 		m.toast = fmt.Sprintf("num_ctx for %s set to %d", m.modelName, m.contextLimit)
 		return

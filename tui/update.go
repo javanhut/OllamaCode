@@ -1084,7 +1084,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// overflow is excluded: it is not transient and must not spend this
 		// budget. It either already had its one compaction pass or compaction
 		// freed nothing, and either way the next stop is the surfaced error.
-		if !overflow && !m.compacting && m.streamRetries < maxStreamRetries {
+		// A memory failure is not transient either: the api layer already retried
+		// it down to the smallest context that could load and it still would not
+		// fit, so the backoff would only reload the model three more times.
+		if !overflow && !api.IsMemoryFailure(msg.err) && !m.compacting && m.streamRetries < maxStreamRetries {
 			m.streamRetries++
 			delay := time.Duration(m.streamRetries) * 2 * time.Second
 			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))

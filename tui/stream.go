@@ -453,6 +453,9 @@ func (m *Model) buildDynamicContext(ragBlock string) string {
 }
 
 func (m *Model) startStream() tea.Cmd {
+	// Before assembly, not after: a window this host cannot allocate has to be
+	// off the budget before the prompt is packed to fill it.
+	m.syncContextCeiling()
 	// Token-budgeted assembly: static prompt + newest-fitting history + volatile
 	// tail (including the auto-RAG block). Guarantees we never exceed num_ctx.
 	msgs := m.assembleMessages(m.ragBlockForTurn())

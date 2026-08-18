@@ -430,6 +430,44 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 	return &genResp, nil
 }
 
+// chatPost sends a chat request and returns the live response body. A host that
+// dies allocating memory (KV cache too large for VRAM) is retried with num_ctx
+// halved, down to minContextFloor, so an oversized window degrades into a
+// smaller one instead of killing the turn. The retry is safe here because the
+// allocation happens at model load, before a single token has been streamed.
+func (o OllamaHost) chatPost(ctx context.Context, urlPath, userAgent string, req ChatRequest) (*http.Response, error) {
+	fitNumCtx(&req, o.uri)
+	for {
+		jsonData, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal chat request: %v", err)
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create http request: %v", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if userAgent != "" {
+			httpReq.Header.Set("User-Agent", userAgent)
+		}
+		o.applyAuth(httpReq)
+
+		resp, err := ollamaHTTPClient.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("http request failed: %v", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		failure := statusError(resp.StatusCode, body)
+		if _, ok := shrinkForMemory(&req, o.uri, failure); !ok {
+			return nil, failure
+		}
+	}
+}
+
 func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
 	if o.IsCursor() {
 		return o.chatCursor(ctx, req)
@@ -451,39 +489,17 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 		defer close(respChan)
 		defer close(errChan)
 
-		urlPath := generatePath("chatResponse", o)
-		jsonData, err := json.Marshal(req)
-		if err != nil {
-			errChan <- fmt.Errorf("failed to marshal chat request: %v", err)
-			return
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
-		if err != nil {
-			errChan <- fmt.Errorf("failed to create http request: %v", err)
-			return
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("User-Agent", "OllamaCode/1.0 (Chat)")
-		o.applyAuth(httpReq)
-
-		resp, err := ollamaHTTPClient.Do(httpReq)
+		resp, err := o.chatPost(ctx, generatePath("chatResponse", o), "OllamaCode/1.0 (Chat)", req)
 		if err != nil {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				errChan <- fmt.Errorf("http request failed: %v", err)
+				errChan <- err
 				return
 			}
 		}
 		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			errChan <- statusError(resp.StatusCode, body)
-			return
-		}
 
 		sawDone := false
 		decoder := json.NewDecoder(resp.Body)
@@ -537,26 +553,11 @@ func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse
 	if req.KeepAlive == "" {
 		req.KeepAlive = defaultKeepAlive
 	}
-	urlPath := generatePath("chatResponse", o)
-	jsonData, err := json.Marshal(req)
+	resp, err := o.chatPost(ctx, generatePath("chatResponse", o), "", req)
 	if err != nil {
-		return ChatResponse{}, fmt.Errorf("failed to marshal chat request: %v", err)
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("failed to create http request: %v", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	o.applyAuth(httpReq)
-	resp, err := ollamaHTTPClient.Do(httpReq)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("http request failed: %v", err)
+		return ChatResponse{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return ChatResponse{}, statusError(resp.StatusCode, body)
-	}
 	var out ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return ChatResponse{}, fmt.Errorf("failed to decode response: %v", err)
