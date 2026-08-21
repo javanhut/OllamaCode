@@ -3,6 +3,7 @@ package headless
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,6 +124,74 @@ type errChat struct{}
 func (errChat) ChatOnce(context.Context, api.ChatRequest) (api.ChatResponse, error) {
 	return api.ChatResponse{}, context.DeadlineExceeded
 }
+
+// A headless run carries its own stale-edit ledger (agent.Run installs one per
+// run), so the TUI is no longer the only guarded path: read, drift, edit is
+// refused here exactly as it is interactively.
+func TestRunRefusesStaleEdit(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	target := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(target, []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// drift_file simulates a third party rewriting the file mid-run. It is not
+	// a registered file mutator, so the ledger treats it as an external change.
+	reg := tools.DefaultRegistry()
+	reg.Register(tools.Tool{
+		Function: tools.Function{
+			Name:       "drift_file",
+			Parameters: tools.Schema{Type: "object", Properties: map[string]tools.Property{"path": {Type: "string"}}},
+		},
+		Handler: func(_ context.Context, args json.RawMessage) (string, error) {
+			var a struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &a)
+			return "drifted", os.WriteFile(a.Path, []byte("externally rewritten\n"), 0o644)
+		},
+	})
+
+	call := func(name, args string) api.ChatResponse {
+		return api.ChatResponse{Message: api.Message{ToolCalls: []tools.ToolCall{
+			{Function: tools.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}},
+		}}}
+	}
+	readArgs, _ := json.Marshal(map[string]string{"path": target})
+	editArgs, _ := json.Marshal(map[string]string{"path": target, "old_string": "one", "new_string": "two"})
+	host := &fakeChat{responses: []api.ChatResponse{
+		call("read_file", string(readArgs)),
+		call("drift_file", string(readArgs)),
+		call("edit_file", string(editArgs)),
+		{Message: api.Message{Content: "refused, as expected"}},
+	}}
+
+	res, err := Run(context.Background(), host, reg, "update the file", Options{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Output != "refused, as expected" {
+		t.Fatalf("run did not complete: %+v", res)
+	}
+	// The edit_file tool result fed back to the model must be the stale-edit
+	// refusal, and the file must be untouched by it.
+	last := host.requests[len(host.requests)-1].Messages
+	var editResult string
+	for _, msg := range last {
+		if msg.Role == "tool" && msg.ToolName == "edit_file" {
+			editResult = msg.Content
+		}
+	}
+	if !strings.Contains(editResult, "changed on disk") {
+		t.Fatalf("stale edit was not refused in headless mode; tool result: %q", editResult)
+	}
+	data, _ := os.ReadFile(target)
+	if string(data) != "externally rewritten\n" {
+		t.Fatalf("the refused edit still wrote: %q", data)
+	}
+}
+
 
 func TestReportJSONShape(t *testing.T) {
 	res := agent.Result{

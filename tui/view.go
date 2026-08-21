@@ -36,6 +36,10 @@ var slashCommands = []struct {
 	{"/undo", "revert the last turn's file changes"},
 	{"/rewind", "drop the last n turns of conversation (default 1)"},
 	{"/fork", "branch the conversation into a saved session"},
+	{"/rename", "rename the current saved session"},
+	{"/title", "set the session title (pins it against auto-titling)"},
+	{"/stash", "park the current draft, clearing the input"},
+	{"/unstash", "restore the most recently stashed draft"},
 	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},
@@ -124,6 +128,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
 	case stateQuestion:
 		v.SetContent(m.overlayModal(base, m.questionModal()))
+	case stateLoopGuard:
+		v.SetContent(m.overlayModal(base, m.loopGuardModal()))
 	case stateRouteConfirm:
 		v.SetContent(m.overlayModal(base, m.routeConfirmModal()))
 	case stateDiff:

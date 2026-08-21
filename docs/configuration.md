@@ -29,6 +29,7 @@ outranks a stored key. Prefer that over typing the key.
 | `api_key` | Bearer token for the default host; overridden by `OLLAMA_API_KEY` |
 | `model` | Default model — used by any mode without a route. May carry a provider prefix (`cursor:auto`); a bare name means the default host |
 | `max_steps` | Tool-call rounds per turn before the agent stops and summarizes (default 25; auto mode uses 100) |
+| `prompt_family` | Force a per-family system-prompt section (`qwen`, `llama`, `deepseek`, …); empty auto-detects from the model name, `"none"`/`"default"` sends the base prompt only |
 | `embed_model` | Embedding model for auto-RAG (default `nomic-embed-text`) |
 | `auto_rag` | `false` disables automatic retrieval |
 | `dream` | `false` disables idle reflection |

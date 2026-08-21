@@ -370,7 +370,9 @@ func (m *Model) showModelInfo() {
 // updateQuestion drives the ask_user option picker. Esc does not cancel the
 // question — there is nothing to cancel, the model is already waiting — it just
 // closes the picker so the answer can be typed instead, which is what an option
-// list that does not cover the real answer needs.
+// list that does not cover the real answer needs. A typed answer goes through
+// submit() as a user message and the parked tool result keeps its placeholder,
+// so each question is answered by exactly one delivery path.
 func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	options := m.question.Options
 	if len(options) == 0 {
@@ -389,22 +391,107 @@ func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.questionCursor++
 		}
 		return m, nil
+	case " ", "space":
+		// Space toggles the focused row's checkbox; single-select questions
+		// ignore it, so space never eats a keypress that means nothing.
+		if !m.question.MultiSelect {
+			return m, nil
+		}
+		if m.questionChecked == nil {
+			m.questionChecked = map[int]bool{}
+		}
+		m.questionChecked[m.questionCursor] = !m.questionChecked[m.questionCursor]
+		return m, nil
 	case "esc":
 		m.state = stateChat
 		m.input.Focus()
 		m.toast = "type your answer"
 		return m, nil
+	case "enter":
+		if m.question.MultiSelect {
+			return m.resolveQuestion(m.multiSelectAnswer())
+		}
+		if m.questionCursor < 0 || m.questionCursor >= len(options) {
+			return m, nil
+		}
+		return m.resolveQuestion([]string{options[m.questionCursor]})
 	default:
 		choice, ok := chooseQuestionOption(key, m.questionCursor, options)
 		if !ok {
 			return m, nil
 		}
-		m.stageAnswer(choice)
-		cmd := m.submit()
-		m.refreshTranscript()
-		m.viewport.GotoBottom()
-		return m, cmd
+		return m.resolveQuestion([]string{choice})
 	}
+}
+
+// checkedQuestionOptions returns the toggled labels in list order, so the
+// answer reads the same regardless of the order the user toggled them in.
+func (m *Model) checkedQuestionOptions() []string {
+	var labels []string
+	for i, opt := range m.question.Options {
+		if m.questionChecked[i] {
+			labels = append(labels, opt)
+		}
+	}
+	return labels
+}
+
+// multiSelectAnswer is the label set enter confirms: the toggled rows, or the
+// focused row when nothing is toggled — the sensible default, exactly what
+// enter means in the single-select picker.
+func (m *Model) multiSelectAnswer() []string {
+	labels := m.checkedQuestionOptions()
+	if len(labels) == 0 && m.questionCursor >= 0 && m.questionCursor < len(m.question.Options) {
+		labels = []string{m.question.Options[m.questionCursor]}
+	}
+	return labels
+}
+
+// resolveQuestion delivers a picked answer as the ask_user tool result and
+// resumes the turn. The batch parked when the picker opened (dispatch.go), so
+// starting a stream here is exactly what the batch loop would have done had
+// ask_user returned this answer on its own.
+func (m *Model) resolveQuestion(labels []string) (tea.Model, tea.Cmd) {
+	m.applyQuestionAnswer(strings.Join(labels, ", "))
+	cmd := m.startStream()
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	return m, cmd
+}
+
+// applyQuestionAnswer rewrites the parked ask_user result with the answer and
+// closes the picker. No user message is staged: the answer belongs to the tool
+// call that asked for it, and a synthetic user message would both duplicate it
+// and reset the turn guards the resumed turn still lives under.
+func (m *Model) applyQuestionAnswer(answer string) {
+	if m.questionResult >= 0 && m.questionResult < len(m.history) &&
+		m.history[m.questionResult].Role == "tool" && m.history[m.questionResult].ToolName == "ask_user" {
+		m.history[m.questionResult].Content = "ANSWER: " + answer
+	}
+	m.state = stateChat
+	m.question = tools.AskUserQuestion{}
+	m.questionChecked = nil
+	m.questionResult = -1
+	m.input.Focus()
+}
+
+// orderedQuestionOptions returns the options with the recommended one first.
+// The label is only moved, never duplicated or rewritten, so the answer that
+// comes back is still exactly one of the model's own labels.
+func orderedQuestionOptions(q tools.AskUserQuestion) []string {
+	if q.Recommended == "" {
+		return q.Options
+	}
+	for i, opt := range q.Options {
+		if opt == q.Recommended {
+			out := make([]string, 0, len(q.Options))
+			out = append(out, opt)
+			out = append(out, q.Options[:i]...)
+			out = append(out, q.Options[i+1:]...)
+			return out
+		}
+	}
+	return q.Options
 }
 
 // chooseQuestionOption maps a keypress to the option it selects. ok=false means
@@ -433,15 +520,96 @@ func chooseQuestionOption(key string, cursor int, options []string) (string, boo
 	return "", false
 }
 
-// stageAnswer closes the picker and puts the chosen label where a typed answer
-// would be. The send then goes through submit() rather than appending to
-// history directly, so a picked answer takes exactly the same path as a typed
-// one — queue, @-mentions, turn guards, dream context.
-func (m *Model) stageAnswer(choice string) {
+// updateLoopGuard drives the doom-loop escalation modal. Esc picks the safe
+// default — "stop turn", exactly what the guards used to do on their own —
+// because every other choice keeps a looping agent running.
+func (m *Model) updateLoopGuard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	esc := m.loopEscalation
+	if esc == nil {
+		m.state = stateChat
+		return m, nil
+	}
+	options := loopEscalationOptions(esc)
+	switch key := msg.String(); key {
+	case "up", "k":
+		if m.loopGuardCursor > 0 {
+			m.loopGuardCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.loopGuardCursor < len(options)-1 {
+			m.loopGuardCursor++
+		}
+		return m, nil
+	case "esc":
+		return m.resolveLoopEscalation(0)
+	default:
+		choice, ok := chooseLoopGuardOption(key, m.loopGuardCursor, options)
+		if !ok {
+			return m, nil
+		}
+		return m.resolveLoopEscalation(choice)
+	}
+}
+
+// loopEscalationOptions lists the user's choices. "Ban tool & continue" only
+// exists when the loop indicts one bannable tool — a pure oscillation or
+// stagnation has no single culprit to take away.
+func loopEscalationOptions(esc *loopEscalation) []string {
+	options := []string{"Stop turn", "Continue anyway"}
+	if loopBanAllowed(esc.tool) {
+		options = append(options, fmt.Sprintf("Ban %s & continue", esc.tool))
+	}
+	return options
+}
+
+// chooseLoopGuardOption maps a keypress to a choice index. ok=false means the
+// key selects nothing — navigation, or a digit naming a choice this modal
+// does not have, which must do nothing rather than act out of range.
+func chooseLoopGuardOption(key string, cursor int, options []string) (int, bool) {
+	if len(options) == 0 {
+		return 0, false
+	}
+	if key == "enter" {
+		if cursor < 0 || cursor >= len(options) {
+			return 0, false
+		}
+		return cursor, true
+	}
+	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+		if i := int(key[0] - '1'); i < len(options) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// resolveLoopEscalation applies the user's choice and resumes the turn. All
+// three paths end in startStream: the stop path streams the blocker report,
+// the other two stream the agent's next working round.
+func (m *Model) resolveLoopEscalation(choice int) (tea.Model, tea.Cmd) {
+	esc := m.loopEscalation
+	m.loopEscalation = nil
 	m.state = stateChat
-	m.question = tools.AskUserQuestion{}
-	m.input.Focus()
-	m.input.SetValue(choice)
+	m.toast = ""
+	switch choice {
+	case 0: // Stop turn — exactly the automatic path.
+		m.applyLoopGuardStops(esc)
+	case 2: // Ban the tool for the rest of the turn, then keep working.
+		m.bannedTools[esc.tool] = true
+		m.resetLoopDetector(esc.kind)
+		m.history = append(m.history, advisory(fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", esc.tool, esc.streak)))
+	default: // Continue anyway — reset only the detector that fired.
+		if m.loopContinues == nil {
+			m.loopContinues = map[string]int{}
+		}
+		m.loopContinues[esc.kind]++
+		m.resetLoopDetector(esc.kind)
+	}
+	cmd := m.startStream()
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+	return m, cmd
 }
 
 func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -619,6 +787,16 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.forkCommand(strings.TrimSpace(strings.TrimPrefix(val, "/fork")))
 			return m, nil
 		}
+		if val == "/rename" || strings.HasPrefix(val, "/rename ") {
+			m.input.Reset()
+			m.renameCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rename")))
+			return m, nil
+		}
+		if val == "/title" || strings.HasPrefix(val, "/title ") {
+			m.input.Reset()
+			m.titleCommand(strings.TrimSpace(strings.TrimPrefix(val, "/title")))
+			return m, nil
+		}
 		if val == "/rewind" || strings.HasPrefix(val, "/rewind ") {
 			m.input.Reset()
 			m.rewindCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rewind")))
@@ -637,6 +815,15 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "/quit", "/exit":
 			return m, tea.Quit
+
+		case "/stash":
+			// No input.Reset() here: the draft being typed is the payload.
+			m.stashCommand()
+			return m, nil
+		case "/unstash":
+			m.input.Reset()
+			m.unstashCommand()
+			return m, nil
 
 		case "/models":
 			m.input.Reset()
@@ -658,6 +845,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.queue = nil
 			m.history = nil
 			m.archiveSummary, m.archivedThrough, m.prunedThrough = "", 0, 0
+			m.sessionName, m.sessionTitle = "", ""
+			m.titlePinned, m.titleGenTried = false, false
 			m.turnRecords = nil
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
@@ -727,7 +916,6 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			summary, touched := m.undoLast()
 			m.toast = summary
-			slices.Sort(touched) // snaps is a map; keep the advisory's path order stable
 			for _, p := range touched {
 				m.noteFileChanged([]string{p}) // keep the RAG index in sync
 			}
@@ -877,7 +1065,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				var b strings.Builder
 				b.WriteString("Saved sessions:\n\n")
 				for _, s := range sessions {
-					fmt.Fprintf(&b, "- %s (%s, %s, %d messages)\n", s.Name, s.CreatedAt.Format("2006-01-02 15:04"), s.Model, len(s.Messages))
+					label := s.Name
+					if s.Title != "" {
+						label += " — " + s.Title
+					}
+					fmt.Fprintf(&b, "- %s (%s, %s, %d messages)\n", label, s.CreatedAt.Format("2006-01-02 15:04"), s.Model, len(s.Messages))
 				}
 				m.history = append(m.history, api.Message{
 					Role:    "system",

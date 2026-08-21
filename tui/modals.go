@@ -561,7 +561,8 @@ func (m *Model) routeConfirmModal() string {
 // questionModal renders an ask_user call as a pick-one list. The options are
 // the model's own labels, so whichever one is chosen comes back as text it
 // already knows how to read — which is the whole point of the picker over a
-// free-text reply it has to parse.
+// free-text reply it has to parse. A recommended option is marked, and a
+// multi-select question gets checkboxes (space toggles, enter confirms).
 func (m *Model) questionModal() string {
 	w := m.modalWidth()
 	innerW := m.modalInner()
@@ -572,8 +573,61 @@ func (m *Model) questionModal() string {
 	}
 	lines = append(lines, "")
 	for i, opt := range m.question.Options {
-		label := fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4))
+		prefix, suffix := "", ""
+		if m.question.MultiSelect {
+			prefix = "[ ] "
+			if m.questionChecked[i] {
+				prefix = "[x] "
+			}
+		}
+		if m.question.Recommended != "" && opt == m.question.Recommended {
+			suffix = " (recommended)"
+		}
+		label := prefix + fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4-len(prefix)-len(suffix))) + suffix
 		if i == m.questionCursor {
+			lines = append(lines, modalSelectStyle.Render(" "+label+" "))
+			continue
+		}
+		lines = append(lines, modalBodyStyle.Render("  "+label))
+	}
+	if m.question.MultiSelect {
+		lines = append(lines, "",
+			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+				modalMutedStyle.Render("space ")+modalBodyStyle.Render("toggle   ")+
+				modalMutedStyle.Render("enter ")+modalBodyStyle.Render("confirm   ")+
+				modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+	} else {
+		lines = append(lines, "",
+			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+				modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
+				modalMutedStyle.Render("enter ")+modalBodyStyle.Render("send   ")+
+				modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+	}
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
+}
+
+// loopGuardModal asks the human to call a detected doom loop: end the turn,
+// let the agent keep going, or take the looping tool away. The turn is parked
+// behind it — no stream runs until a choice lands.
+func (m *Model) loopGuardModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+
+	lines := []string{m.modalHeader("Agent appears stuck", "esc=stop turn", innerW), ""}
+	reason := ""
+	options := []string{"Stop turn", "Continue anyway"}
+	if m.loopEscalation != nil {
+		reason = m.loopEscalation.reason()
+		options = loopEscalationOptions(m.loopEscalation)
+	}
+	for _, line := range strings.Split(ansi.Wrap(reason, innerW, ""), "\n") {
+		lines = append(lines, modalBodyStyle.Render(line))
+	}
+	lines = append(lines, "")
+	for i, opt := range options {
+		label := fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4))
+		if i == m.loopGuardCursor {
 			lines = append(lines, modalSelectStyle.Render(" "+label+" "))
 			continue
 		}
@@ -582,8 +636,8 @@ func (m *Model) questionModal() string {
 	lines = append(lines, "",
 		modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
 			modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
-			modalMutedStyle.Render("enter ")+modalBodyStyle.Render("send   ")+
-			modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+			modalMutedStyle.Render("enter ")+modalBodyStyle.Render("choose   ")+
+			modalMutedStyle.Render("esc ")+modalBodyStyle.Render("stop turn"))
 
 	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
 }

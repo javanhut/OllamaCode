@@ -62,8 +62,23 @@ func (m *Model) pauseForUser(toast, reason string) {
 	m.lastActivity = time.Now()
 }
 
+// freshnessLedger returns the session's stale-edit ledger, creating it on
+// first use so test-constructed Models get the guard too. Callers on the
+// update goroutine must pre-warm it before any tool goroutines start (see
+// processPendingTools) so the lazy init never races.
+func (m *Model) freshnessLedger() *tools.FreshnessLedger {
+	if m.freshness == nil {
+		m.freshness = tools.NewFreshnessLedger()
+	}
+	return m.freshness
+}
+
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
 	m.logActivity("Tool: " + call.Function.Name)
+	// Guard this call with the session's stale-edit ledger; the check itself
+	// runs inside the registry (tools/freshness.go), so headless runs and
+	// sub-agents get the same refusal from their own ledgers.
+	ctx = tools.WithFreshnessLedger(ctx, m.freshnessLedger())
 	executor := agent.Executor{
 		Registry: m.tools, Host: m.host, Model: m.modelName, NumCtx: m.contextLimit,
 		Before: m.checkpointBeforeCall(), Permissions: m.cfg.Permissions,
@@ -164,6 +179,9 @@ func (m *Model) processPendingTools() tea.Cmd {
 	if m.pending == nil {
 		return nil
 	}
+	// Pre-warm the stale-edit ledger on the update goroutine so its lazy init
+	// can't race once the batch's tool goroutines start (see invokeTool).
+	m.freshnessLedger()
 	// A question is a conversation boundary, not one operation in a parallel
 	// batch. Run only the first ask_user call and cancel every other call that has
 	// not started, so nothing can continue behind the user's back while the model
@@ -223,9 +241,16 @@ func (m *Model) processPendingTools() tea.Cmd {
 			// A question with options becomes a picker: the model gets back one of
 			// its own labels instead of prose it has to interpret, which is the
 			// difference between a decided turn and another clarifying round.
+			m.questionResult = -1
 			if q := tools.ParseAskUser(batchCalls[questionIndex].Function.Arguments); len(q.Options) > 0 {
+				q.Options = orderedQuestionOptions(q)
 				m.question = q
 				m.questionCursor = 0
+				m.questionChecked = nil
+				// The batch's results were appended to history above; remember
+				// where this call's placeholder landed so a picked answer can
+				// rewrite it as the tool result (see applyQuestionAnswer).
+				m.questionResult = len(m.history) - len(batchResults) + questionIndex
 				m.state = stateQuestion
 			}
 			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
@@ -246,21 +271,8 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] You are alternating between the same actions and receiving the same results. Stop, state your blocker explicitly, and try a materially different approach."))
 			m.oscillationWarned = true
 		}
-		if stopOscillation {
-			m.history = append(m.history, advisory("[LOOP BROKEN] The same A/B outcomes continued after the warning. Tools are disabled for your next message — explain the blocker and summarize what you know."))
-			m.stopForBlockerReport()
-		}
 		if warnStagnant {
 			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] Your last three rounds of tool calls returned nothing this turn has not already seen. Use the evidence you have, take a materially different action, or state the blocker."))
-		}
-		if stopStagnant {
-			m.history = append(m.history, advisory("[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command."))
-			m.stopForBlockerReport()
-			// A tool-less message is not an ending on its own: the auto-continue on
-			// open todos and the citation gate each pull the model straight back in,
-			// which is exactly what kept the logged loop fed. This flag closes those
-			// doors so the reply reaches endTurnTail.
-			m.endTurnAfterReply = true
 		}
 
 		// Inspection calls include arguments in their repeat identity, so reading
@@ -274,24 +286,34 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if warnRepeat && !warnStagnant {
 			m.history = append(m.history, advisory(fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak)))
 		}
-		if announceStop && !stopStagnant {
-			content := fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", batchTool, m.sameToolStreak)
-			if m.bannedTools[batchTool] {
-				content = fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", batchTool, m.sameToolStreak)
+
+		// A detector stop used to end the turn on the spot. Interactive, the
+		// human gets the call first: the escalation parks here (no stream is
+		// running, the batch's results are already in history) and the modal
+		// decides whether applyLoopGuardStops runs at all. Auto mode and a
+		// detector past its continue cap keep the automatic stop.
+		if kind, tool := loopStopKind(stopOscillation, stopStagnant, stopRepeat, batchTool); kind != "" {
+			esc := &loopEscalation{
+				kind:            kind,
+				tool:            tool,
+				streak:          m.sameToolStreak,
+				rounds:          m.stagnantRounds,
+				stopOscillation: stopOscillation,
+				stopStagnant:    stopStagnant,
+				stopRepeat:      stopRepeat,
+				announceStop:    announceStop,
 			}
-			m.history = append(m.history, advisory(content))
-		}
-		if stopRepeat {
-			m.stopForBlockerReport()
+			if m.shouldAskLoopEscalation(kind) {
+				m.loopEscalation = esc
+				m.loopGuardCursor = 0
+			} else {
+				m.applyLoopGuardStops(esc)
+			}
 		}
 
 		// Re-read guard: the streak guard above resets on any interleaved call,
 		// so it misses a model re-reading files it already has. Re-reading a
 		// file nothing has mutated is always wasted work.
-		// Baseline for the stale-edit guard, taken here because the batch's reads
-		// have now actually happened.
-		m.recordReadHashes(batchCalls)
-
 		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
 			m.history = append(m.history, advisory(fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`))))
 			if stopRereads {
@@ -313,6 +335,25 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if m.stepCount >= limit {
 			m.history = append(m.history, advisory("[STEP BUDGET EXHAUSTED] You have used your tool-call budget for this turn. Stop calling tools: summarize what you did, what remains, and ask the user how to proceed."))
 			m.stopForBlockerReport()
+		}
+
+		// The loop-guard escalation parks the turn here: no stream is running
+		// and history is complete through this batch, so nothing moves until
+		// the user answers the modal (see updateLoopGuard). If another guard
+		// already ended the turn on the way down (re-read cap, step budget),
+		// asking is moot — the parked stop lands automatically alongside it.
+		if m.loopEscalation != nil {
+			if m.turnStoppedByGuard {
+				esc := m.loopEscalation
+				m.loopEscalation = nil
+				m.applyLoopGuardStops(esc)
+			} else {
+				m.state = stateLoopGuard
+				m.toast = "agent appears stuck"
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+				return nil
+			}
 		}
 
 		cmd := m.startStream()
@@ -454,20 +495,8 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Enforced half of plan verification: a file the plan named cannot be
 		// edited until it has been read this turn. The handoff message asks for
 		// this; a small local model may ignore a prompt, but not this.
-		// Stale-edit guard: the file changed under the model since it read it.
-		// Checked before the plan gate below because "your copy is out of date"
-		// is the more specific answer when both apply.
-		if reason := m.requireFreshRead(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
-			m.pending.results[i] = api.Message{
-				Role:     "tool",
-				ToolName: call.Function.Name,
-				Content:  reason,
-			}
-			m.pending.started[i] = true
-			m.pending.done++
-			continue
-		}
-
+		// (The stale-edit guard no longer needs a preflight here: the registry
+		// refuses drifted mutations inside dispatch — see tools/freshness.go.)
 		if reason := m.requireReadBeforeEdit(call.Function.Name, tools.MutatedPaths(call.Function.Name, call.Function.Arguments)); reason != "" {
 			m.pending.results[i] = api.Message{
 				Role:     "tool",

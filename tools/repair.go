@@ -46,6 +46,12 @@ func RepairHint(call ToolCall, err error) string {
 	if errors.As(err, &ve) {
 		return "error: " + ve.Error()
 	}
+	// A stale-edit refusal is already model-coaching text; appending "check the
+	// arguments" would misdiagnose it.
+	var se *StaleFileError
+	if errors.As(err, &se) {
+		return "error: " + se.Error()
+	}
 	if len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments) {
 		raw := string(call.Function.Arguments)
 		if len(raw) > 300 {

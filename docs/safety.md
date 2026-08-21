@@ -134,18 +134,46 @@ wins.) The flag resets at the start of each user turn.
 
 ## Undo
 
-Files are snapshotted before any mutating tool runs, and the turn's changes are
-banked as one checkpoint when it ends.
+Undo is git-backed. Before the first mutating tool call of a turn, the whole
+workspace is recorded as a git tree in a **shadow repository** — its own git
+dir under the ocode state dir, the workspace as its work-tree. `/undo` puts
+that tree back.
 
 ```
 /undo       revert the last turn's file changes
 /diff       view them first
 ```
 
-Writes made by delegated work bank into the same checkpoint: files a
-sub-agent or `parallel_edit` mutates are snapshotted before the mutation, so
-one `/undo` rewinds the whole delegation — see
+Your own repository is never touched. The shadow repo has a separate git dir
+and index, and ocode writes no commits, refs or HEAD, so your staging area,
+branch, stash and reflog are exactly as you left them. It works in a directory
+that is not a repository at all — the shadow repo is ocode's, not yours.
+
+Restore is exact: files the turn changed are put back, files it created are
+deleted, files it deleted come back, and the executable bit is preserved.
+There is no per-file size cap and no snapshot budget — git compresses and
+dedups, so 25 turns of history cost roughly one copy of the tree plus the
+churn.
+
+Two limits worth knowing:
+
+- Paths your `.gitignore` excludes are not snapshotted, so an edit to a build
+  artifact is not undoable. This is what keeps a snapshot from walking a
+  dependency tree; `node_modules/`, `__pycache__/`, `.venv/` and `venv/` are
+  always excluded on top of your own ignore rules.
+- Paths outside the workspace root, reached through the `jail_allowlist`, are
+  outside the snapshot.
+- A nested repository inside the workspace is recorded as a link, not as
+  contents. `/undo` never touches its files — it can't lose them, but it can't
+  restore them either.
+
+A read-only turn costs nothing: the snapshot is only taken when a mutating
+tool is about to run. Writes made by delegated work land in the same snapshot —
+a sub-agent's or `parallel_edit`'s mutations happen after the turn's snapshot,
+so one `/undo` rewinds the whole delegation — see
 [Tools](tools.md#spawn_subagent).
+
+If `git` is not installed, snapshots are off and `/undo` says so.
 
 ## The plan gate
 

@@ -26,7 +26,13 @@ type Session struct {
 	Model     string        `json:"model"`
 	Mode      string        `json:"mode"`
 	Notes     string        `json:"notes"`
-	Workspace string        `json:"workspace,omitempty"`
+	// Title is the human-readable label /sessions shows next to the name.
+	// TitlePinned means the user set it with /title, so the generator must
+	// never overwrite it. Absent in sessions saved before titles existed —
+	// both zero values are exactly right there.
+	Title       string `json:"title,omitempty"`
+	TitlePinned bool   `json:"title_pinned,omitempty"`
+	Workspace   string `json:"workspace,omitempty"`
 	Todos     []Todo        `json:"todos,omitempty"`
 	Messages  []api.Message `json:"messages"`
 	// Boundaries into Messages, which is an append-only log: the model sees
@@ -74,6 +80,11 @@ func Save(s Session) error {
 // SaveTo writes s to path atomically — temp file in the same directory, then
 // rename — so a crash mid-write never leaves a truncated session behind.
 func SaveTo(path string, s Session) error {
+	// Every writer (auto-save, /save, /fork) gets the deterministic fallback
+	// title for free; only an already-set title (generated or pinned) is kept.
+	if s.Title == "" {
+		s.Title = FallbackTitle(s.Messages)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

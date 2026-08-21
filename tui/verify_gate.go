@@ -172,6 +172,11 @@ func (m *Model) endTurnTail() []tea.Cmd {
 		m.viewport.GotoBottom()
 	}
 	m.lastActivity = time.Now()
+	// The one-shot session-title generation fires after the first completed
+	// turn; it runs in its own tea.Cmd and never touches the stream.
+	if c := m.maybeTitleCmd(); c != nil {
+		cmds = append(cmds, c)
+	}
 	if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
 		if c := m.compactContext(false); c != nil {
 			cmds = append(cmds, c)

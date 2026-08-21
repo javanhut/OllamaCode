@@ -7,16 +7,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/javanhut/ollama_code/internal/jobs"
 )
 
 // bgJob is a detached shell command started with run_shell(background=true). Its
 // output accumulates in a buffer; a watcher goroutine records the exit status.
 // Jobs outlive the tool call and turn — they run until they exit or are killed
-// via shell_output(kill=true).
+// via shell_output(kill=true). Identity lives in the unified job registry
+// (internal/jobs): the job id IS the registry id, shared with sub-agent jobs.
 type bgJob struct {
 	id      int
 	command string
@@ -24,6 +26,7 @@ type bgJob struct {
 	out     *lockedBuffer
 	cmd     *exec.Cmd
 	started time.Time
+	rec     *jobs.Job
 
 	mu       sync.Mutex
 	done     bool
@@ -32,10 +35,39 @@ type bgJob struct {
 }
 
 var (
-	bgMu   sync.Mutex
-	bgJobs = map[int]*bgJob{}
-	bgNext = 1
+	bgMu sync.Mutex
+	// bgNotifier, when set, is invoked exactly once by the job's watcher
+	// goroutine when the job exits — normally, in error, or killed via
+	// shell_output. The TUI registers it to push completion notifications;
+	// headless runs leave it nil and keep polling shell_output.
+	bgNotifier func(jobID int, exitCode int, err error, tail string)
 )
+
+// bgNotifyTailLines bounds how much of a job's output the completion
+// notification carries; the full log stays available via shell_output.
+const bgNotifyTailLines = 20
+
+// SetBackgroundShellNotifier registers (or clears, with nil) the completion
+// hook for background shell jobs. Package-global like the job registry: the
+// process has one conversation surface.
+func SetBackgroundShellNotifier(fn func(jobID int, exitCode int, err error, tail string)) {
+	bgMu.Lock()
+	bgNotifier = fn
+	bgMu.Unlock()
+}
+
+// tailLines returns the last n lines of s, trailing newlines stripped.
+func tailLines(s string, n int) string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
 
 // startBackgroundShell launches command detached from the caller's context, so
 // it keeps running after the tool call returns. Returns immediately with a job
@@ -74,12 +106,17 @@ func startBackgroundShell(command, workingDir, stdin string) (*bgJob, error) {
 		pr.Close()
 	}()
 
-	bgMu.Lock()
-	id := bgNext
-	bgNext++
-	job := &bgJob{id: id, command: command, pid: cmd.Process.Pid, out: out, cmd: cmd, started: time.Now()}
-	bgJobs[id] = job
-	bgMu.Unlock()
+	job := &bgJob{command: command, pid: cmd.Process.Pid, out: out, cmd: cmd, started: time.Now()}
+	// Register into the unified registry: the returned id is the job id the
+	// model sees, shared with sub-agent jobs. The hooks let the generic job
+	// tools (and shell_output) read and kill the job without knowing about
+	// bgJob.
+	job.rec = jobs.Default().Register(jobs.KindShell, shortCommand(command), jobs.Hooks{
+		Status: job.statusLine,
+		Output: func() string { return job.out.String() },
+		Cancel: func() { killShellCommand(job.cmd) },
+	})
+	job.id = job.rec.ID()
 
 	go func() {
 		err := cmd.Wait()
@@ -90,7 +127,28 @@ func startBackgroundShell(command, workingDir, stdin string) (*bgJob, error) {
 		} else if err != nil {
 			job.exitErr = err.Error()
 		}
+		exitCode := job.exitCode
+		exitErr := job.exitErr
 		job.mu.Unlock()
+		// Settle the registry record. A kill requested through the registry
+		// rewrites this to killed; a signal death from elsewhere (ExitError
+		// with code -1) reads as failed, like any non-zero exit.
+		switch {
+		case exitErr != "":
+			job.rec.Fail(exitErr)
+		case exitCode != 0:
+			job.rec.Fail(fmt.Sprintf("exit %d", exitCode))
+		default:
+			job.rec.Finish("exit 0")
+		}
+		// The watcher runs once per job and a kill funnels through the same
+		// Wait, so the hook fires exactly once on any exit path.
+		bgMu.Lock()
+		notify := bgNotifier
+		bgMu.Unlock()
+		if notify != nil {
+			notify(job.id, exitCode, err, tailLines(job.out.String(), bgNotifyTailLines))
+		}
 	}()
 	return job, nil
 }
@@ -105,31 +163,6 @@ func (j *bgJob) statusLine() string {
 		return "exited (" + j.exitErr + ")"
 	}
 	return fmt.Sprintf("exited %d", j.exitCode)
-}
-
-func lookupBgJob(id int) *bgJob {
-	bgMu.Lock()
-	defer bgMu.Unlock()
-	return bgJobs[id]
-}
-
-func listBgJobsText() string {
-	bgMu.Lock()
-	ids := make([]int, 0, len(bgJobs))
-	for id := range bgJobs {
-		ids = append(ids, id)
-	}
-	bgMu.Unlock()
-	if len(ids) == 0 {
-		return "no background jobs"
-	}
-	sort.Ints(ids)
-	var b strings.Builder
-	for _, id := range ids {
-		j := lookupBgJob(id)
-		fmt.Fprintf(&b, "job %d: %s — %s\n", id, j.statusLine(), shortCommand(j.command))
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // shortCommand renders the first line of a command for one-line listings.
@@ -167,21 +200,24 @@ func ShellOutputTool() Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
+			// shell_output is the model's long-standing habit; it now reads the
+			// shell section of the unified job registry (see tools/jobs.go).
 			if a.Job == 0 {
-				return listBgJobsText(), nil
+				return listJobsText(jobs.KindShell), nil
 			}
-			job := lookupBgJob(a.Job)
-			if job == nil {
+			job, ok := jobs.Default().Get(a.Job)
+			if !ok {
 				return "", fmt.Errorf("no background job %d (use shell_output with no arguments to list jobs)", a.Job)
 			}
+			if job.Kind() != jobs.KindShell {
+				return "", fmt.Errorf("job %d is a background %s job, not a shell job — read it with job_output", a.Job, job.Kind())
+			}
 			if a.Kill {
-				killShellCommand(job.cmd)
+				if _, err := jobs.Default().Cancel(a.Job); err != nil {
+					return "", err
+				}
 			}
-			out := strings.TrimRight(job.out.String(), "\n")
-			if out == "" {
-				return fmt.Sprintf("job %d: %s\n(no output yet)", a.Job, job.statusLine()), nil
-			}
-			return fmt.Sprintf("job %d: %s\n%s", a.Job, job.statusLine(), out), nil
+			return renderJobOutput(job), nil
 		},
 	}
 }

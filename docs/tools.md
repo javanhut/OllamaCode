@@ -84,6 +84,8 @@ caps are unchanged either way.
 |---|:-:|:-:|:-:|:-:|
 | `run_shell` | allowlist | | ✓ | ✓ |
 | `shell_output` | | | ✓ | ✓ |
+| `job_list` / `job_output` | ✓ | ✓ | ✓ | ✓ |
+| `job_kill` | | | ✓ | ✓ |
 | `process_list` | ✓ | ✓ | ✓ | ✓ |
 | `disk_usage` | ✓ | ✓ | ✓ | ✓ |
 | `process_kill` | | | ✓ | ✓ |
@@ -92,6 +94,11 @@ caps are unchanged either way.
 In explore mode `run_shell` is filtered per command segment against a read-only
 allowlist, with redirection and command substitution blocked. In plan mode it is
 unavailable entirely. See [Modes](modes.md#explore--read-only).
+
+Background jobs — shell commands from `run_shell(background=true)` and
+sub-agents from `spawn_subagent` — share one registry and one id space, so
+"job 3" is unambiguous. `job_list`, `job_output`, and `job_kill` work for both
+kinds; `shell_output` predates them and remains as the shell-only wrapper.
 
 ## Version control
 
@@ -153,13 +160,13 @@ Sub-agents inherit the parent's mode, so they are read-only in explore and plan.
 They cannot recurse, switch modes, or prompt the user.
 
 Parallel sub-agents have **no cross-task conflict detection** — only
-parallelize work on independent files. Their file edits are checkpointed for
-`/undo`, so a single `/undo` rewinds a delegation (individual sub-agent edits
-are not separately undoable). Checkpointing caveat for background jobs: a
-synchronous spawn banks every edit into the spawning turn, but a background
-sub-agent that is still running when that turn ends banks its later edits into
-whichever turn checkpoint is open when each write happens — so `/undo` for
-those detached writes is attributed to the later turn, not the spawning one.
+parallelize work on independent files. Their file edits fall inside the turn's
+snapshot, so a single `/undo` rewinds a delegation (individual sub-agent edits
+are not separately undoable). Caveat for background jobs: a synchronous spawn
+lands every edit inside the spawning turn's snapshot, but a background
+sub-agent still running when that turn ends has its later edits covered by
+whichever turn's snapshot is open when each write happens — so `/undo` for
+those detached writes rewinds the later turn, not the spawning one.
 
 ### `parallel_edit`
 
@@ -171,8 +178,8 @@ overlap between workers, …), every change the batch already applied is rolled
 back — files restored to their pre-batch content, files the batch created
 removed — and the tool returns a retryable error naming the failed change and
 what was rolled back. Nothing is ever left half-applied; the model fixes the
-cause and re-runs the whole call. The rollback restores content only — the turn
-checkpoint is untouched, so `/undo` still rewinds the turn afterwards.
+cause and re-runs the whole call. The rollback keeps its own per-file copies —
+the turn's snapshot is untouched, so `/undo` still rewinds the turn afterwards.
 
 ### `todo_write` / `todo_read`
 

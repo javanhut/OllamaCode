@@ -92,7 +92,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 		"read_session_notes", "remember", "recall", "forget", "find_symbol",
 		"code_definition", "code_references", "code_hover", "code_index", "semantic_search",
 		"ask_user", "hash_file", "process_list",
-		"disk_usage", "spawn_subagent",
+		"disk_usage", "spawn_subagent", "job_list", "job_output",
 	} {
 		m[name] = read
 	}
@@ -113,6 +113,9 @@ var toolPolicies = func() map[string]ToolPolicy {
 	}
 	m["run_shell"] = policy(ModeExploreShell, true, true, false, ToolCostHigh)
 	m["shell_output"] = policy(ModeMutable, true, false, false, ToolCostLow)
+	// job_kill terminates a process group or a sub-agent, like shell_output's
+	// kill flag; job_list/job_output are plain reads (classified above).
+	m["job_kill"] = policy(ModeMutable, true, false, false, ToolCostLow)
 	// These tools combine read-only defaults with mutating optional actions, so
 	// they remain visible for inspection but always pass through permission logic.
 	m["git_branch"] = policy(ModeReadOnly, false, true, false, ToolCostLow)

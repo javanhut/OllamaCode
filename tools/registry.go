@@ -218,10 +218,31 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 		return "", err
 	}
 	call.Function.Arguments = normalized
-	out, err := t.Handler(ctx, normalized)
-	if err == nil && hook != nil {
+	// Stale-edit guard, enforced here — the one choke point every caller (TUI,
+	// headless, sub-agent, eval) goes through — so the protection does not
+	// depend on which UI dispatched the call. No ledger on the context means
+	// the caller opted out.
+	ledger := FreshnessLedgerFrom(ctx)
+	if ledger != nil {
 		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
-			hook(paths)
+			if err := ledger.CheckMutation(call.Function.Name, paths); err != nil {
+				return "", err
+			}
+		}
+	}
+	out, err := t.Handler(ctx, normalized)
+	if err == nil {
+		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
+			if hook != nil {
+				hook(paths)
+			}
+			if ledger != nil {
+				ledger.RecordMutation(paths)
+			}
+		} else if ledger != nil && observingTools[call.Function.Name] {
+			if path := observedPath(normalized); path != "" {
+				ledger.Observe(path)
+			}
 		}
 	}
 	return out, err
@@ -247,6 +268,9 @@ func DefaultRegistry() *Registry {
 	r.Register(GrepTool())
 	r.Register(RunShellTool())
 	r.Register(ShellOutputTool())
+	r.Register(JobListTool())
+	r.Register(JobOutputTool())
+	r.Register(JobKillTool())
 	r.Register(WebFetchTool())
 	r.Register(WebSearchTool())
 	r.Register(GetProjectTreeTool())

@@ -237,12 +237,10 @@ var ollamaHTTPClient = &http.Client{Transport: func() *http.Transport {
 	return t
 }()}
 
-func statusError(code int, body []byte) error {
-	detail := strings.TrimSpace(string(body))
-	if detail == "" {
-		return fmt.Errorf("unexpected status code: %d", code)
-	}
-	return fmt.Errorf("unexpected status code: %d: %s", code, detail)
+func statusError(code int, body []byte, header http.Header) error {
+	se := &StatusError{Code: code, Body: strings.TrimSpace(string(body))}
+	se.retryAfter, se.hasRetryAfter = parseRetryAfter(header)
+	return se
 }
 
 // Provider selects the wire format a host speaks. The zero value is Ollama's
@@ -461,7 +459,7 @@ func (o OllamaHost) chatPost(ctx context.Context, urlPath, userAgent string, req
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		failure := statusError(resp.StatusCode, body)
+		failure := statusError(resp.StatusCode, body, resp.Header)
 		if _, ok := shrinkForMemory(&req, o.uri, failure); !ok {
 			return nil, failure
 		}

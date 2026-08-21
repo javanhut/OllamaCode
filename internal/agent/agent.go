@@ -47,6 +47,12 @@ type Options struct {
 	// deny holds inside a headless run and inside a spawned subagent, not only
 	// at the interactive prompt.
 	Permissions []tools.PermissionRule
+	// PriorMessages, when set, seeds the run with a prior conversation — a
+	// finished sub-agent's retained history (see Result.Messages) so the
+	// parent can send it a follow-up. The seed is expected to lead with its
+	// own system message, so System is not prepended again; task is appended
+	// as the next user message. The slice is copied before use.
+	PriorMessages []api.Message
 }
 
 // Result is the outcome of a headless run.
@@ -63,6 +69,12 @@ type Result struct {
 	RepeatedBlocked  int
 	PromptTokens     int
 	CompletionTokens int
+	// Messages is the run's full conversation — any PriorMessages seed, this
+	// run's exchanges, and the final assistant answer — so the caller can
+	// retain it and later resume the child with a follow-up (see
+	// Options.PriorMessages). It is set on error too, holding the partial
+	// history up to the failure or interruption.
+	Messages []api.Message
 }
 
 // Loop-safety tunables for the headless agent.
@@ -83,6 +95,10 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	if opts.MaxSteps <= 0 {
 		opts.MaxSteps = defaultMaxSteps
 	}
+	// One stale-edit ledger per run, deliberately NOT inherited from the
+	// caller's context: agents share the filesystem but not observations, so
+	// a sub-agent must read a file itself before its writes are fresh.
+	ctx = tools.WithFreshnessLedger(ctx, tools.NewFreshnessLedger())
 	defs := filterTools(reg.Definitions(), opts.ToolFilter)
 	if opts.Trace != nil {
 		names := make([]string, 0, len(defs))
@@ -97,7 +113,11 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	}
 
 	var msgs []api.Message
-	if opts.System != "" {
+	if len(opts.PriorMessages) > 0 {
+		// A follow-up to a finished child: the seed already leads with the
+		// system prompt, so don't prepend System again.
+		msgs = append(msgs, opts.PriorMessages...)
+	} else if opts.System != "" {
 		msgs = append(msgs, api.Message{Role: "system", Content: opts.System})
 	}
 	msgs = append(msgs, api.Message{Role: "user", Content: task})
@@ -163,6 +183,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			if opts.Trace != nil {
 				_ = opts.Trace.Record(tracepkg.Event{Kind: "model_error", Model: opts.Model, Error: err.Error()})
 			}
+			// Keep the partial history so an interrupted or failed child can
+			// still be resumed from where it stopped.
+			res.Messages = msgs
 			return res, err
 		}
 		if opts.Trace != nil {
@@ -189,6 +212,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 				}
 			}
 			res.Output = output
+			res.Messages = append(msgs, api.Message{Role: "assistant", Content: output})
 			if opts.Trace != nil {
 				_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_end", Model: opts.Model, Metadata: map[string]any{"reason": "completed", "steps": res.Steps, "prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens}})
 			}
@@ -260,8 +284,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	// Didn't answer on its own: force one tool-less pass so partial findings come
 	// back instead of a useless "hit the limit" sentinel.
 	res.HitLimit = true
-	output, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs)
+	output, history, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs)
 	res.Output = output
+	res.Messages = history
 	res.PromptTokens += promptTokens
 	res.CompletionTokens += completionTokens
 	if opts.Trace != nil {
@@ -271,8 +296,11 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 }
 
 // finalize asks the model, with NO tools available, to write up whatever it
-// gathered. Passing no tools forces a prose answer rather than another tool call.
-func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, int, int) {
+// gathered. Passing no tools forces a prose answer rather than another tool
+// call. It also returns the full history — the loop's messages plus the
+// advisory nudge and the model's reply — so the caller can retain the child's
+// conversation for a later follow-up.
+func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, []api.Message, int, int) {
 	// Advisory: the harness wrote this, not the user. Without the flag the trace
 	// exporter reads it as the sub-agent's task and every limit-hitting
 	// trajectory trains on the nudge instead of the real prompt.
@@ -288,13 +316,14 @@ func finalize(ctx context.Context, host ChatClient, opts Options, options map[st
 		if err != nil && opts.Trace != nil {
 			_ = opts.Trace.Record(tracepkg.Event{Kind: "model_error", Model: opts.Model, Error: err.Error(), Metadata: map[string]any{"finalize": true}})
 		}
-		return "(sub-agent stopped without a final answer)", 0, 0
+		return "(sub-agent stopped without a final answer)", msgs, 0, 0
 	}
 	if opts.Trace != nil {
 		payload, _ := json.Marshal(resp)
 		_ = opts.Trace.Record(tracepkg.Event{Kind: "model_response", Model: opts.Model, Payload: payload})
 	}
-	return resp.Message.Content, resp.PromptEval, resp.EvalCount
+	msgs = append(msgs, api.Message{Role: "assistant", Content: resp.Message.Content})
+	return resp.Message.Content, msgs, resp.PromptEval, resp.EvalCount
 }
 
 func recordModelRequest(recorder *tracepkg.Recorder, model string, req api.ChatRequest, constrained bool) {

@@ -64,8 +64,9 @@ func (m *Model) submit() tea.Cmd {
 	}
 
 	m.history = append(m.history, api.Message{Role: "user", Content: value})
-	m.userHistory = append(m.userHistory, value)
+	m.userHistory = appendHistory(m.userHistory, value)
 	m.historyIndex = len(m.userHistory)
+	m.persistHistory()
 	m.logActivity("Message: " + value)
 	m.lastError = ""
 	m.resetTurnGuards()
@@ -531,15 +532,23 @@ func (m *Model) startStream() tea.Cmd {
 // activeSystemPrompt picks the prompt for the model tier: the full Layla prompt
 // is ~13k tokens, which drowns a small model's context and instruction-following;
 // small models get a compact prompt that covers only workflow and tool rules.
+// A per-family behavior section (see prompt_family.go) is appended after the
+// base — it is static per model, so it belongs here in the KV-cached prefix,
+// never in the volatile tail. The cursor-agent prompt is exempt: it addresses
+// a host that is itself an agent, not a model family.
 func (m *Model) activeSystemPrompt() string {
 	base := systemPrompt
+	section := ""
 	switch {
 	case m.host.IsCursor():
 		base = agentProviderPrompt
 	case m.profile.smallModel():
 		base = compactSystemPrompt
+		section = m.familyPromptSection()
+	default:
+		section = m.familyPromptSection()
 	}
-	return base + environmentBlock()
+	return base + section + environmentBlock()
 }
 
 // environmentBlock reports the concrete runtime environment — working dir,

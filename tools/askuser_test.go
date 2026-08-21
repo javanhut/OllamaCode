@@ -27,6 +27,37 @@ func TestParseAskUserSalvagesPipeString(t *testing.T) {
 	}
 }
 
+func TestParseAskUserMultiSelectAndRecommended(t *testing.T) {
+	q := ParseAskUser(json.RawMessage(`{"question":"Which apply?","options":["a","b","c"],"multi_select":true,"recommended":"b"}`))
+	if !q.MultiSelect {
+		t.Fatal("multi_select was not parsed")
+	}
+	if q.Recommended != "b" {
+		t.Fatalf("recommended: %q", q.Recommended)
+	}
+}
+
+// A recommended label naming no option must be dropped, not rendered as a
+// marker on a row that does not exist.
+func TestParseAskUserDropsUnknownRecommended(t *testing.T) {
+	q := ParseAskUser(json.RawMessage(`{"question":"Pick one","options":["a","b"],"recommended":"zzz"}`))
+	if q.Recommended != "" {
+		t.Fatalf("unknown recommended survived: %q", q.Recommended)
+	}
+}
+
+// The salvaged pipe-separated form carries only the options — it stays
+// single-select with no recommendation.
+func TestParseAskUserPipeStringStaysSingleSelect(t *testing.T) {
+	q := ParseAskUser(json.RawMessage(`{"question":"Proceed?","options":"yes|no"}`))
+	if q.MultiSelect {
+		t.Fatal("pipe-string salvage produced a multi-select question")
+	}
+	if q.Recommended != "" {
+		t.Fatalf("pipe-string salvage produced a recommendation: %q", q.Recommended)
+	}
+}
+
 func TestParseAskUserOpenQuestion(t *testing.T) {
 	q := ParseAskUser(json.RawMessage(`{"question":"What should the timeout be?"}`))
 	if len(q.Options) != 0 {

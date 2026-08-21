@@ -131,7 +131,7 @@ func TestChatErrSchedulesBackoffRetry(t *testing.T) {
 	if m.turnGen != 7 {
 		t.Fatal("retry fired startStream immediately — expected a backoff tick first")
 	}
-	if !strings.HasPrefix(m.toast, "stream error") || !strings.Contains(m.toast, "retrying (1/2) in 2s") {
+	if !strings.HasPrefix(m.toast, "stream error") || !strings.Contains(m.toast, "retrying (1/2) in 1s") {
 		t.Fatalf("unexpected retry toast %q", m.toast)
 	}
 }

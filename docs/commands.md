@@ -67,18 +67,20 @@ session notes), so a session survives the process that ran it.
   there; the discarded tail is saved as a `rewind_<timestamp>` session first, so
   it is never a one-way door. `/fork 2 try-b` writes that same point to a named
   session and leaves the live conversation alone — `/load try-b` picks the
-  branch up later. Neither reverts a file edit; that is `/undo`, which pops one
-  checkpoint at a time and knows exactly what it wrote.
-- `/undo` survives restarts: the checkpoint stack is persisted per workspace
-  (capped at 25 turns, newest first), so after `--resume` you can still rewind
-  file changes made before the process exited.
+  branch up later. Neither reverts a file edit; that is `/undo`, which rewinds
+  one turn at a time to the workspace snapshot taken before it.
+- `/undo` survives restarts: the stack is a per-workspace list of git tree ids
+  (capped at 25 turns, newest first) and the trees live in the shadow repo, so
+  after `--resume` you can still rewind file changes made before the process
+  exited. See [Undo](safety.md#undo).
 - `--resume` cannot be combined with `-p` — headless runs always start fresh.
 
 State lives under the user config dir (`~/.config/ollama_code/` on Linux,
 `~/Library/Application Support/ollama_code/` on macOS): `autosave.json` for
 the last turn, `sessions/<name>.json` for `/save` sessions, `running.lock` as
-the clean-exit marker, and `checkpoints/<workspace-hash>.json` for the undo
-stack. All writes are atomic (temp file + rename).
+the clean-exit marker, `checkpoints/<workspace-hash>.json` for the undo stack,
+and `checkpoints/<workspace-hash>.git` for the shadow repo holding the
+snapshots it points at. All writes are atomic (temp file + rename).
 
 ```sh
 # In a script: summarize the working tree as JSON for jq.

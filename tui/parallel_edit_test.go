@@ -25,10 +25,10 @@ func mustArgs(t *testing.T, v any) json.RawMessage {
 // a stale edit is rejected (conflict detection), new files are created, and
 // every change is checkpointed so /undo can revert the whole batch.
 func TestApplyStagedOp(t *testing.T) {
-	dir := t.TempDir()
 	// applyStagedOp goes through the real (workspace-jailed) fs tools, so the
-	// temp dir must be the working root for its absolute paths to pass.
-	t.Chdir(dir)
+	// temp dir must be the working root for its absolute paths to pass — and
+	// the turn snapshot's shadow repo has to land in a temp state dir too.
+	dir := ckptWorkspace(t)
 	f := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(f, []byte("alpha beta gamma"), 0o644); err != nil {
 		t.Fatal(err)
@@ -76,10 +76,9 @@ func TestApplyStagedOp(t *testing.T) {
 // created), the error names the failed op and the rolled-back changes, and the
 // turn checkpoint is left intact so /undo still works afterwards.
 func TestParallelEditRollbackOnConflict(t *testing.T) {
-	dir := t.TempDir()
 	// applyPlannedOps goes through the workspace-jailed fs tools, so the temp
 	// dir must be the working root for its absolute paths to pass.
-	t.Chdir(dir)
+	dir := ckptWorkspace(t)
 	f := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(f, []byte("alpha beta gamma"), 0o644); err != nil {
 		t.Fatal(err)
@@ -119,11 +118,13 @@ func TestParallelEditRollbackOnConflict(t *testing.T) {
 		t.Errorf("created.txt should have been removed by rollback (err=%v)", statErr)
 	}
 
-	// The turn checkpoint must be untouched by the rollback: /undo still sees
-	// the batch's snapshots and restores the same pre-batch state.
+	// The turn snapshot must be untouched by the rollback: /undo still has a
+	// record for the turn. It has nothing left to restore — the rollback
+	// already put the workspace back — which is the point: the two mechanisms
+	// don't consume each other.
 	m.finalizeCheckpoint("parallel_edit rollback test")
-	if _, touched := m.undoLast(); len(touched) == 0 {
-		t.Error("expected /undo record to survive the rollback")
+	if msg, _ := m.undoLast(); !strings.HasPrefix(msg, "undid") {
+		t.Errorf("expected /undo record to survive the rollback, got %q", msg)
 	}
 	if got, _ := os.ReadFile(f); string(got) != "alpha beta gamma" {
 		t.Errorf("undo after rollback changed a.txt, got %q", got)

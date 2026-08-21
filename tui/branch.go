@@ -86,6 +86,13 @@ func (m *Model) forkSession(cut int, name string) error {
 	if m.notes != nil {
 		s.Notes = m.notes.get()
 	}
+	// Only a pinned (user-set) title propagates to a snapshot. Generated and
+	// fallback titles are provisional, so forks and rewind backups leave Title
+	// empty and SaveTo derives a fresh unpinned one from their own first user
+	// message.
+	if m.titlePinned {
+		s.Title, s.TitlePinned = m.sessionTitle, true
+	}
 	if m.todos != nil {
 		for _, it := range m.todos.get() {
 			s.Todos = append(s.Todos, session.Todo{Content: it.Content, Status: string(it.Status)})
@@ -123,7 +130,7 @@ func (m *Model) forkCommand(args string) {
 // rewind is never a one-way door.
 //
 // Conversation only: files stay as they are. Reverting those is /undo, which
-// pops one checkpoint at a time and knows what it wrote; guessing at the
+// rewinds one turn at a time to a real workspace snapshot; guessing at the
 // intersection of "n turns of messages" and "which file writes to unwind" is
 // how an undo eats work it shouldn't.
 func (m *Model) rewindCommand(args string) {
@@ -219,6 +226,7 @@ func (m *Model) saveCommand(name string) {
 		m.toast = "save failed: " + err.Error()
 		return
 	}
+	m.sessionName = name
 	m.toast = "saved session '" + name + "'"
 }
 
@@ -234,7 +242,11 @@ func (m *Model) loadCommand(name string) {
 		return
 	}
 	m.history = append([]api.Message(nil), s.Messages...)
+	repaired := m.repairInterruptedTurn()
 	m.archiveSummary, m.archivedThrough, m.prunedThrough = s.ArchiveSummary, s.ArchivedThrough, s.PrunedThrough
+	m.sessionName = name
+	m.sessionTitle, m.titlePinned = s.Title, s.TitlePinned
+	m.titleGenTried = hasAssistantReply(m.history)
 	m.turnRecords = nil // timings belong to the session we just left
 	m.notes.set(s.Notes)
 	m.modelName = s.Model
@@ -259,4 +271,7 @@ func (m *Model) loadCommand(name string) {
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
 	m.toast = "loaded session '" + name + "'"
+	if repaired > 0 {
+		m.toast = "Recovered interrupted turn · " + m.toast
+	}
 }

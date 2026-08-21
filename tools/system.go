@@ -69,21 +69,26 @@ func RunShellTool() Tool {
 // decoding — a picker offering different options than the model believes it
 // asked about is worse than no picker.
 type AskUserQuestion struct {
-	Question string
-	Options  []string
+	Question    string
+	Options     []string
+	MultiSelect bool
+	Recommended string
 }
 
 // ParseAskUser decodes an ask_user call's arguments. `options` is an array, but
 // a pipe-separated string is accepted too: that was the old schema, and a small
 // model handed an array schema will still sometimes send the string. Salvaging
-// it here costs four lines and saves a wasted turn.
+// it here costs four lines and saves a wasted turn. The salvaged form stays
+// single-select — it has no way to carry multi_select or recommended.
 func ParseAskUser(args json.RawMessage) AskUserQuestion {
 	var a struct {
-		Question string          `json:"question"`
-		Options  json.RawMessage `json:"options"`
+		Question    string          `json:"question"`
+		Options     json.RawMessage `json:"options"`
+		MultiSelect bool            `json:"multi_select"`
+		Recommended string          `json:"recommended"`
 	}
 	_ = json.Unmarshal(args, &a)
-	out := AskUserQuestion{Question: strings.TrimSpace(a.Question)}
+	out := AskUserQuestion{Question: strings.TrimSpace(a.Question), MultiSelect: a.MultiSelect}
 
 	var list []string
 	if err := json.Unmarshal(a.Options, &list); err != nil {
@@ -97,6 +102,16 @@ func ParseAskUser(args json.RawMessage) AskUserQuestion {
 			out.Options = append(out.Options, opt)
 		}
 	}
+	// A recommended label that names no option would mark a row that does not
+	// exist; drop it rather than render a phantom recommendation.
+	if rec := strings.TrimSpace(a.Recommended); rec != "" {
+		for _, opt := range out.Options {
+			if opt == rec {
+				out.Recommended = rec
+				break
+			}
+		}
+	}
 	return out
 }
 
@@ -105,7 +120,7 @@ func AskUserTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "ask_user",
-			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as a list the user picks from with one keypress, so you get back exactly one of your own labels instead of free-form prose to interpret. After calling this, STOP and wait — the user's next message will contain their answer.",
+			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as a list the user picks from with one keypress, so you get back exactly one of your own labels instead of free-form prose to interpret. The user's pick is delivered as this tool's result (ANSWER: <label>). Set multi_select=true when several options may apply at once; the result then lists every chosen label. Set recommended to the option you would pick — it is listed first and marked, but the user can still choose anything else. After calling this, STOP and wait — the answer arrives as the tool result.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -115,6 +130,8 @@ func AskUserTool() Tool {
 						Description: "Suggested answers, e.g. [\"yes\", \"no\", \"show me an example\"]. Keep each one short and distinct — the user picks one by number. Omit for an open question.",
 						Items:       &Property{Type: "string"},
 					},
+					"multi_select": {Type: "boolean", Description: "Let the user pick several options instead of exactly one. Default false. The tool result joins the chosen labels with \", \"."},
+					"recommended":  {Type: "string", Description: "The option you recommend, copied exactly from options. Shown first and marked as recommended. Ignored if it does not match one of options."},
 				},
 				Required: []string{"question"},
 			},

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
@@ -174,4 +175,133 @@ func TestRun_StepLimit(t *testing.T) {
 	if res.Steps != 2 {
 		t.Fatalf("expected 2 steps, got %d", res.Steps)
 	}
+}
+
+// recordChat is a fakeChat that also captures the requests it saw.
+type recordChat struct {
+	responses []api.ChatResponse
+	calls     int
+	requests  []api.ChatRequest
+}
+
+func (f *recordChat) ChatOnce(_ context.Context, req api.ChatRequest) (api.ChatResponse, error) {
+	f.requests = append(f.requests, req)
+	r := f.responses[f.calls]
+	f.calls++
+	return r, nil
+}
+
+// TestRun_SeedsPriorMessagesAndReturnsHistory covers the follow-up contract:
+// a run seeded with a finished child's conversation sends that history plus
+// the follow-up to the model, gets a FRESH step budget (the seed's rounds
+// don't count), and returns the full conversation for re-retention.
+func TestRun_SeedsPriorMessagesAndReturnsHistory(t *testing.T) {
+	var seen string
+	reg := echoRegistry(&seen)
+	prior := []api.Message{
+		{Role: "system", Content: "sub-agent system"},
+		{Role: "user", Content: "original task"},
+		{Role: "assistant", Content: "original report"},
+	}
+	host := &recordChat{responses: []api.ChatResponse{
+		toolResp("echo", `{"text":"more"}`),
+		textResp("follow-up report"),
+	}}
+	res, err := Run(context.Background(), host, reg, "what about y?", Options{
+		Model:         "m",
+		System:        "ignored — seed leads with its own system",
+		MaxSteps:      5,
+		PriorMessages: prior,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first request must carry the seed verbatim plus the follow-up.
+	got := host.requests[0].Messages
+	if len(got) != len(prior)+1 {
+		t.Fatalf("expected seed + follow-up (%d messages), got %d: %#v", len(prior)+1, len(got), got)
+	}
+	for i, m := range prior {
+		if !reflect.DeepEqual(got[i], m) {
+			t.Fatalf("seed message %d changed: want %#v, got %#v", i, m, got[i])
+		}
+	}
+	if got[len(prior)].Role != "user" || got[len(prior)].Content != "what about y?" {
+		t.Fatalf("follow-up not appended as the next user message: %#v", got[len(prior)])
+	}
+	// Fresh budget: this run used 1 step; the seed's rounds don't count.
+	if res.Steps != 1 {
+		t.Fatalf("expected a fresh step budget (1 step), got %d", res.Steps)
+	}
+	// The returned history is the full conversation: seed, follow-up, the
+	// tool round, and the final answer — ready to seed the next follow-up.
+	want := len(prior) + 1 + 2 + 1 // seed + follow-up + (assistant call + tool result) + final answer
+	if len(res.Messages) != want {
+		t.Fatalf("expected %d retained messages, got %d: %#v", want, len(res.Messages), res.Messages)
+	}
+	last := res.Messages[len(res.Messages)-1]
+	if last.Role != "assistant" || last.Content != "follow-up report" {
+		t.Fatalf("retained history must end with the final answer, got %#v", last)
+	}
+}
+
+// TestRun_HitLimitHistoryIncludesFinalize: the retained history of a
+// limit-hitting run keeps the finalize exchange too, so a follow-up sees what
+// the child concluded.
+func TestRun_HitLimitHistoryIncludesFinalize(t *testing.T) {
+	var seen string
+	reg := echoRegistry(&seen)
+	host := &recordChat{responses: []api.ChatResponse{
+		toolResp("echo", `{"text":"a"}`),
+		textResp("partial report"),
+	}}
+	res, err := Run(context.Background(), host, reg, "loop", Options{Model: "m", MaxSteps: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HitLimit {
+		t.Fatal("expected HitLimit=true")
+	}
+	last := res.Messages[len(res.Messages)-1]
+	if last.Role != "assistant" || last.Content != "partial report" {
+		t.Fatalf("retained history must end with the finalized report, got %#v", last)
+	}
+	advisory := res.Messages[len(res.Messages)-2]
+	if advisory.Role != "user" || !advisory.Advisory {
+		t.Fatalf("expected the advisory finalize nudge before the report, got %#v", advisory)
+	}
+}
+
+// TestRun_ErrorRetainsPartialHistory: a failed run still returns the
+// exchanges up to the failure, so an interrupted child can be resumed.
+func TestRun_ErrorRetainsPartialHistory(t *testing.T) {
+	var seen string
+	reg := echoRegistry(&seen)
+	host := &recordChat{responses: []api.ChatResponse{
+		toolResp("echo", `{"text":"a"}`),
+	}}
+	fail := &failingChat{inner: host, failOn: 1}
+	res, err := Run(context.Background(), fail, reg, "task", Options{Model: "m"})
+	if err == nil {
+		t.Fatal("expected the host error to surface")
+	}
+	// system? none. user task + assistant call + tool result = 3.
+	if len(res.Messages) != 3 {
+		t.Fatalf("expected the partial history up to the failure, got %#v", res.Messages)
+	}
+}
+
+// failingChat wraps recordChat and errors on one call, like a dropped
+// connection or a cancelled context mid-run.
+type failingChat struct {
+	inner  *recordChat
+	failOn int
+}
+
+func (f *failingChat) ChatOnce(ctx context.Context, req api.ChatRequest) (api.ChatResponse, error) {
+	if f.inner.calls == f.failOn {
+		f.inner.calls++
+		return api.ChatResponse{}, context.DeadlineExceeded
+	}
+	return f.inner.ChatOnce(ctx, req)
 }

@@ -245,7 +245,7 @@ func (m *Model) applyStagedOp(ctx context.Context, op stagedOp) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	m.snapshotBeforeMutate([]string{op.path})
+	m.snapshotBeforeMutate()
 	out, err := m.tools.Invoke(ctx, tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: raw}})
 	if err == nil {
 		m.turnTouchedFiles = true
@@ -358,8 +358,9 @@ type peWorkerResult struct {
 // created are removed) and a retryable error is returned so the model can fix
 // the cause and re-run, instead of inheriting a half-applied workspace.
 // Pre-batch state is captured in batch-local snapshots, separate from the turn
-// checkpoint (which stays first-version-wins so the parent turn's /undo record
-// is neither corrupted nor consumed by the rollback).
+// snapshot (which is taken once before the turn's first mutation, so the
+// parent turn's /undo record is neither corrupted nor consumed by the
+// rollback).
 func (m *Model) applyPlannedOps(ctx context.Context, results []peWorkerResult) (string, error) {
 	// Record intended file ownership across workers so cross-worker
 	// overlaps can be flagged before they collide at apply time.
@@ -420,9 +421,22 @@ func (m *Model) applyPlannedOps(ctx context.Context, results []peWorkerResult) (
 	return header + b.String(), nil
 }
 
-// captureFileSnap records a file's pre-batch state for rollback, mirroring the
-// per-file logic of the turn checkpoint (same size cap; directories and
-// unreadable files can't be content-restored and are reported as such).
+// fileSnap captures a file's pre-batch state so a failed op can be rolled back.
+// This is parallel_edit's own bookkeeping, scoped to one tool call: the turn's
+// /undo snapshot is a git tree (see checkpoint.go) and is left alone here.
+type fileSnap struct {
+	existed bool
+	tooBig  bool
+	data    []byte
+	mode    os.FileMode
+}
+
+// maxSnapshotBytes bounds per-file rollback memory; a larger file is reported
+// as unrestorable rather than held in RAM for the length of the batch.
+const maxSnapshotBytes = 10 * 1024 * 1024
+
+// captureFileSnap records a file's pre-batch state for rollback. Directories
+// and unreadable files can't be content-restored and are reported as such.
 func captureFileSnap(path string) fileSnap {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -440,8 +454,8 @@ func captureFileSnap(path string) fileSnap {
 
 // peAtomicFailure rolls back every change the batch already applied and builds
 // the retryable error handed back to the model. Rollback writes file content
-// directly from the batch-local snapshots; the turn checkpoint's snapshots are
-// left untouched so /undo still sees the whole turn.
+// directly from the batch-local snapshots; the turn's /undo snapshot is left
+// untouched so /undo still sees the whole turn.
 func peAtomicFailure(report *strings.Builder, worker int, op stagedOp, cause error, pre map[string]fileSnap, appliedPaths []string) error {
 	restored, removed, unrestorable, failed := rollbackBatch(pre, appliedPaths)
 

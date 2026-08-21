@@ -61,7 +61,11 @@ func (m *Model) autosaveSession() {
 		Model:     m.modelName,
 		Mode:      m.mode.String(),
 		Workspace: workspaceRoot(),
-		Messages:  append([]api.Message(nil), m.history...),
+		Title:     m.sessionTitle,
+		// A generated title stays unpinned; only /title pins. An empty title is
+		// fine — SaveTo derives the fallback from the first user message.
+		TitlePinned: m.titlePinned,
+		Messages:    append([]api.Message(nil), m.history...),
 		// The log alone is not the state: without the boundaries a resumed
 		// session hands the model back every message compaction already paid to
 		// summarize away.
@@ -103,7 +107,13 @@ func (m *Model) restoreSession(id string) {
 	}
 
 	m.history = append([]api.Message(nil), s.Messages...)
+	repaired := m.repairInterruptedTurn()
 	m.archiveSummary, m.archivedThrough, m.prunedThrough = s.ArchiveSummary, s.ArchivedThrough, s.PrunedThrough
+	m.sessionName = id
+	m.sessionTitle, m.titlePinned = s.Title, s.TitlePinned
+	// A resumed conversation's first reply is in the past; the one-shot title
+	// generation belongs to the process that was there for it.
+	m.titleGenTried = hasAssistantReply(m.history)
 	m.turnRecords = nil // timings belong to the process that produced them
 	if m.notes != nil && s.Notes != "" {
 		m.notes.set(s.Notes)
@@ -137,6 +147,9 @@ func (m *Model) restoreSession(id string) {
 	if n := m.todos.openCount(); n > 0 {
 		toast += fmt.Sprintf(", %d open todo(s)", n)
 	}
+	if repaired > 0 {
+		toast = "Recovered interrupted turn · " + toast
+	}
 	if crashedLastRun() {
 		toast = "recovered after unclean exit (restored to last completed turn) · " + toast
 	}
@@ -144,6 +157,53 @@ func (m *Model) restoreSession(id string) {
 		toast += " · saved in " + s.Workspace
 	}
 	m.toast = toast
+}
+
+// repairInterruptedTurn closes out a turn the previous process died in the
+// middle of: the loaded history's tail is an assistant tool-call message whose
+// results never landed. For each unanswered call it appends a synthetic error
+// result — the same shape dispatch uses for tool failures, so the call/result
+// pairing toolResultsAfter and toOpenAIMessages enforce reads as answered —
+// then an advisory telling the model the turn was interrupted. Returns how
+// many synthetic results were added.
+//
+// The condition is the imbalance itself, not the crash marker: the marker
+// lives for the whole process lifetime, so it can't separate "died mid-turn"
+// from "died between turns", and an esc-interrupted batch can leave the same
+// imbalance behind on a clean exit. A turn-end save is always balanced, so
+// only a genuinely interrupted tail ever triggers this — which also makes it
+// idempotent: once repaired, the tail pairs up and a re-resume adds nothing.
+// Only the tail is repaired; an imbalance buried behind a later assistant
+// message can't be fixed by appending and is left for the send-side pairing
+// to drop.
+func (m *Model) repairInterruptedTurn() int {
+	i := len(m.history) - 1
+	answered := 0
+	for ; i >= 0; i-- {
+		switch m.history[i].Role {
+		case "tool":
+			answered++
+		case "assistant":
+			goto tail
+		}
+	}
+	return 0 // no assistant message at all
+tail:
+	calls := m.history[i].ToolCalls
+	if len(calls) == 0 || answered >= len(calls) {
+		return 0
+	}
+	// Results answer calls in order, so the answered prefix of the batch has
+	// its results and the missing suffix is calls[answered:].
+	for _, call := range calls[answered:] {
+		m.history = append(m.history, api.Message{
+			Role:     "tool",
+			ToolName: call.Function.Name,
+			Content:  "error: interrupted by restart — the tool may or may not have completed; verify state before retrying",
+		})
+	}
+	m.history = append(m.history, advisory("[TURN INTERRUPTED — RESTART] The previous turn was cut short by a crash or restart. The tool result(s) above are synthetic: the call(s) may or may not have completed, so verify the current state before retrying or building on them."))
+	return len(calls) - answered
 }
 
 // markSessionRunning drops the crash marker. Called once the TUI is up.

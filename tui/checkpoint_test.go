@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,57 +16,93 @@ func toolCall(name, args string) tools.ToolCall {
 	return tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: json.RawMessage(args)}}
 }
 
-// TestCheckpointBeforeCall locks in the hook direct tool calls and sub-agent
-// runs share: a mutating call snapshots its target paths into the current
-// turn, so after the mutation lands /undo restores the pre-turn content, and
-// read-only calls snapshot nothing.
-func TestCheckpointBeforeCall(t *testing.T) {
+// ckptWorkspace points the workspace root and the ocode state dir at throwaway
+// temp dirs, so the shadow repo a test creates lands beside the test and never
+// in the user's real config dir. Returns the workspace root.
+func ckptWorkspace(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
-	f := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(f, []byte("original"), 0o644); err != nil {
+	t.Chdir(dir)
+	return dir
+}
+
+// TestCheckpointBeforeCall locks in the hook direct tool calls and sub-agent
+// runs share: a mutating call snapshots the workspace into the current turn, so
+// after the mutations land /undo restores what the turn changed, removes what
+// it created, and brings back what it deleted. Read-only calls snapshot
+// nothing, so a turn that only reads never pays for a snapshot.
+func TestCheckpointBeforeCall(t *testing.T) {
+	dir := ckptWorkspace(t)
+	edited := filepath.Join(dir, "a.txt")
+	doomed := filepath.Join(dir, "gone.txt")
+	if err := os.WriteFile(edited, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(doomed, []byte("keep me"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	m := &Model{}
 	before := m.checkpointBeforeCall()
 
-	// A read-only call must not bank anything.
-	before(toolCall("read_file", `{"path":"`+f+`"}`))
+	before(toolCall("read_file", `{"path":"`+edited+`"}`))
 	m.ckpt.mu.Lock()
-	empty := len(m.ckpt.pending) == 0
+	pending := m.ckpt.pending
 	m.ckpt.mu.Unlock()
-	if !empty {
+	if pending != "" {
 		t.Fatal("read_file should not be snapshotted")
 	}
 
-	// Simulate a delegated write: snapshot via the hook, then mutate.
-	before(toolCall("write_file", `{"path":"`+f+`","content":"changed"}`))
-	if err := os.WriteFile(f, []byte("changed"), 0o644); err != nil {
+	// A delegated write, a delegated create, and a delegated delete.
+	before(toolCall("write_file", `{"path":"`+edited+`","content":"changed"}`))
+	if err := os.WriteFile(edited, []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A delegated create: snapshotted as not-existing, then created.
-	g := filepath.Join(dir, "new.txt")
-	before(toolCall("write_file", `{"path":"`+g+`","content":"hello"}`))
-	if err := os.WriteFile(g, []byte("hello"), 0o644); err != nil {
+	created := filepath.Join(dir, "sub", "new.txt")
+	before(toolCall("write_file", `{"path":"`+created+`","content":"hello"}`))
+	if err := os.MkdirAll(filepath.Dir(created), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(created, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before(toolCall("delete_file", `{"path":"`+doomed+`"}`))
+	if err := os.Remove(doomed); err != nil {
 		t.Fatal(err)
 	}
 
 	m.finalizeCheckpoint("delegated turn")
-	if _, touched := m.undoLast(); len(touched) != 2 {
-		t.Fatalf("expected undo to touch 2 files, got %v", touched)
+	summary, touched := m.undoLast()
+	t.Log(summary)
+	if len(touched) != 3 {
+		t.Fatalf("expected undo to touch 3 files, got %v", touched)
 	}
-	if got, _ := os.ReadFile(f); string(got) != "original" {
+	if got, _ := os.ReadFile(edited); string(got) != "original" {
 		t.Fatalf("undo did not restore a.txt, got %q", got)
 	}
-	if _, err := os.Stat(g); !os.IsNotExist(err) {
-		t.Fatalf("undo did not remove created file new.txt (err=%v)", err)
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Fatalf("undo did not remove created file sub/new.txt (err=%v)", err)
+	}
+	// Deleting a file used to be unrecoverable unless the tool announced the
+	// path; the tree has it either way, mode bit included.
+	info, err := os.Stat(doomed)
+	if err != nil {
+		t.Fatalf("undo did not bring back the deleted file: %v", err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("undo lost the exec bit: mode %v", info.Mode().Perm())
 	}
 }
 
-// TestCheckpointFirstVersionWins covers parent+child (or two parallel children)
-// touching the same file in one turn: the FIRST snapshot of a path wins, so
-// /undo restores the true pre-turn content rather than a mid-turn state.
-func TestCheckpointFirstVersionWins(t *testing.T) {
-	dir := t.TempDir()
+// One snapshot per turn, taken before the first mutation: a second and third
+// write in the same turn must not re-snapshot a mid-turn state, or /undo would
+// rewind to v1 instead of the state the user last saw.
+func TestCheckpointSnapshotsOncePerTurn(t *testing.T) {
+	dir := ckptWorkspace(t)
 	f := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(f, []byte("v0"), 0o644); err != nil {
 		t.Fatal(err)
@@ -73,56 +110,54 @@ func TestCheckpointFirstVersionWins(t *testing.T) {
 	m := &Model{}
 	before := m.checkpointBeforeCall()
 
-	before(toolCall("edit_file", `{"path":"`+f+`","old_string":"v0","new_string":"v1"}`))
-	if err := os.WriteFile(f, []byte("v1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Second mutating call on the same path must NOT re-snapshot v1.
-	before(toolCall("edit_file", `{"path":"`+f+`","old_string":"v1","new_string":"v2"}`))
-	if err := os.WriteFile(f, []byte("v2"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, v := range []string{"v1", "v2"} {
+		before(toolCall("edit_file", `{"path":"`+f+`","old_string":"x","new_string":"`+v+`"}`))
+		if err := os.WriteFile(f, []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	m.finalizeCheckpoint("two writers")
 	m.undoLast()
 	if got, _ := os.ReadFile(f); string(got) != "v0" {
-		t.Fatalf("undo must restore the first snapshot v0, got %q", got)
+		t.Fatalf("undo must restore the pre-turn v0, got %q", got)
 	}
 }
 
-// MutatedPaths returns the raw JSON argument, so one file can arrive under two
-// spellings in a single turn ("./a.txt" and "a.txt"). Keyed raw that is two
-// entries, the second holding the mid-turn state, and undoLast's map iteration
-// picks a winner at random. One entry, holding the original, is the guarantee.
-func TestCheckpointKeyIgnoresPathSpelling(t *testing.T) {
-	dir := t.TempDir()
-	f := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(f, []byte("v0"), 0o644); err != nil {
+// The snapshot repo is ours, not theirs. Its git dir, index and refs live under
+// the ocode state dir, so a turn plus an /undo must leave the user's own
+// repository — staged work included — exactly as they left it.
+func TestCheckpointLeavesTheUsersRepoAlone(t *testing.T) {
+	dir := ckptWorkspace(t)
+	userGit := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	userGit("init", "--quiet")
+	if err := os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	userGit("add", "staged.txt")
+
 	m := &Model{}
 	before := m.checkpointBeforeCall()
-
-	before(toolCall("edit_file", `{"path":"`+f+`","old_string":"v0","new_string":"v1"}`))
-	if err := os.WriteFile(f, []byte("v1"), 0o644); err != nil {
+	f := filepath.Join(dir, "a.txt")
+	before(toolCall("write_file", `{"path":"`+f+`","content":"hi"}`))
+	if err := os.WriteFile(f, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Same file, different spelling — must not mint a second snapshot of v1.
-	before(toolCall("edit_file", `{"path":"`+dir+`/./a.txt","old_string":"v1","new_string":"v2"}`))
-	if err := os.WriteFile(f, []byte("v2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	m.ckpt.mu.Lock()
-	n := len(m.ckpt.pending)
-	m.ckpt.mu.Unlock()
-	if n != 1 {
-		t.Fatalf("two spellings of one file produced %d snapshots, want 1", n)
-	}
-	m.finalizeCheckpoint("two spellings")
+	m.finalizeCheckpoint("turn")
 	m.undoLast()
-	if got, _ := os.ReadFile(f); string(got) != "v0" {
-		t.Fatalf("undo must restore the pre-turn v0, got %q", got)
+
+	if got := userGit("diff", "--cached", "--name-only"); got != "staged.txt" {
+		t.Fatalf("the user's index changed: staged = %q, want \"staged.txt\"", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "index")); err != nil {
+		t.Fatalf("the user's .git was disturbed: %v", err)
 	}
 }
 
@@ -131,9 +166,7 @@ func TestCheckpointKeyIgnoresPathSpelling(t *testing.T) {
 // them, and edit_file's fuzzy tier matches the reverted file instead of failing
 // clean. A no-op undo must stay silent — an advisory about nothing is noise.
 func TestUndoTellsTheModelWhatWasReverted(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	dir := t.TempDir()
+	dir := ckptWorkspace(t)
 	f := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(f, []byte("original"), 0o644); err != nil {
 		t.Fatal(err)
@@ -165,9 +198,11 @@ func TestUndoTellsTheModelWhatWasReverted(t *testing.T) {
 // between the assistant's tool_calls message and the results that belong to it.
 func TestUndoAdvisoryWaitsForBatch(t *testing.T) {
 	sessionPersist.Store(false)
-	dir := t.TempDir()
+	dir := ckptWorkspace(t)
 	p := filepath.Join(dir, "f.txt")
-	os.WriteFile(p, []byte("V1"), 0o644)
+	if err := os.WriteFile(p, []byte("V1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	call := tools.ToolCall{Function: tools.ToolCallFunction{Name: "read_file", Arguments: []byte(`{"path":"x"}`)}}
 	m := &Model{
@@ -183,8 +218,10 @@ func TestUndoAdvisoryWaitsForBatch(t *testing.T) {
 		},
 		todos: &todoList{},
 	}
-	m.snapshotBeforeMutate([]string{p})
-	os.WriteFile(p, []byte("V2"), 0o644)
+	m.snapshotBeforeMutate()
+	if err := os.WriteFile(p, []byte("V2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	m.finalizeCheckpoint("edit")
 	_, touched := m.undoLast()
 	m.noteUndoToModel(touched)

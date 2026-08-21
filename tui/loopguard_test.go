@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
@@ -631,6 +634,8 @@ func TestResetTurnGuardsClearsNewState(t *testing.T) {
 		[]api.Message{{Role: "tool", Content: "contents"}},
 	)
 	m.stagnantRounds = 3
+	m.loopEscalation = &loopEscalation{kind: loopStopStagnation, rounds: 3}
+	m.loopContinues = map[string]int{loopStopRepeat: 2}
 	m.resetTurnGuards()
 	if len(m.turnReads) != 0 || m.rereadEvents != 0 || m.rereadStopAnnounced {
 		t.Fatal("resetTurnGuards did not clear re-read state")
@@ -640,6 +645,9 @@ func TestResetTurnGuardsClearsNewState(t *testing.T) {
 	}
 	if len(m.recentOutcomes) != 0 || len(m.seenOutcomes) != 0 || m.oscillationStreak != 0 || m.stagnantRounds != 0 {
 		t.Fatal("resetTurnGuards did not clear progress state")
+	}
+	if m.loopEscalation != nil || len(m.loopContinues) != 0 {
+		t.Fatal("resetTurnGuards did not clear loop-escalation state")
 	}
 }
 
@@ -762,5 +770,378 @@ func TestSuppressedRequestDropsTextToolCall(t *testing.T) {
 	next, _ = model(false).Update(chatDoneMsg{gen: 1, content: call})
 	if next.(*Model).pending == nil {
 		t.Fatal("text-form tool calls must still run when tools were not withheld")
+	}
+}
+
+// Doom-loop escalation: a detector crossing its stop threshold parks the turn
+// on a user choice instead of ending it. These tests drive the real dispatch
+// path with an already-finished batch, the same way the tool-result handler
+// does.
+
+// seedRepeatRounds drives identical todo_write rounds through the guards
+// directly. Each round returns fresh text, so the stagnation guard sees
+// progress and stays out of the way — only the repeat streak is armed.
+// todo_write is bookkeeping, so its own output cannot reset the streak.
+func seedRepeatRounds(m *Model, call tools.ToolCall, rounds ...int) {
+	for _, i := range rounds {
+		results := []api.Message{{Role: "tool", ToolName: "todo_write", Content: fmt.Sprintf("todo list updated: %d", i)}}
+		progress, _, _ := m.observeRoundProgress([]tools.ToolCall{call}, results)
+		m.observeStagnation(progress)
+		m.observeRepeatedBatch([]tools.ToolCall{call}, progress)
+	}
+}
+
+// repeatLoopTestModel returns a model four identical rounds into a turn — one
+// round short of the repeat guard's stop threshold.
+func repeatLoopTestModel(t *testing.T) (*Model, tools.ToolCall) {
+	t.Helper()
+	m := interruptTestModel()
+	m.todos = &todoList{}
+	m.profile.SupportsTools = true
+	m.resetTurnGuards()
+	call := tc("todo_write", `{"todos":[{"content":"Read ticket.md","status":"pending"}]}`)
+	seedRepeatRounds(m, call, 1, 2, 3, 4)
+	return m, call
+}
+
+// dispatchRepeatRound runs one more identical batch through the real dispatch
+// path — the round that crosses the stop threshold.
+func dispatchRepeatRound(m *Model, call tools.ToolCall, n int) {
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{call},
+		results: []api.Message{{Role: "tool", ToolName: "todo_write", Content: fmt.Sprintf("todo list updated: %d", n)}},
+		started: []bool{true},
+		done:    1,
+	}
+	m.processPendingTools()
+}
+
+func cancelStream(m *Model) {
+	if m.stream != nil {
+		m.stream.cancel()
+		m.stream = nil
+	}
+}
+
+func TestRepeatStopEscalatesToModalInsteadOfEndingTurn(t *testing.T) {
+	m, call := repeatLoopTestModel(t)
+	dispatchRepeatRound(m, call, 5)
+
+	if m.state != stateLoopGuard {
+		t.Fatalf("repeat stop should open the escalation modal, state=%v", m.state)
+	}
+	esc := m.loopEscalation
+	if esc == nil || esc.kind != loopStopRepeat || esc.tool != "todo_write" {
+		t.Fatalf("parked escalation = %+v, want repeat on todo_write", esc)
+	}
+	if esc.reason() != "repeated identical todo_write calls 5 times" {
+		t.Fatalf("reason = %q", esc.reason())
+	}
+	if options := loopEscalationOptions(esc); len(options) != 3 || options[2] != "Ban todo_write & continue" {
+		t.Fatalf("a single-tool loop must offer the ban choice, got %v", options)
+	}
+	// The pause is genuine: nothing stopped, nothing streamed, the turn waits.
+	if m.turnStoppedByGuard || m.suppressToolsOnce {
+		t.Fatal("turn stopped before the user chose")
+	}
+	if m.stream != nil {
+		t.Fatal("stream started while the modal was open")
+	}
+}
+
+func TestOscillationStopEscalatesToModal(t *testing.T) {
+	m := interruptTestModel()
+	m.todos = &todoList{}
+	m.profile.SupportsTools = true
+	m.resetTurnGuards()
+	for _, name := range []string{"A", "B", "A", "B", "A"} {
+		calls := []tools.ToolCall{tc(name, `{}`)}
+		results := []api.Message{{Role: "tool", ToolName: name, Content: "same " + name}}
+		progress, _, _ := m.observeRoundProgress(calls, results)
+		m.observeStagnation(progress)
+		m.observeRepeatedBatch(calls, progress)
+	}
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{tc("B", `{}`)},
+		results: []api.Message{{Role: "tool", ToolName: "B", Content: "same B"}},
+		started: []bool{true},
+		done:    1,
+	}
+	m.processPendingTools()
+
+	if m.state != stateLoopGuard {
+		t.Fatalf("oscillation stop should open the escalation modal, state=%v", m.state)
+	}
+	esc := m.loopEscalation
+	if esc == nil || esc.kind != loopStopOscillation {
+		t.Fatalf("parked escalation = %+v, want oscillation", esc)
+	}
+	// A/B/A/B names no single culprit, so there is nothing to ban.
+	if esc.tool != "" || len(loopEscalationOptions(esc)) != 2 {
+		t.Fatalf("oscillation must not offer a ban choice, options=%v", loopEscalationOptions(esc))
+	}
+	// A pure A/B loop's outcomes are all repeats, so the stagnation stop
+	// co-fired in the same round — the parked stop must carry it, or "stop
+	// turn" could not reproduce the automatic path.
+	if !esc.stopStagnant {
+		t.Fatal("co-fired stagnation stop was dropped from the parked escalation")
+	}
+}
+
+func TestStagnationStopEscalatesToModal(t *testing.T) {
+	m := interruptTestModel()
+	m.todos = &todoList{}
+	m.profile.SupportsTools = true
+	m.resetTurnGuards()
+	calls := []tools.ToolCall{tc("read_file", `{"path":"a.go"}`), tc("grep", `{"pattern":"missing"}`)}
+	results := []api.Message{{Role: "tool", ToolName: "read_file", Content: "same file"}, {Role: "tool", ToolName: "grep", Content: "same matches"}}
+	for range 4 {
+		progress, _, _ := m.observeRoundProgress(calls, results)
+		m.observeStagnation(progress)
+		m.observeRepeatedBatch(calls, progress)
+	}
+	m.pending = &pendingBatch{calls: calls, results: results, started: []bool{true, true}, done: 2}
+	m.processPendingTools()
+
+	if m.state != stateLoopGuard {
+		t.Fatalf("stagnation stop should open the escalation modal, state=%v", m.state)
+	}
+	esc := m.loopEscalation
+	if esc == nil || esc.kind != loopStopStagnation {
+		t.Fatalf("parked escalation = %+v, want stagnation", esc)
+	}
+	if esc.reason() != "no progress for 4 rounds" {
+		t.Fatalf("reason = %q", esc.reason())
+	}
+	if len(loopEscalationOptions(esc)) != 2 {
+		t.Fatalf("a mixed-batch stall has no single tool to ban, options=%v", loopEscalationOptions(esc))
+	}
+}
+
+// "Stop turn" must be indistinguishable from the automatic stop the guards
+// always performed — same advisories, same flags, same tool-less reply.
+func TestLoopEscalationStopTurnMatchesAutomaticStop(t *testing.T) {
+	asked, call := repeatLoopTestModel(t)
+	dispatchRepeatRound(asked, call, 5)
+	if asked.state != stateLoopGuard {
+		t.Fatalf("expected the escalation modal, state=%v", asked.state)
+	}
+
+	auto, autoCall := repeatLoopTestModel(t)
+	auto.mode = AutoMode
+	dispatchRepeatRound(auto, autoCall, 5)
+	cancelStream(auto)
+	if auto.state == stateLoopGuard || auto.loopEscalation != nil {
+		t.Fatal("auto mode runs unattended — it must never open the modal")
+	}
+
+	next, _ := asked.updateLoopGuard(tea.KeyPressMsg{Code: tea.KeyEnter})
+	asked = next.(*Model)
+	defer cancelStream(asked)
+
+	if asked.turnStoppedByGuard != auto.turnStoppedByGuard || asked.endTurnAfterReply != auto.endTurnAfterReply {
+		t.Fatal("'stop turn' diverged from the automatic stop's flags")
+	}
+	advisories := func(m *Model) []string {
+		var out []string
+		for _, msg := range m.history {
+			if msg.Advisory {
+				out = append(out, msg.Content)
+			}
+		}
+		return out
+	}
+	if got, want := advisories(asked), advisories(auto); !slices.Equal(got, want) {
+		t.Fatalf("'stop turn' advisories diverged:\n got %q\nwant %q", got, want)
+	}
+	if asked.stream == nil || !asked.stream.toolsSuppressed {
+		t.Fatal("'stop turn' must stream the blocker report tool-less")
+	}
+}
+
+func TestLoopEscalationContinueResetsOnlyThatDetector(t *testing.T) {
+	m, call := repeatLoopTestModel(t)
+	dispatchRepeatRound(m, call, 5)
+	if m.loopContinues[loopStopRepeat] != 0 {
+		t.Fatal("no continue should be recorded before the user makes one")
+	}
+
+	next, _ := m.updateLoopGuard(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = next.(*Model)
+	if m.loopGuardCursor != 1 {
+		t.Fatalf("cursor = %d, want 1 (Continue anyway)", m.loopGuardCursor)
+	}
+	next, _ = m.updateLoopGuard(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(*Model)
+	defer cancelStream(m)
+
+	if m.state != stateChat {
+		t.Fatalf("modal did not close, state=%v", m.state)
+	}
+	if m.sameToolStreak != 0 || m.lastStepRepeatKey != "" || m.stopWarnedTool != "" {
+		t.Fatal("continue did not reset the repeat detector")
+	}
+	if m.loopContinues[loopStopRepeat] != 1 {
+		t.Fatalf("continue grant not recorded: %v", m.loopContinues)
+	}
+	if m.turnStoppedByGuard || m.endTurnAfterReply {
+		t.Fatal("continue stopped the turn")
+	}
+	if len(m.bannedTools) != 0 {
+		t.Fatal("continue banned a tool")
+	}
+	if m.stream == nil || m.stream.toolsSuppressed {
+		t.Fatal("continue must resume a normal tool-carrying stream")
+	}
+	for _, msg := range m.history {
+		if msg.Advisory && strings.Contains(msg.Content, "LOOP BROKEN") {
+			t.Fatal("continue still told the model the loop was broken")
+		}
+	}
+}
+
+func TestLoopEscalationBanToolAndContinue(t *testing.T) {
+	m, call := repeatLoopTestModel(t)
+	dispatchRepeatRound(m, call, 5)
+
+	next, _ := m.updateLoopGuard(tea.KeyPressMsg{Code: '3', Text: "3"})
+	m = next.(*Model)
+	defer cancelStream(m)
+
+	if !m.bannedTools["todo_write"] {
+		t.Fatal("ban choice did not withdraw todo_write for the rest of the turn")
+	}
+	if m.sameToolStreak != 0 || m.stopWarnedTool != "" {
+		t.Fatal("ban did not reset the repeat detector")
+	}
+	if m.loopContinues[loopStopRepeat] != 0 {
+		t.Fatal("banning is a resolution, not a continue — it must not spend a grant")
+	}
+	if m.turnStoppedByGuard {
+		t.Fatal("ban stopped the turn")
+	}
+	told := false
+	for _, msg := range m.history {
+		if msg.Advisory && strings.Contains(msg.Content, "[TOOL DISABLED]") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatal("the model was never told its tool was taken away")
+	}
+}
+
+// The modal-spam cap: the same detector may be waved through twice per turn;
+// its third crossing falls back to the automatic stop.
+func TestLoopEscalationRearmsOnceThenCaps(t *testing.T) {
+	m, call := repeatLoopTestModel(t)
+	dispatchRepeatRound(m, call, 5)
+	if m.state != stateLoopGuard {
+		t.Fatal("first crossing should ask")
+	}
+
+	// Continue #1: the detector resets and the turn resumes.
+	next, _ := m.resolveLoopEscalation(1)
+	m = next.(*Model)
+	cancelStream(m)
+	if m.loopContinues[loopStopRepeat] != 1 {
+		t.Fatalf("continue grant = %d, want 1", m.loopContinues[loopStopRepeat])
+	}
+
+	// The model keeps looping: four seeded rounds re-arm the streak, the fifth
+	// re-crosses — and the user is asked again.
+	seedRepeatRounds(m, call, 6, 7, 8, 9)
+	dispatchRepeatRound(m, call, 10)
+	if m.state != stateLoopGuard {
+		t.Fatal("re-crossing after one continue should ask again")
+	}
+
+	next, _ = m.resolveLoopEscalation(1)
+	m = next.(*Model)
+	cancelStream(m)
+	if m.loopContinues[loopStopRepeat] != 2 {
+		t.Fatalf("continue grant = %d, want 2", m.loopContinues[loopStopRepeat])
+	}
+
+	// Third crossing: no third modal — the automatic stop takes over.
+	seedRepeatRounds(m, call, 11, 12, 13, 14)
+	dispatchRepeatRound(m, call, 15)
+	defer cancelStream(m)
+	if m.state == stateLoopGuard || m.loopEscalation != nil {
+		t.Fatal("a third crossing must not ask a third time")
+	}
+	if !m.turnStoppedByGuard {
+		t.Fatal("the capped escalation must fall back to the automatic stop")
+	}
+	if m.stream == nil || !m.stream.toolsSuppressed {
+		t.Fatal("the automatic stop must stream the blocker report tool-less")
+	}
+}
+
+// Unattended runs keep the old behavior exactly: auto mode (and, by
+// construction, the headless and sub-agent loops, which never drive this
+// dispatch path) stops on its own instead of parking on a modal nobody would
+// answer.
+func TestLoopEscalationSkipsModalWhenUnattended(t *testing.T) {
+	m, call := repeatLoopTestModel(t)
+	m.mode = AutoMode
+	dispatchRepeatRound(m, call, 5)
+	defer cancelStream(m)
+
+	if m.state == stateLoopGuard || m.loopEscalation != nil {
+		t.Fatal("auto mode must not park on a modal — the turn would hang unanswered")
+	}
+	if !m.turnStoppedByGuard {
+		t.Fatal("auto mode must keep the automatic stop")
+	}
+	if m.stream == nil || !m.stream.toolsSuppressed {
+		t.Fatal("the automatic stop still streams the blocker report tool-less")
+	}
+}
+
+func TestChooseLoopGuardOption(t *testing.T) {
+	withBan := []string{"Stop turn", "Continue anyway", "Ban todo_write & continue"}
+	if got, ok := chooseLoopGuardOption("3", 0, withBan); !ok || got != 2 {
+		t.Fatalf("digit picked %d ok=%v", got, ok)
+	}
+	if got, ok := chooseLoopGuardOption("enter", 1, withBan); !ok || got != 1 {
+		t.Fatalf("enter picked %d ok=%v", got, ok)
+	}
+	// A digit naming a choice this modal does not have selects nothing: the
+	// two-choice form (oscillation/stagnation) has no ban to pick.
+	noBan := []string{"Stop turn", "Continue anyway"}
+	if _, ok := chooseLoopGuardOption("3", 0, noBan); ok {
+		t.Fatal("out-of-range digit selected a choice")
+	}
+	if _, ok := chooseLoopGuardOption("enter", 5, noBan); ok {
+		t.Fatal("enter selected past the end of the list")
+	}
+	for _, key := range []string{"up", "down", "j", "k", "x", "0"} {
+		if _, ok := chooseLoopGuardOption(key, 0, noBan); ok {
+			t.Fatalf("key %q selected a choice", key)
+		}
+	}
+}
+
+func TestLoopGuardModalRendersReasonAndChoices(t *testing.T) {
+	m := &Model{
+		state: stateLoopGuard, width: 100, height: 40,
+		md: newMarkdownRenderer(), notesMd: newMarkdownRenderer(),
+		loopEscalation: &loopEscalation{kind: loopStopRepeat, tool: "todo_write", streak: 5},
+	}
+	out := m.loopGuardModal()
+	for _, want := range []string{"Agent appears stuck", "repeated identical todo_write calls 5 times", "1. Stop turn", "2. Continue anyway", "3. Ban todo_write & continue", "esc"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("modal missing %q:\n%s", want, out)
+		}
+	}
+
+	m.loopEscalation = &loopEscalation{kind: loopStopStagnation, rounds: 4}
+	out = m.loopGuardModal()
+	if !strings.Contains(out, "no progress for 4 rounds") {
+		t.Fatalf("modal missing the stagnation reason:\n%s", out)
+	}
+	if strings.Contains(out, "Ban") {
+		t.Fatalf("stagnation must not offer a ban choice:\n%s", out)
 	}
 }

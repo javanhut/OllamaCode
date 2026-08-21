@@ -240,11 +240,7 @@ func (o OllamaHost) postOpenAI(ctx context.Context, payload oaRequest) (io.ReadC
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("unexpected status code: %d: %s", resp.StatusCode, msg)
+		return nil, statusError(resp.StatusCode, body, resp.Header)
 	}
 	return resp.Body, nil
 }

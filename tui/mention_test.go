@@ -58,6 +58,87 @@ func TestMentionPathTokenRules(t *testing.T) {
 	}
 }
 
+func TestMentionLineRangeParsing(t *testing.T) {
+	cases := []struct {
+		in         string
+		path       string
+		start, end int
+		ranged     bool
+	}{
+		{"foo.go:L10", "foo.go", 10, 10, true},    // single line
+		{"foo.go:L10-20", "foo.go", 10, 20, true}, // range
+		{"dir/f.go:L1-1", "dir/f.go", 1, 1, true}, // one-line range
+		{"foo.go", "foo.go", 0, 0, false},         // no suffix
+		{"foo.go:l10", "foo.go:l10", 0, 0, false}, // lowercase l is not a range
+		{"foo.go:L", "foo.go:L", 0, 0, false},     // missing digits
+		{"foo.go:L10-abc", "foo.go:L10-abc", 0, 0, false},
+		{"foo.go:L10-20-30", "foo.go:L10-20-30", 0, 0, false},
+		{"dir:L5/x.go", "dir:L5/x.go", 0, 0, false}, // colon mid-path, not trailing
+		{"notes.txt:final", "notes.txt:final", 0, 0, false},
+		{"a:b.go", "a:b.go", 0, 0, false}, // colon without L
+	}
+	for _, c := range cases {
+		path, start, end, ranged := mentionLineRange(c.in)
+		if path != c.path || start != c.start || end != c.end || ranged != c.ranged {
+			t.Errorf("mentionLineRange(%q) = (%q, %d, %d, %v), want (%q, %d, %d, %v)",
+				c.in, path, start, end, ranged, c.path, c.start, c.end, c.ranged)
+		}
+	}
+}
+
+func TestExpandFileMentionsLineRange(t *testing.T) {
+	mentionTestDir(t)
+	writeFile(t, "f.txt", "line one\nline two\nline three\nline four\n")
+
+	block := expandFileMentions("check @f.txt:L2-3")
+	if !strings.Contains(block, "===== f.txt (lines 2-3) =====") {
+		t.Errorf("header should note the range:\n%s", block)
+	}
+	if !strings.Contains(block, "2\tline two\n") || !strings.Contains(block, "3\tline three\n") {
+		t.Errorf("ranged attachment should carry numbered lines:\n%s", block)
+	}
+	if strings.Contains(block, "line one") || strings.Contains(block, "line four") {
+		t.Errorf("lines outside the range must not attach:\n%s", block)
+	}
+
+	block = expandFileMentions("check @f.txt:L4")
+	if !strings.Contains(block, "===== f.txt (line 4) =====") || !strings.Contains(block, "4\tline four\n") {
+		t.Errorf("single-line range should attach that line only:\n%s", block)
+	}
+	if strings.Contains(block, "line three") {
+		t.Errorf("single-line range attached extra lines:\n%s", block)
+	}
+}
+
+func TestExpandFileMentionsLineRangeClampedAndInvalid(t *testing.T) {
+	mentionTestDir(t)
+	writeFile(t, "f.txt", "line one\nline two\n")
+
+	// end past EOF clamps to the file length.
+	block := expandFileMentions("see @f.txt:L1-99")
+	if !strings.Contains(block, "2\tline two\n") {
+		t.Errorf("end should clamp to the file length:\n%s", block)
+	}
+	if strings.Contains(block, "[not attached:") {
+		t.Errorf("clamped range should attach, not error:\n%s", block)
+	}
+
+	for _, tc := range []struct {
+		mention string
+		want    string
+	}{
+		{"@f.txt:L5-2", "invalid line range"}, // start > end
+		{"@f.txt:L0-1", "invalid line range"}, // start < 1
+		{"@f.txt:L9", "past the end"},         // start beyond EOF
+		{"@f.txt:L9-20", "past the end"},
+	} {
+		block := expandFileMentions("see " + tc.mention)
+		if !strings.Contains(block, "[not attached:") || !strings.Contains(block, tc.want) {
+			t.Errorf("%s should leave a %q note:\n%s", tc.mention, tc.want, block)
+		}
+	}
+}
+
 func TestFindMentionsDedupAndCap(t *testing.T) {
 	got := findMentions("see @a.go and @b.go, then @a.go again")
 	if len(got) != 2 || got[0] != "a.go" || got[1] != "b.go" {

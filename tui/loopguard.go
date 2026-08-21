@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -26,6 +29,56 @@ const (
 	// literals drifting apart silently changes whether stale todos get closed.
 	autoModeMaxSteps = 100
 )
+
+// Stream retry backoff tunables.
+const (
+	streamRetryBaseDelay   = 1 * time.Second  // first retry; doubles per attempt
+	streamRetryMaxDelay    = 30 * time.Second // cap on our own backoff
+	streamRetryProviderMax = 5 * time.Minute  // cap even on a provider's Retry-After ask
+)
+
+// streamRetryDelay computes the wait before retry attempt n (1-based):
+// exponential backoff with ±25% jitter, capped. A provider Retry-After hint
+// overrides our schedule entirely — the provider knows its own queue — but is
+// still capped so a hostile or broken header cannot park a turn for hours.
+func streamRetryDelay(attempt int, err error) time.Duration {
+	if d, ok := api.RetryAfterDelay(err); ok {
+		return min(d, streamRetryProviderMax)
+	}
+	delay := streamRetryBaseDelay << (attempt - 1)
+	if delay > streamRetryMaxDelay {
+		delay = streamRetryMaxDelay
+	}
+	jitter := 0.75 + rand.Float64()*0.5
+	return time.Duration(float64(delay) * jitter)
+}
+
+// streamRetryable reports whether a stream error is worth burning a retry on.
+// Deterministic refusals are excluded: a context overflow has its own
+// compaction path, an OOM was already retried down to the smallest context
+// that could load, and a format rejection its downgrade ladder — an unchanged
+// resend of any of them fails identically. Transient-looking bodies and
+// statuses retry even on an ambiguous status, so the transient check runs
+// before IsFormatRejection, which reads ANY 400; explicit 4xx refusals without
+// transient text do not heal on resend. Anything else stays retryable,
+// preserving the historical behavior of giving an unknown failure the benefit
+// of the (bounded) budget.
+func streamRetryable(err error) bool {
+	if agent.IsContextOverflow(err) || api.IsMemoryFailure(err) {
+		return false
+	}
+	if api.IsTransientError(err) {
+		return true
+	}
+	if agent.IsFormatRejection(err) {
+		return false
+	}
+	switch api.StatusCodeOf(err) {
+	case 400, 401, 403, 404:
+		return false
+	}
+	return true
+}
 
 func maxStepsFromConfig(c config) int {
 	if c.MaxSteps > 0 {
@@ -100,6 +153,13 @@ func (m *Model) resetTurnGuards() {
 	m.lastPreamble = ""
 	m.preambleStreak = 0
 	m.preambleWarned = false
+	m.loopEscalation = nil
+	m.loopGuardCursor = 0
+	if m.loopContinues == nil {
+		m.loopContinues = map[string]int{}
+	} else {
+		clear(m.loopContinues)
+	}
 }
 
 // advisory builds a loop-guard message addressed to the model. It rides the
@@ -460,4 +520,135 @@ func (m *Model) observePreamble(preamble string) (warn, stop bool) {
 func (m *Model) stopForBlockerReport() {
 	m.suppressToolsOnce = true
 	m.turnStoppedByGuard = true
+}
+
+// Doom-loop escalation: when a detector crosses its stop threshold the human
+// gets the call — stop the turn, let the agent keep going, or take the looping
+// tool away — instead of the turn ending on the spot. Ported from opencode's
+// doom_loop permission ask.
+
+// maxLoopContinues caps how many times per user turn the same detector's stop
+// can be waved through with "continue anyway". Past the cap the automatic stop
+// fires, or a looping model could farm the modal forever.
+const maxLoopContinues = 2
+
+// Loop detector names, used as keys into m.loopContinues.
+const (
+	loopStopRepeat      = "repeat"
+	loopStopOscillation = "oscillation"
+	loopStopStagnation  = "stagnation"
+)
+
+// loopEscalation is a detector stop parked while the user decides. It carries
+// every flag the automatic path would have acted on, so "stop turn" can
+// reproduce that path exactly (applyLoopGuardStops) even when several
+// detectors crossed in the same round.
+type loopEscalation struct {
+	kind            string // loopStop* — the detector the modal is about
+	tool            string // repeat only: the streaking tool
+	streak          int    // sameToolStreak at the crossing, for the reason text
+	rounds          int    // stagnantRounds at the crossing, for the reason text
+	stopOscillation bool
+	stopStagnant    bool
+	stopRepeat      bool
+	announceStop    bool
+}
+
+// reason is the one-line human explanation shown in the modal.
+func (esc *loopEscalation) reason() string {
+	switch esc.kind {
+	case loopStopRepeat:
+		return fmt.Sprintf("repeated identical %s calls %d times", esc.tool, esc.streak)
+	case loopStopOscillation:
+		return "oscillating between the same two actions and results"
+	default:
+		return fmt.Sprintf("no progress for %d rounds", esc.rounds)
+	}
+}
+
+// loopStopKind picks which detector the escalation is about when several cross
+// in the same round. Repeat speaks first: "repeated identical X calls" names
+// the culprit and is the only stop that can offer the ban choice. Oscillation
+// outranks stagnation because "oscillating between A and B" is the more
+// specific diagnosis of the same wasted rounds. Only the modal is about one
+// detector — the stop path itself still applies every flag that fired.
+func loopStopKind(stopOscillation, stopStagnant, stopRepeat bool, batchTool string) (kind, tool string) {
+	switch {
+	case stopRepeat:
+		return loopStopRepeat, batchTool
+	case stopOscillation:
+		return loopStopOscillation, ""
+	case stopStagnant:
+		return loopStopStagnation, ""
+	}
+	return "", ""
+}
+
+// shouldAskLoopEscalation reports whether a detector stop becomes a user
+// prompt instead of the automatic turn ending. Two cases keep the old
+// behavior: auto mode runs unattended, so a modal would park the turn forever;
+// and a detector the user already waved through twice this turn stops on its
+// own rather than spamming a third identical prompt.
+func (m *Model) shouldAskLoopEscalation(kind string) bool {
+	if m.mode == AutoMode {
+		return false
+	}
+	return m.loopContinues[kind] < maxLoopContinues
+}
+
+// resetLoopDetector clears one detector's streak after the user chose to keep
+// the turn going. The other guards stay armed, and the warn latches stay
+// latched — the modal, not another advisory, is now this detector's
+// escalation channel.
+func (m *Model) resetLoopDetector(kind string) {
+	switch kind {
+	case loopStopRepeat:
+		m.sameToolStreak = 0
+		m.lastStepRepeatKey = ""
+		// Clear the second-crossing ban latch too: the next streak earns a
+		// fresh escalation instead of an automatic ban the user never chose.
+		m.stopWarnedTool = ""
+	case loopStopOscillation:
+		m.oscillationStreak = 0
+	case loopStopStagnation:
+		m.stagnantRounds = 0
+	}
+}
+
+// loopBanAllowed mirrors the automatic ban's exclusions in
+// observeRepeatedBatch: switch_mode is the only route out of a read-only mode,
+// and an argument-keyed tool's streak was earned by one target, so banning the
+// name would take away every other search.
+func loopBanAllowed(tool string) bool {
+	return tool != "" && tool != "switch_mode" && !argumentSensitiveRepeatTools[tool]
+}
+
+// applyLoopGuardStops is the automatic stop the guards always performed:
+// advisories to the model plus a tool-less blocker-report reply. It runs when
+// the user picks "stop turn", when the modal is capped or unavailable, and
+// when another guard already ended the turn while an escalation was parked.
+func (m *Model) applyLoopGuardStops(esc *loopEscalation) {
+	if esc.stopOscillation {
+		m.history = append(m.history, advisory("[LOOP BROKEN] The same A/B outcomes continued after the warning. Tools are disabled for your next message — explain the blocker and summarize what you know."))
+		m.stopForBlockerReport()
+	}
+	if esc.stopStagnant {
+		m.history = append(m.history, advisory("[TURN ENDED — NO PROGRESS] Five rounds of tool calls produced no new information, so this turn is over. Reply once, in plain text: what you found, what you changed, and what is left. Tools are disabled for that reply; only a failed verification of code you changed can bring you back this turn. If you were waiting for something to finish, poll it with run_shell(background=true) plus shell_output instead of repeating the same command."))
+		m.stopForBlockerReport()
+		// A tool-less message is not an ending on its own: the auto-continue on
+		// open todos and the citation gate each pull the model straight back in,
+		// which is exactly what kept the logged loop fed. This flag closes those
+		// doors so the reply reaches endTurnTail.
+		m.endTurnAfterReply = true
+	}
+	if esc.announceStop && !esc.stopStagnant {
+		content := fmt.Sprintf("[LOOP BROKEN] You called %q %d times in a row. Tools are disabled for your next message — respond to the user in plain text only.", esc.tool, esc.streak)
+		if m.bannedTools[esc.tool] {
+			content = fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", esc.tool, esc.streak)
+		}
+		m.history = append(m.history, advisory(content))
+	}
+	if esc.stopRepeat {
+		m.stopForBlockerReport()
+	}
 }

@@ -137,6 +137,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyDream(msg)
 		return m, nil
 
+	case titleDoneMsg:
+		m.applyGeneratedTitle(msg)
+		return m, nil
+
 	case verifyDoneMsg:
 		m.verifying = false
 		if msg.ok {
@@ -398,6 +402,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePermission(msg)
 		case stateQuestion:
 			return m.updateQuestion(msg)
+		case stateLoopGuard:
+			return m.updateLoopGuard(msg)
 		case stateRouteConfirm:
 			return m.updateRouteConfirm(msg)
 		case stateDiff:
@@ -707,8 +713,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, path := range mutated {
 						m.turnChangedPaths[filepath.Clean(path)] = true
 					}
-					m.forgetReads(mutated)           // re-reading a just-changed file is legitimate
-					m.rememberMutatedHashes(mutated) // the model's own write is not third-party drift
+					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
+					// The ledger re-stamp after a successful mutation happens
+					// inside the registry now (tools/freshness.go): the model's
+					// own write is not third-party drift.
 				} else if call.Function.Name == "spawn_subagent" && !subagentCallIsAsync(call) && (m.mode == WriteMode || m.mode == AutoMode) {
 					// A synchronous delegated writer uses the same registry but is
 					// not checkpointed call-by-call. Conservatively run the
@@ -779,6 +787,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			touchedFiles := m.turnTouchedFiles
 			m.resetTurnGuards()
 			m.turnTouchedFiles = touchedFiles
+			cmds = append(cmds, m.startStream())
+			m.refreshTranscript()
+		}
+
+	case shellJobDoneMsg:
+		// Re-arm the parked waiter first, so the next completion is picked up.
+		cmds = append(cmds, m.awaitShellJobEvent())
+		// Land the completion in history; the model reads it at its next step
+		// instead of polling shell_output for status.
+		m.history = append(m.history, api.Message{Role: "system", Content: msg.notification()})
+		m.toast = msg.toastLine()
+		m.refreshTranscript()
+		m.viewport.GotoBottom()
+		// Same wake semantics as subagentDoneMsg: mid-turn, the notification
+		// must not disrupt the stream; idle, the parent is woken so it reacts
+		// now instead of waiting for the user's next message. (There is no
+		// interrupted variant: kills come from the model's own shell_output
+		// call, which means a turn is already in flight.)
+		if !m.streaming && m.pending == nil &&
+			!m.verifying && !m.retrieving && !m.compacting &&
+			m.state == stateChat && m.modelName != "" {
+			// This reply is a new turn: it must not inherit the previous
+			// turn's bans, forced ending, or spent step budget.
+			m.resetTurnGuards()
 			cmds = append(cmds, m.startStream())
 			m.refreshTranscript()
 		}
@@ -1079,19 +1111,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Transient failure (connection reset, 5xx, idle timeout): retry the
 		// stream a bounded number of times before killing the turn, with a
-		// linear backoff so a struggling backend gets room to recover. History
-		// is intact, so the request simply regenerates from the same state. An
-		// overflow is excluded: it is not transient and must not spend this
-		// budget. It either already had its one compaction pass or compaction
-		// freed nothing, and either way the next stop is the surfaced error.
-		// A memory failure is not transient either: the api layer already retried
-		// it down to the smallest context that could load and it still would not
-		// fit, so the backoff would only reload the model three more times.
-		if !overflow && !api.IsMemoryFailure(msg.err) && !m.compacting && m.streamRetries < maxStreamRetries {
+		// jittered exponential backoff (honoring a provider Retry-After) so a
+		// struggling backend gets room to recover. History is intact, so the
+		// request simply regenerates from the same state. streamRetryable owns
+		// the exclusions: an overflow is not transient and must not spend this
+		// budget (it either already had its one compaction pass or compaction
+		// freed nothing, and either way the next stop is the surfaced error),
+		// a memory failure was already retried down to the smallest context
+		// that could load, a format rejection fails deterministically, and an
+		// explicit 4xx refusal without transient text will not heal on resend.
+		if !m.compacting && m.streamRetries < maxStreamRetries && streamRetryable(msg.err) {
 			m.streamRetries++
-			delay := time.Duration(m.streamRetries) * 2 * time.Second
+			delay := streamRetryDelay(m.streamRetries, msg.err)
 			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))
-			m.toast = fmt.Sprintf("stream error — retrying (%d/%d) in %ds…", m.streamRetries, maxStreamRetries, int(delay.Seconds()))
+			m.toast = fmt.Sprintf("stream error — retrying (%d/%d) in %s…", m.streamRetries, maxStreamRetries, delay.Round(time.Second))
 			m.streamBuf.Reset() // discard the partial response; the retry regenerates it
 			gen := m.turnGen
 			cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg { return retryStreamMsg{gen: gen} }))

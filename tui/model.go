@@ -111,6 +111,7 @@ const (
 	stateStats
 	stateRouteConfirm
 	stateQuestion
+	stateLoopGuard
 )
 
 // settingsField identifies the focused input in the connection settings modal.
@@ -134,6 +135,7 @@ type config struct {
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
 	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 25)
+	PromptFamily  string                     `json:"prompt_family,omitempty"`  // force a prompt family section; "none"/"default" = base prompt only
 	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
 	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
 	Dream         *bool                      `json:"dream,omitempty"`          // nil/true = dream mode enabled
@@ -321,10 +323,19 @@ type Model struct {
 	// text the model already knows how to read.
 	question       tools.AskUserQuestion
 	questionCursor int
-	// readHashes is the stale-edit ledger: clean path -> the file's hash when the
-	// model last saw it. Session-scoped, so it is NOT cleared by resetTurnGuards
-	// the way turnReads is — see staleness.go.
-	readHashes map[string]string
+	// questionChecked holds the toggled rows of a multi-select picker; nil for
+	// single-select questions.
+	questionChecked map[int]bool
+	// questionResult is the history index of the parked ask_user tool result.
+	// A picked answer rewrites that result (ANSWER: …) and resumes the turn, so
+	// the model sees exactly what a normal ask_user return would have produced.
+	// -1 means the question is not backed by a parked result (no picker).
+	questionResult int
+	// freshness is the stale-edit ledger: it remembers the hash of every file
+	// this session read or wrote, and tools-layer dispatch refuses a mutation
+	// whose target drifted since (see tools/freshness.go). Session-scoped, so
+	// it is NOT cleared by resetTurnGuards the way turnReads is.
+	freshness *tools.FreshnessLedger
 	// deferredAdvisory holds a harness message that arrived while a tool batch
 	// was in flight (an /undo typed mid-turn). It is appended once the batch's
 	// results are in history, so it never splices between a tool_calls message
@@ -353,6 +364,15 @@ type Model struct {
 	lastError  string
 	toast      string
 	sel        selection
+
+	// Session titles (see title.go). sessionName is the named session this
+	// conversation was loaded from or last saved as ("" = unsaved); the title
+	// rides the auto-save either way. titleGenTried latches the one-shot
+	// generation that fires after the first completed assistant reply.
+	sessionName   string
+	sessionTitle  string
+	titlePinned   bool
+	titleGenTried bool
 
 	md      *markdownRenderer // chat transcript renderer (own width + cache)
 	notesMd *markdownRenderer // notes-panel renderer (own width + cache)
@@ -423,6 +443,9 @@ type Model struct {
 	sameToolWarned      bool            // early repeat warning emitted this user turn
 	stopWarnedTool      string          // tool the hard-stop already fired for this turn
 	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
+	loopEscalation      *loopEscalation // doom-loop stop parked on the user's choice in the escalation modal
+	loopGuardCursor     int             // highlighted choice in the loop-guard modal
+	loopContinues       map[string]int  // "continue anyway" grants per detector this user turn
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
 	fetchedContent      bool            // untrusted web content entered the conversation this turn
@@ -448,7 +471,7 @@ type Model struct {
 	ragMu        sync.Mutex
 	ragChanged   map[string]bool // paths changed since last reindex (hook-populated)
 
-	ckpt checkpointStore // per-turn file snapshots for /undo
+	ckpt checkpointStore // per-turn workspace snapshots (git trees) for /undo
 
 	// Background sub-agents (spawn_subagent with async=true, the default).
 	// Jobs live in the mutex-guarded store; completions reach the update loop
@@ -457,6 +480,12 @@ type Model struct {
 	subagentEvents chan *subagentJob
 	// agentRunner, when set, replaces agent.Run for sub-agent tasks (tests).
 	agentRunner func(ctx context.Context, task string, opts agent.Options) (agent.Result, error)
+
+	// Background shell jobs (run_shell background=true): the tools watcher
+	// fires the notifier registered in NewModel, which pushes completions
+	// here for the update loop (see shell_bg.go). Headless runs never
+	// register the notifier and stay poll-only via shell_output.
+	shellJobEvents chan shellJobDoneMsg
 
 	// Dream mode: idle-triggered background reflection.
 	lastActivity     time.Time
@@ -677,6 +706,7 @@ func New() *Model {
 		profile:        ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
 		maxSteps:       maxStepsFromConfig(cfg),
 		failedCalls:    make(map[string]int),
+		freshness:      tools.NewFreshnessLedger(),
 		kvStore:        kv,
 		memory:         mem,
 		md:             newMarkdownRenderer(),
@@ -685,6 +715,7 @@ func New() *Model {
 		expandTools:    false,
 		subagents:      newSubagentStore(),
 		subagentEvents: make(chan *subagentJob, 64),
+		shellJobEvents: make(chan shellJobDoneMsg, 64),
 		lastActivity:   time.Now(),
 		faceLastKey:    time.Now(),
 	}
@@ -705,6 +736,20 @@ func New() *Model {
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())
+	// Push background-shell completions into the update loop (see shell_bg.go).
+	// The closure captures the channel, not the Model. Buffered (64) with a
+	// drop fallback so a wedged update loop never blocks a job's watcher.
+	shellEvents := m.shellJobEvents
+	tools.SetBackgroundShellNotifier(func(jobID, exitCode int, err error, tail string) {
+		msg := shellJobDoneMsg{id: jobID, exitCode: exitCode, tail: tail}
+		if err != nil {
+			msg.err = err.Error()
+		}
+		select {
+		case shellEvents <- msg:
+		default:
+		}
+	})
 	// Registered after m exists so the semantic tools read the live host and
 	// pick up connection changes made via /settings.
 	registry.Register(tools.CodeIndexTool(liveEmbedder{m}))
@@ -723,6 +768,9 @@ func New() *Model {
 	if m.modelName != "" {
 		m.resolveProfile()
 	}
+	// Prompt history is global and survives restarts; up/down recall walks it.
+	m.userHistory = loadHistory()
+	m.historyIndex = len(m.userHistory)
 	m.input.Focus()
 	return m
 }
@@ -741,6 +789,10 @@ func (m *Model) Init() tea.Cmd {
 	// Park one waiter on the background sub-agent event channel; the
 	// subagentDoneMsg handler re-arms it after each completion.
 	if cmd := m.awaitSubagentEvent(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	// Same for background shell job completions (shellJobDoneMsg).
+	if cmd := m.awaitShellJobEvent(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	// If no model is configured, try to load the first one we can find.
