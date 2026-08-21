@@ -269,3 +269,30 @@ func TestSealedTurnsAreCached(t *testing.T) {
 		t.Error("turn dropped after invalidation")
 	}
 }
+
+// A refresh that grows the transcript keeps a bottom-pinned view pinned —
+// spinner ticks used to drop it off the bottom, which every later stream frame
+// then read as "the user scrolled up".
+func TestRefreshKeepsTranscriptPinnedToBottom(t *testing.T) {
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m := mm.(*Model)
+	for i := range 40 {
+		m.history = append(m.history, api.Message{Role: "user", Content: fmt.Sprintf("line %d", i)})
+	}
+	m.refreshTranscript()
+	m.viewport.GotoBottom()
+
+	m.history = append(m.history, api.Message{Role: "user", Content: "one more"})
+	m.refreshTranscript()
+	if !m.viewport.AtBottom() {
+		t.Fatalf("refresh left the transcript at offset %d instead of the bottom", m.viewport.YOffset())
+	}
+
+	// A user who scrolled up keeps their place.
+	m.viewport.SetYOffset(0)
+	m.history = append(m.history, api.Message{Role: "user", Content: "and another"})
+	m.refreshTranscript()
+	if m.viewport.YOffset() != 0 {
+		t.Fatalf("refresh yanked a scrolled-up transcript to offset %d", m.viewport.YOffset())
+	}
+}

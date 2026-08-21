@@ -351,19 +351,21 @@ type Model struct {
 	// stale notes or memory from being mistaken for the current assignment.
 	clarificationOnly bool
 
-	history    []api.Message
-	transcript *strings.Builder
-	viewport   viewport.Model
-	input      textarea.Model
-	stream     *streamState
-	streaming  bool
-	streamBuf  *strings.Builder
-	thinkTail  string // rolling tail of the reasoning stream, shown as a ticker while thinking
-	statusMsg  string
-	statusErr  bool
-	lastError  string
-	toast      string
-	sel        selection
+	history     []api.Message
+	transcript  *strings.Builder
+	viewport    viewport.Model
+	input       textarea.Model
+	stream      *streamState
+	streaming   bool
+	streamBuf   *strings.Builder
+	streamMDSrc string // last stable prefix rendered by streamMarkdown, and its render
+	streamMD    string
+	thinkTail   string // rolling tail of the reasoning stream, shown as a ticker while thinking
+	statusMsg   string
+	statusErr   bool
+	lastError   string
+	toast       string
+	sel         selection
 
 	// Session titles (see title.go). sessionName is the named session this
 	// conversation was loaded from or last saved as ("" = unsaved); the title

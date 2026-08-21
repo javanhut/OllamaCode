@@ -100,3 +100,19 @@ func TestStreamingTextUsesStablePlainRendering(t *testing.T) {
 		t.Fatalf("streaming text was reformatted before completion:\n%s", got)
 	}
 }
+
+func TestSplitStableMarkdown(t *testing.T) {
+	cases := map[string][2]string{
+		"para one\n\npara t":                       {"para one\n\n", "para t"},
+		"intro\n\n```go\nfunc main() {\n\nx := 1":  {"intro\n\n", "```go\nfunc main() {\n\nx := 1"},
+		"intro\n\n```go\nx\n```\n\ntail":           {"intro\n\n```go\nx\n```\n\n", "tail"},
+		"# unfinished heading\n```go\nfunc main()": {"", "# unfinished heading\n```go\nfunc main()"},
+		"": {"", ""},
+	}
+	for in, want := range cases {
+		stable, tail := splitStableMarkdown(in)
+		if stable != want[0] || tail != want[1] {
+			t.Errorf("splitStableMarkdown(%q) = (%q, %q), want (%q, %q)", in, stable, tail, want[0], want[1])
+		}
+	}
+}

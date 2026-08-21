@@ -91,7 +91,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 	for _, name := range []string{
 		"read_session_notes", "remember", "recall", "forget", "find_symbol",
 		"code_definition", "code_references", "code_hover", "code_index", "semantic_search",
-		"ask_user", "hash_file", "process_list",
+		"hash_file", "process_list",
 		"disk_usage", "spawn_subagent", "job_list", "job_output",
 	} {
 		m[name] = read
@@ -101,9 +101,13 @@ var toolPolicies = func() map[string]ToolPolicy {
 	}
 
 	// Notes are session-local state and intentionally available during read-only
-	// modes; they do not mutate the user's workspace.
-	for _, name := range []string{"update_session_notes", "append_session_notes"} {
-		m[name] = policy(ModeReadOnly, false, false, false, ToolCostLow)
+	// modes; they do not mutate the user's workspace. Small-model safe because
+	// the plan gate refuses write mode until the plan is in the notes and the
+	// user has confirmed it: hiding these from a lean model leaves it with an
+	// instruction it cannot satisfy, retrying switch_mode until the turn dies.
+	// ask_user is half of that same gate, and a one-question schema either way.
+	for _, name := range []string{"update_session_notes", "append_session_notes", "ask_user"} {
+		m[name] = policy(ModeReadOnly, true, false, false, ToolCostLow)
 	}
 	m["switch_mode"] = policy(ModeReadOnly, true, true, false, ToolCostLow)
 	// Todos are session-local state like notes: available in every mode,

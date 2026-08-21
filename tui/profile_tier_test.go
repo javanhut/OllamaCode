@@ -197,3 +197,26 @@ func TestFallbackContextIsLocalHardwareSafe(t *testing.T) {
 		t.Fatalf("fallback context %d leaves no useful prompt budget", defaultContextLimit)
 	}
 }
+
+// The plan gate refuses write mode and names the tools that open it. If the
+// lean filter or the visible-tool cap hides one, the model has no way out and
+// loops on switch_mode until the turn dies.
+func TestPlanGateToolsSurviveLeanFilterAndCap(t *testing.T) {
+	for _, cap := range []int{0, 12} {
+		m := &Model{
+			mode:    PlanMode,
+			tools:   baseRegistry(&sessionNotes{}, &todoList{}, nil),
+			profile: ModelProfile{ParamsB: 7, MaxVisibleTools: cap},
+		}
+		m.tools.Register(m.switchModeTool())
+		names := map[string]bool{}
+		for _, tool := range m.toolsForMode() {
+			names[tool.Function.Name] = true
+		}
+		for _, want := range []string{"update_session_notes", "ask_user", "switch_mode"} {
+			if !names[want] {
+				t.Errorf("cap=%d: lean plan-mode toolset is missing gate tool %q", cap, want)
+			}
+		}
+	}
+}

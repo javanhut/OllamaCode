@@ -377,6 +377,8 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 		"switch_mode": 100, "read_file": 99, "grep": 98, "find_files": 96,
 		"ask_user": 97, "list_directory": 95, "edit_file": 94, "run_shell": 93,
 		"write_file": 92, "todo_write": 91, "todo_read": 90, "get_project_tree": 88, "file_info": 85,
+		// The plan gate names these two; a visible-tool cap must not drop them.
+		"update_session_notes": 89, "append_session_notes": 87,
 		"web_search": 82, "web_fetch": 81, "git_status": 80, "git_diff": 79,
 		"shell_output": 78,
 	}

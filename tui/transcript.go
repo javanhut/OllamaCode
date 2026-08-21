@@ -11,6 +11,11 @@ import (
 )
 
 func (m *Model) refreshTranscript() {
+	// Every path that re-renders — stream frames, spinner ticks, tool results —
+	// must keep a bottom-pinned view pinned. A single refresh that grows the
+	// transcript without repinning leaves AtBottom() false, and every later
+	// frame then reads that as "the user scrolled up" and stops following.
+	atBottom := !m.ready || m.viewport.AtBottom()
 	var b strings.Builder
 	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
 		// With the welcome panel off, an empty session rendered as a blank void.
@@ -109,6 +114,9 @@ func (m *Model) refreshTranscript() {
 		m.transcript.Reset()
 		m.transcript.WriteString(content)
 		m.viewport.SetContent(content)
+		if atBottom {
+			m.viewport.GotoBottom()
+		}
 	}
 
 	if m.sel.active {
@@ -300,11 +308,19 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		seg := t.segments[i]
 		if seg.tool == nil {
 			if t.streaming {
-				// Rendering incomplete Markdown makes the layout jump whenever an
-				// unfinished fence/list/table becomes valid, and rerunning Glamour
-				// over the growing answer every frame is quadratic work. Stream
-				// stable sanitized text; render the final Markdown once at completion.
-				b.WriteString(stripControl(seg.text))
+				// Render the blocks that are already complete, keep the still-
+				// arriving tail as plain text: rendering an unfinished
+				// fence/list/table makes the layout jump every time it becomes
+				// valid, and deferring everything to completion made the whole
+				// answer reformat at once.
+				stable, tail := splitStableMarkdown(seg.text)
+				if rendered := m.streamMarkdown(stable); rendered != "" {
+					b.WriteString(rendered)
+					if strings.TrimSpace(tail) != "" {
+						b.WriteString("\n\n")
+					}
+				}
+				b.WriteString(stripControl(tail))
 			} else {
 				b.WriteString(m.renderMarkdown(seg.text, true))
 			}
@@ -430,4 +446,36 @@ func lastAssistantMessage(history []api.Message) string {
 		}
 	}
 	return ""
+}
+
+// splitStableMarkdown splits streamed answer text at the last blank line that
+// sits outside a code fence: everything before it is finished blocks that can
+// be rendered as Markdown now, everything after may still change shape as more
+// tokens land.
+func splitStableMarkdown(s string) (stable, tail string) {
+	inFence, cut, pos := false, 0, 0
+	for _, line := range strings.SplitAfter(s, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"):
+			inFence = !inFence
+		case t == "" && !inFence:
+			cut = pos + len(line)
+		}
+		pos += len(line)
+	}
+	return s[:cut], s[cut:]
+}
+
+// streamMarkdown renders the stable prefix of a streaming answer, memoizing the
+// last result. The prefix only grows at block boundaries, so without this every
+// paint frame would re-run Glamour over the same unchanged string.
+func (m *Model) streamMarkdown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	if s != m.streamMDSrc {
+		m.streamMDSrc, m.streamMD = s, m.renderMarkdown(s, false)
+	}
+	return m.streamMD
 }
