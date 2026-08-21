@@ -468,6 +468,7 @@ func (m *Model) applyQuestionAnswer(answer string) {
 		m.history[m.questionResult].Role == "tool" && m.history[m.questionResult].ToolName == "ask_user" {
 		m.history[m.questionResult].Content = "ANSWER: " + answer
 	}
+	m.recordPlanReview()
 	m.state = stateChat
 	m.question = tools.AskUserQuestion{}
 	m.questionChecked = nil

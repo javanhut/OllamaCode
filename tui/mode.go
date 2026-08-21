@@ -272,6 +272,19 @@ func (m *Model) markPlanPresented() {
 	}
 }
 
+// recordPlanReview promotes the checkpoint markPlanPresented armed: the user
+// has now responded to the plan they were shown, so the write gate may open.
+// Both ways of responding land here — typing a message (stream.go) and picking
+// an ask_user option (keys.go). Only the typed path used to promote it, so a
+// user who clicked "yes, proceed" in the picker approved a plan the gate never
+// heard about, and switch_mode("write") was refused until the turn died.
+func (m *Model) recordPlanReview() {
+	if m.planReviewRequested != "" {
+		m.planReviewed = m.planReviewRequested
+		m.planReviewRequested = ""
+	}
+}
+
 // planRecorded reports whether a plan has been written to notes since plan mode
 // was entered. Emptiness alone is not enough: notes left over from an earlier
 // task would pass the check while describing the wrong work.

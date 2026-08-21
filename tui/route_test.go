@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 
+	"charm.land/bubbles/v2/textarea"
 	"github.com/javanhut/ollama_code/api"
 )
 
@@ -1075,5 +1076,26 @@ func TestNonPlanDoesNotOpenThePlanGate(t *testing.T) {
 
 	if !m.planGateBlocks(WriteMode) {
 		t.Error("narration satisfied the plan gate — write mode would run on it")
+	}
+}
+
+// Regression: the picker delivers the answer as the ask_user tool result and
+// stages no user message, so the typed-message path that promoted the review
+// checkpoint never ran. A user who picked "yes, proceed" approved a plan the
+// gate never heard about, and switch_mode("write") looped until the turn died.
+func TestPickedAnswerCountsAsPlanReview(t *testing.T) {
+	m := routedModel(nil, "small")
+	m.applyModeTransition(PlanMode, "")
+	m.notes.set("1. edit tui/keys.go\n2. add a test")
+	m.markPlanPresented() // the turn stopped on ask_user with the plan on screen
+
+	m.input = textarea.New()
+	m.applyQuestionAnswer("yes, proceed")
+
+	if m.planReviewRequested != "" || m.planReviewed != strings.TrimSpace(m.notes.get()) {
+		t.Fatalf("review not consumed: reviewed=%q requested=%q", m.planReviewed, m.planReviewRequested)
+	}
+	if m.planGateBlocks(WriteMode) {
+		t.Fatal("gate stayed shut after the user picked an answer")
 	}
 }

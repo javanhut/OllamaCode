@@ -71,10 +71,7 @@ func (m *Model) submit() tea.Cmd {
 	m.lastError = ""
 	m.resetTurnGuards()
 	m.clarificationOnly = needsTaskClarification(value)
-	if m.planReviewRequested != "" {
-		m.planReviewed = m.planReviewRequested
-		m.planReviewRequested = ""
-	}
+	m.recordPlanReview()
 	// The first message after a denial is feedback about that decision. Keep the
 	// rejected tool out of that response even if a small model ignores the chat
 	// history and tries the same request again. A later user turn starts clean.
