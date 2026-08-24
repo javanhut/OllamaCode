@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -155,5 +156,42 @@ func TestToolResultSmallOutputNeverSpills(t *testing.T) {
 	}
 	if spillDirIfCreated() != "" {
 		t.Error("no spill dir should exist for in-limit output")
+	}
+}
+
+// Truncation must not hand the model half a line: the fragment reads as real
+// file text, gets copied into edit_file's old_string, and never matches.
+func TestTruncateResult_CutsAtLineBoundaries(t *testing.T) {
+	var b strings.Builder
+	for i := range 2000 {
+		fmt.Fprintf(&b, "line %04d: %s\n", i, strings.Repeat("x", 40))
+	}
+	out, truncated := truncateResult(b.String(), defaultResultLimit)
+	if !truncated {
+		t.Fatal("expected truncation")
+	}
+	if strings.Contains(out, partialTruncMarker) {
+		t.Fatal("every line fits the budget; no mid-line marker expected")
+	}
+	head, tail, ok := strings.Cut(out, truncMarker)
+	if !ok {
+		t.Fatalf("marker missing: %q", out[:80])
+	}
+	for _, ln := range append(strings.Split(head, "\n"), strings.Split(tail, "\n")...) {
+		if ln == "" {
+			continue
+		}
+		if len(ln) != len("line 0000: ")+40 {
+			t.Fatalf("fragment line survived truncation: %q", ln)
+		}
+	}
+}
+
+// One line longer than the budget can't be cut cleanly — say so instead of
+// silently passing off a fragment as whole.
+func TestTruncateResult_LabelsMidLineCut(t *testing.T) {
+	out, truncated := truncateResult(strings.Repeat("y", 4*defaultResultLimit), defaultResultLimit)
+	if !truncated || !strings.Contains(out, partialTruncMarker) {
+		t.Fatalf("expected a labelled mid-line cut, got %q", out[:80])
 	}
 }

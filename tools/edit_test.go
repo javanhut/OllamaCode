@@ -138,3 +138,42 @@ func TestPreviewEdit_LargeFile(t *testing.T) {
 		t.Fatalf("hunk header should keep the file's real line numbers:\n%s", diff)
 	}
 }
+
+// A minified file: one huge line among many short ones. The model's old_string
+// is a fragment of that line with one stale character, so no whole-line matcher
+// can hit it — tier 3 used to report an unrelated <div class="bars"> line 1200
+// lines away, and the model would loop retrying against that garbage.
+func TestApplyEdit_FragmentOfMinifiedLine(t *testing.T) {
+	long := `()=>{agentDone(3,'3 matches');addStep('<span class="tool ss">semantic_search</span><div class="pct">79%</div></div>'` +
+		strings.Repeat(`;noop("padpadpadpad")`, 120) + `}`
+	var b strings.Builder
+	for range 1000 {
+		b.WriteString(`  <div class="bars"><i></i><i></i><i></i><i></i></div>` + "\n")
+	}
+	b.WriteString("  " + long + "\n")
+	content := b.String()
+
+	old := `addStep('<span class="tool ss">semantic_search</span><div class="pct">79%</div></div>)` // stale: ) for '
+	got, count, tier, err := applyEdit(content, old, `addStep('FIXED')`, false)
+	if err != nil {
+		t.Fatalf("tier %d refused a fragment of a long line: %v", tier, err)
+	}
+	if count != 1 || !strings.Contains(got, `addStep('FIXED')`) {
+		t.Fatalf("count=%d got line %q", count, got[strings.LastIndex(got, "\n  ()=>"):])
+	}
+	if strings.Contains(got, "semantic_search") || !strings.Contains(got, `agentDone(3,'3 matches')`) {
+		t.Fatal("spliced the wrong span: rest of the minified line must survive")
+	}
+	if n := strings.Count(got, "\n"); n != strings.Count(content, "\n") {
+		t.Fatalf("line count changed: %d != %d", n, strings.Count(content, "\n"))
+	}
+}
+
+// An ambiguous fragment must refuse rather than splice a coin-flip winner.
+func TestApplyEdit_FragmentAmbiguous(t *testing.T) {
+	frag := `renderStep("alpha",{pct:79,label:"searching the index"});`
+	content := "a{" + frag + "}\nb{" + frag + "}\n"
+	if _, _, _, err := applyEdit(content, strings.Replace(frag, "79", "80", 1), "X", false); err == nil {
+		t.Fatal("expected refusal for a fragment that matches two spans equally")
+	}
+}

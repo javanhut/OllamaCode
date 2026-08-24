@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -86,7 +87,21 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 
 	if len(starts) == 0 {
 		// Tier 3: fuzzy line-block match.
-		return fuzzyEdit(cLines, oLines, newNorm, useCRLF)
+		joined, n, t, ferr := fuzzyEdit(cLines, oLines, newNorm, useCRLF)
+		if ferr != nil && k == 1 {
+			// Tier 3b: old_string may be a fragment of a long line.
+			sub, serr := fuzzySubEdit(norm, oldNorm, newNorm)
+			if serr == nil {
+				if useCRLF {
+					sub = strings.ReplaceAll(sub, "\n", "\r\n")
+				}
+				return sub, 1, 3, nil
+			}
+			if !errors.Is(serr, errNoSubAnchor) {
+				return "", 0, 3, serr
+			}
+		}
+		return joined, n, t, ferr
 	}
 	if len(starts) > 1 && !replaceAll {
 		return "", len(starts), 2, fmt.Errorf("old_string matches %d locations (after whitespace-normalization); pass replace_all=true or use a more specific snippet", len(starts))
@@ -117,27 +132,34 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 // closest region so the model can copy the exact current text.
 func fuzzyEdit(cLines, oLines []string, newNorm string, useCRLF bool) (string, int, int, error) {
 	k := len(oLines)
+	if k > len(cLines) {
+		return "", 0, 3, fmt.Errorf("old_string not found")
+	}
+	// Score every window once: on a minified file each score is an O(n*m)
+	// Levenshtein, so a second scoring pass for the runner-up doubles the wait.
+	scores := make([]float64, len(cLines)-k+1)
 	bestScore, bestStart := -1.0, -1
-	for i := 0; i+k <= len(cLines); i++ {
-		if s := windowScore(cLines, oLines, i); s > bestScore {
-			bestScore, bestStart = s, i
+	for i := range scores {
+		scores[i] = windowScore(cLines, oLines, i)
+		if scores[i] > bestScore {
+			bestScore, bestStart = scores[i], i
 		}
 	}
 	if bestStart < 0 {
 		return "", 0, 3, fmt.Errorf("old_string not found")
 	}
 	secondScore := -1.0
-	for i := 0; i+k <= len(cLines); i++ {
+	for i, s := range scores {
 		if absInt(i-bestStart) < k {
 			continue // overlaps the best window
 		}
-		if s := windowScore(cLines, oLines, i); s > secondScore {
+		if s > secondScore {
 			secondScore = s
 		}
 	}
 	if bestScore < fuzzyAccept || (secondScore >= 0 && bestScore-secondScore < fuzzyMargin) {
 		region := strings.Join(cLines[bestStart:bestStart+k], "\n")
-		return "", 0, 3, fmt.Errorf("no confident match for old_string (best similarity %.2f at lines %d-%d). Closest current text:\n%s\nCopy it exactly (whitespace included) and retry", bestScore, bestStart+1, bestStart+k, region)
+		return "", 0, 3, fmt.Errorf("no confident match for old_string (best similarity %.2f at lines %d-%d). Closest current text:\n%s\nCopy it exactly (whitespace included) and retry", bestScore, bestStart+1, bestStart+k, clip(region))
 	}
 
 	out := append([]string(nil), cLines...)
@@ -150,6 +172,102 @@ func fuzzyEdit(cLines, oLines []string, newNorm string, useCRLF bool) (string, i
 		joined = strings.ReplaceAll(joined, "\n", "\r\n")
 	}
 	return joined, 1, 3, nil
+}
+
+// errNoSubAnchor means tier 3b could not even locate a candidate span, so the
+// whole-line tier 3 message stands.
+var errNoSubAnchor = errors.New("no sub-line anchor")
+
+// fuzzySubEdit matches an old_string that is a *fragment* of a longer line.
+// Tiers 2 and 3 compare whole lines, so on minified HTML/JS — where one line
+// holds thousands of characters — a fragment scores near zero against its real
+// target and tier 3 reports whatever unrelated short line happens to share the
+// most characters, which sends the model in circles. This anchors on the
+// fragment's head and tail, scores the spans those anchors imply, and splices
+// new_string in when one span is a confident, unambiguous winner.
+//
+// ponytail: exact head/tail anchors — a fragment stale at BOTH ends still falls
+// through to the error path. Add a k-gram index if that shows up in practice.
+func fuzzySubEdit(content, old, newStr string) (string, error) {
+	if len(old) < subMinLen || strings.Contains(old, "\n") {
+		return "", errNoSubAnchor
+	}
+	drift := min(max(4, len(old)/8), subMaxDrift)
+	head, tail := old[:subAnchor], old[len(old)-subAnchor:]
+
+	type span struct{ s, e int }
+	var cands []span
+	seen := map[span]bool{}
+	add := func(s, e int) {
+		if s < 0 || e > len(content) || e <= s {
+			return
+		}
+		// The fragment is single-line, so a span crossing a newline can't be it.
+		if sp := (span{s, e}); !seen[sp] && !strings.Contains(content[s:e], "\n") {
+			seen[sp] = true
+			cands = append(cands, sp)
+		}
+	}
+	for _, s := range indexAll(content, head) {
+		for d := -drift; d <= drift; d++ {
+			add(s, s+len(old)+d)
+		}
+	}
+	for _, e := range indexAll(content, tail) {
+		e += len(tail)
+		for d := -drift; d <= drift; d++ {
+			add(e-len(old)+d, e)
+		}
+	}
+	if len(cands) == 0 || len(cands) > subMaxCands {
+		return "", errNoSubAnchor // absent, or too common to pin down
+	}
+
+	scores := make([]float64, len(cands))
+	best, bi := -1.0, 0
+	for i, c := range cands {
+		scores[i] = 1 - float64(levenshtein(content[c.s:c.e], old))/float64(max(len(old), c.e-c.s))
+		if scores[i] > best {
+			best, bi = scores[i], i
+		}
+	}
+	second := -1.0
+	for i, c := range cands {
+		if c.s < cands[bi].e && cands[bi].s < c.e {
+			continue // overlaps the best span
+		}
+		if scores[i] > second {
+			second = scores[i]
+		}
+	}
+	if best < fuzzyAccept || (second >= 0 && best-second < fuzzyMargin) {
+		c := cands[bi]
+		return "", fmt.Errorf("no confident match for old_string (best similarity %.2f, inside line %d). Closest current text:\n%s\nCopy it exactly (whitespace included) and retry", best, strings.Count(content[:c.s], "\n")+1, clip(content[c.s:c.e]))
+	}
+	c := cands[bi]
+	return content[:c.s] + newStr + content[c.e:], nil
+}
+
+// indexAll returns every start offset of sub in s.
+func indexAll(s, sub string) []int {
+	var out []int
+	for i := 0; ; {
+		j := strings.Index(s[i:], sub)
+		if j < 0 {
+			return out
+		}
+		out = append(out, i+j)
+		i += j + 1
+	}
+}
+
+// clip bounds a quoted region: a minified line can run to thousands of
+// characters, and an error the model has to page through is an error it ignores.
+func clip(s string) string {
+	if len(s) <= clipLen {
+		return s
+	}
+	return s[:clipLen] + "…[truncated]"
 }
 
 // windowScore is the mean per-line similarity of the k-line window of cLines
@@ -349,4 +467,13 @@ func EditFileTool() Tool {
 const (
 	fuzzyAccept = 0.85
 	fuzzyMargin = 0.10
+)
+
+// Tier-3b (sub-line) knobs.
+const (
+	subAnchor   = 24  // bytes of the fragment's head/tail used to locate spans
+	subMinLen   = 32  // shorter fragments are too ambiguous to splice blind
+	subMaxDrift = 64  // how far a span's end may drift from len(old_string)
+	subMaxCands = 400 // scoring cap; past this the fragment isn't distinctive
+	clipLen     = 400 // max bytes of file text quoted back in an error
 )

@@ -140,7 +140,8 @@ func unifiedDiff(oldStr, newStr, path string) string {
 	}
 	out := strings.TrimRight(sb.String(), "\n")
 	if len(out) > 6000 {
-		out = out[:6000] + "\n... (diff truncated)"
+		clipped, _ := clipToLine(out, 6000)
+		out = clipped + "\n... (diff truncated)"
 	}
 	return out
 }

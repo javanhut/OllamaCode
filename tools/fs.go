@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -235,6 +236,10 @@ func readDirRecursive(root string) (string, error) {
 		fileTruncated := n > limit
 		if fileTruncated {
 			chunk = chunk[:limit]
+			// Cut at a line boundary, for the reason clipToLine documents.
+			if i := bytes.LastIndexByte(chunk, '\n'); i > 0 {
+				chunk = chunk[:i+1]
+			}
 		}
 
 		fmt.Fprintf(&out, "===== %s =====\n", rel)
