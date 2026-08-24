@@ -97,6 +97,12 @@ func formatBytes(path string, data []byte) []byte {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = nil // diagnostics are the formatter's business, not the model's
+	// formatTimeout kills the formatter, but Run also waits on the goroutines
+	// copying stdin/stdout. A formatter that forks (prettier through a node
+	// shim) leaves a child holding those pipes, so the copies never see EOF and
+	// Wait blocks past the deadline — on the write path, indefinitely. WaitDelay
+	// force-closes them shortly after the kill.
+	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil || out.Len() == 0 {
 		return data
 	}

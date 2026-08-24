@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
@@ -253,5 +254,73 @@ func TestUndoAdvisoryWaitsForBatch(t *testing.T) {
 	}
 	if m.deferredAdvisory != "" {
 		t.Fatal("deferred advisory not cleared — it would repeat")
+	}
+}
+
+// TestSnapshotBeforeMutateTimeout is the regression guard for the hang that
+// made write_file and append_file die at the dispatcher's 90s deadline with
+// nothing written. The snapshot shells out to git with m.ckpt.mu held, and the
+// Before hook has no context, so an unbounded git wedged the write that
+// triggered it and every later write queued on the mutex. Bounding the git call
+// turns that into the store's existing sticky-off path: the write proceeds, and
+// only undo is lost.
+func TestSnapshotBeforeMutateTimeout(t *testing.T) {
+	ckptWorkspace(t)
+
+	// A git that never returns. exec so the kill lands on the sleep itself
+	// rather than a shell holding the output pipes.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Pre-create the shadow repo so ensureShadowLocked short-circuits and the
+	// wedge under test is the snapshot, not the one-time init.
+	if err := os.MkdirAll(shadowRepoPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shadowRepoPath(), "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := shadowGitTimeout
+	shadowGitTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { shadowGitTimeout = restore })
+
+	m := &Model{}
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		m.snapshotBeforeMutate()
+		done <- time.Since(start)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("snapshotBeforeMutate hung on a wedged git — the write path is unbounded again")
+	}
+
+	m.ckpt.mu.Lock()
+	off, why, pending := m.ckpt.off, m.ckpt.offWhy, m.ckpt.pending
+	m.ckpt.mu.Unlock()
+	if !off {
+		t.Fatal("a timed-out snapshot must turn the store off, not retry once per write")
+	}
+	if !strings.Contains(why, "timed out") {
+		t.Fatalf("offWhy should say the snapshot timed out, got %q", why)
+	}
+	if pending != "" {
+		t.Fatalf("no tree was written, so nothing should be pending, got %q", pending)
+	}
+
+	// The second write is the one that hurt: before the fix it queued on the
+	// mutex behind the still-running git and died at 90s too.
+	second := make(chan struct{})
+	go func() { m.snapshotBeforeMutate(); close(second) }()
+	select {
+	case <-second:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a later write queued behind the wedged snapshot instead of skipping it")
 	}
 }

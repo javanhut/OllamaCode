@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/javanhut/ollama_code/tools"
 )
@@ -68,6 +70,20 @@ func shadowRepoPath() string {
 // them a 5ms snapshot becomes a gigabyte one.
 const shadowExcludes = "/.git/\nnode_modules/\n__pycache__/\n.venv/\nvenv/\n"
 
+// shadowGitTimeout bounds one shadow-repo git command. The snapshot runs on
+// the write path with m.ckpt.mu held, and the dispatcher's 90s tool deadline
+// cannot cancel it — the Before hook takes no context — so an unbounded
+// `git add -A` wedges the write that triggered it AND every later write queued
+// on that mutex, each dying at 90s having written nothing. Bounded well under
+// the tool deadline so a slow snapshot degrades to "undo off" (the sticky
+// failure path below) instead of a hung tool call, and generous enough that a
+// large repo's cold first snapshot — which hashes the whole work-tree — still
+// succeeds. A var so the timeout test can shrink it.
+//
+// ponytail: a fixed ceiling, not a cancellable one. Plumb a context through
+// Executor.Before if Ctrl-C ever needs to abort a snapshot mid-flight.
+var shadowGitTimeout = 30 * time.Second
+
 // shadowGit runs one git command against the shadow repo, from the workspace
 // root so a "." pathspec means the whole work-tree. hooksPath is pinned inside
 // the shadow dir — where there are no hooks — so a global core.hooksPath can't
@@ -82,10 +98,19 @@ func shadowGit(args ...string) ([]byte, error) {
 		// git narrates with a ten-line submodule hint on every snapshot.
 		"-c", "advice.addEmbeddedRepo=false",
 	}, args...)
-	cmd := exec.Command("git", argv...)
+	ctx, cancel := context.WithTimeout(context.Background(), shadowGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Dir = workspaceRoot()
+	// Killing git does not release the output pipes if it forked a child that
+	// inherited them; without a WaitDelay the copy goroutines keep Wait blocked
+	// and the deadline above buys nothing.
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return out, fmt.Errorf("git %s timed out after %s", args[0], shadowGitTimeout)
+		}
 		return out, fmt.Errorf("git %s failed: %s", args[0], strings.TrimSpace(string(out)))
 	}
 	return out, nil
