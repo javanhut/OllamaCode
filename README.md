@@ -28,17 +28,21 @@ You start in **explore** mode (read-only). `shift+tab` cycles to **plan**, then
 
 ## Documentation
 
-| | |
-|---|---|
-| [Getting started](docs/getting-started.md) | Install, first run, picking a model |
-| [Modes](docs/modes.md) | explore → plan → write, and why the mode is the safety boundary |
-| [Model routing](docs/routing.md) | Big model plans, local model executes |
-| [Commands](docs/commands.md) | Every slash command and key binding |
-| [Tools](docs/tools.md) | What the model can do, and what each mode allows |
-| [Configuration](docs/configuration.md) | `config.json`, environment variables, per-model profiles |
-| [Safety](docs/safety.md) | Approval prompts, undo, loop guards, verification |
-| [Architecture](docs/architecture.md) | How a turn runs, for people changing the code |
-| [Voice companion](docs/companion.md) | Optional speech-in, speech-out popup |
+|                                            |                                                                      |
+| ------------------------------------------ | -------------------------------------------------------------------- |
+| [Getting started](docs/getting-started.md) | Install, first run, picking a model                                  |
+| [Modes](docs/modes.md)                     | explore → plan → write, and why the mode is the safety boundary      |
+| [Model routing](docs/routing.md)           | Big model plans, local model executes                                |
+| [Commands](docs/commands.md)               | Every slash command and key binding                                  |
+| [Tools](docs/tools.md)                     | What the model can do, and what each mode allows                     |
+| [Configuration](docs/configuration.md)     | `config.json`, environment variables, per-model profiles             |
+| [MCP servers](docs/mcp.md)                 | External tools over stdio or Streamable HTTP                         |
+| [Safety](docs/safety.md)                   | Approval prompts, undo, loop guards, verification                    |
+| [Architecture](docs/architecture.md)       | How a turn runs, for people changing the code                        |
+| [Voice companion](docs/companion.md)       | Optional speech-in, speech-out popup                                 |
+| [Training](docs/training.md)               | Export traces as a dataset and LoRA-tune a model on them             |
+| [Evals](docs/eval.md)                      | Running cmd/eval, multi-sample pass rates, and the CI self-test gate |
+| [Research](docs/research.md)               | Guided web research with deduped sources and citations               |
 
 ## What's in it
 
@@ -81,7 +85,7 @@ selection.
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.26+
 - [Ollama](https://ollama.com) running locally, or an Ollama Cloud API key
 
 ## Development
