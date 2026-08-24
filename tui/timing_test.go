@@ -169,7 +169,7 @@ func TestShowThinkingWhileStreaming(t *testing.T) {
 	if !strings.Contains(got, "thinking · live") || !strings.Contains(got, "checking the first option") {
 		t.Fatalf("live reasoning was not rendered as an isolated block:\n%s", got)
 	}
-	if !strings.Contains(got, "└\nThe answer has started.") {
+	if !strings.Contains(got, "└\n\n  The answer has started.") {
 		t.Fatalf("reasoning block was not closed before answer text:\n%s", got)
 	}
 }

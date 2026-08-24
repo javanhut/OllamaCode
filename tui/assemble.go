@@ -46,9 +46,35 @@ func (m *Model) assembleMessages(ragBlock string) []api.Message {
 
 	out := make([]api.Message, 0, len(visible)-start+2)
 	out = append(out, sys)
-	out = append(out, visible[start:]...)
-	out = append(out, dyn)
+	for _, msg := range visible[start:] {
+		out = append(out, demoteSystem(msg))
+	}
+	out = append(out, demoteSystem(dyn))
 	return out
+}
+
+// demoteSystem rewrites a system message into a marked user message. Only the
+// message at index 0 may carry the system role: Ollama's newer built-in
+// renderers (qwen3.8 and friends) hard-fail the whole request with
+// 500 "system message must be at the beginning", and the Jinja templates that
+// don't fail instead reorder, merge, or silently drop it — the same reason
+// advisory() in loopguard.go rides the user role.
+//
+// This is the one place it can be fixed once: the harness appends system
+// messages into the log from a dozen call sites (dream wake context, background
+// job notifications, verification and citation corrections, mode switches,
+// research recipes), and assembleMessages adds the volatile dynamic tail on top,
+// so every request had at least two. The [SYSTEM] marker keeps the model from
+// reading harness instructions as something the user said. Only the projection
+// is rewritten — the log keeps the system role for the transcript and for saved
+// sessions.
+func demoteSystem(msg api.Message) api.Message {
+	if msg.Role != "system" {
+		return msg
+	}
+	msg.Role = "user"
+	msg.Content = "[SYSTEM] " + msg.Content
+	return msg
 }
 
 // deriveModelMessages projects the model's view out of the append-only log: the

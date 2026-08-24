@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -280,8 +281,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Not at a permission prompt: there, esc means "deny this call" and is
-		// handled by updatePermission, not by cancelling the whole turn.
-		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil && m.state != statePermission {
+		// handled by updatePermission, not by cancelling the whole turn. Same for
+		// the jobs modal, which can be opened mid-turn: esc closes it.
+		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil &&
+			m.state != statePermission && m.state != stateJobs {
 			m.cancelSubagents()
 			return m, m.interruptTurn()
 		}
@@ -382,6 +385,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSettings(msg)
 		case stateModelPicker:
 			return m.updatePicker(msg)
+		case stateJobs:
+			return m.updateJobs(msg)
 		case stateHelp:
 			switch msg.String() {
 			case "esc", "enter", "q":
@@ -588,6 +593,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.content != "" {
 			m.thinkTail = "" // answer started; drop the ticker
 			m.streamBuf.WriteString(msg.content)
+			// Classify the transport once, on the first non-blank content. Later
+			// chunks cannot flip it: a call's arguments often contain prose.
+			if m.stream != nil && !m.stream.visibility && strings.TrimSpace(m.streamBuf.String()) != "" {
+				m.stream.visibility = true
+				m.stream.hideContent = likelyStructuredOutput(m.streamBuf.String())
+			}
+		}
+		// A model stuck repeating itself keeps the connection healthy, so the idle
+		// timeout never fires and the loop paints into the transcript until the
+		// context fills. Cancel it and let the error path spend one retry.
+		if m.stream != nil && streamOutputRunaway(m.streamBuf.String(), m.stream.constrained) {
+			if m.stream.cancel != nil {
+				m.stream.cancel()
+			}
+			gen := m.turnGen
+			cmds = append(cmds, func() tea.Msg { return chatErrMsg{gen: gen, err: errRunawayModelStream} })
+			break
 		}
 		// Paint at a responsive cadence independently of token boundaries. When a
 		// chunk arrives inside the cadence window, schedule the missing frame: the
@@ -843,6 +865,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// prose escape envelope and gets unwrapped below.
 		constrained := m.stream != nil && m.stream.constrained
 		suppressed := m.stream != nil && m.stream.toolsSuppressed
+		// Transport, not prose — classified live, re-checked here for a reply that
+		// arrived in a single done chunk (no chatChunkMsg ever ran).
+		structuredOutput := m.stream != nil && m.stream.hideContent
+		if !structuredOutput {
+			structuredOutput = likelyStructuredOutput(finalAssistant)
+		}
 		m.streaming = false
 		m.stream = nil
 		m.busySince = time.Time{}
@@ -889,9 +917,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the model as its own answer on the next request — it read as an
 			// unanswered call and got repeated verbatim, and it rendered as JSON
 			// noise in the transcript.
+			historyContent := tools.StripToolCalls(finalAssistant)
+			if structuredOutput {
+				// The whole reply was the call. Whatever survived stripping is a
+				// fragment of the envelope, not a sentence the user should read.
+				historyContent = ""
+			}
 			m.history = append(m.history, api.Message{
 				Role:      "assistant",
-				Content:   tools.StripToolCalls(finalAssistant),
+				Content:   historyContent,
 				ToolCalls: parsed,
 			})
 			m.pending = &pendingBatch{
@@ -914,6 +948,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// answer text, not the {"response": ...} envelope it arrived in.
 			if constrained {
 				if prose, ok := agent.UnwrapConstrainedProse(finalAssistant); ok {
+					finalAssistant = prose
+				}
+			} else if structuredOutput {
+				// Some native templates wrap an ordinary answer in {"response": ...}
+				// with no format payload asked for. Unwrap that exact shape only.
+				if prose, ok := agent.UnwrapResponseEnvelope(finalAssistant); ok {
 					finalAssistant = prose
 				}
 			}
@@ -1063,6 +1103,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			_ = m.trace.Record(tracepkg.Event{Kind: "stream_error", Turn: msg.gen, Model: m.modelName, Error: msg.err.Error(), Metadata: metadata})
 		}
+		// An output loop is not a transport failure: the same request regenerates
+		// the same loop, so it gets one retry with a correction in history rather
+		// than the backoff ladder. A constrained request that loops has proved the
+		// schema unusable for this model even though the host accepted it.
+		runaway := errors.Is(msg.err, errRunawayModelStream)
+		if runaway {
+			if m.stream != nil && m.stream.constrained {
+				m.disableToolCallFormat()
+			}
+			if m.streamRetries == 0 {
+				m.streamRetries++
+				m.streamBuf.Reset()
+				m.history = append(m.history, advisory("[RETRY CORRECTION] Your previous response entered a repetitive output loop and was stopped. Emit exactly one concise tool call, or one concise final answer. Do not repeat yourself and do not concatenate JSON objects."))
+				m.logActivity(fmt.Sprintf("runaway model output stopped, retrying once: %v", msg.err))
+				m.toast = "repetitive model output stopped — retrying once"
+				gen := m.turnGen
+				cmds = append(cmds, func() tea.Msg { return retryStreamMsg{gen: gen} })
+				m.refreshTranscript()
+				break
+			}
+			m.streamBuf.Reset()
+		}
 		// A context overflow is the one error the retry ladder can never win: the
 		// identical request overflows identically all three times, so the backoff
 		// spends ~12s to end the turn anyway. Compaction is forced here because
@@ -1114,13 +1176,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// jittered exponential backoff (honoring a provider Retry-After) so a
 		// struggling backend gets room to recover. History is intact, so the
 		// request simply regenerates from the same state. streamRetryable owns
-		// the exclusions: an overflow is not transient and must not spend this
-		// budget (it either already had its one compaction pass or compaction
-		// freed nothing, and either way the next stop is the surfaced error),
-		// a memory failure was already retried down to the smallest context
-		// that could load, a format rejection fails deterministically, and an
-		// explicit 4xx refusal without transient text will not heal on resend.
-		if !m.compacting && m.streamRetries < maxStreamRetries && streamRetryable(msg.err) {
+		// the transport exclusions: an overflow is not transient and must not
+		// spend this budget (it either already had its one compaction pass or
+		// compaction freed nothing, and either way the next stop is the
+		// surfaced error), a memory failure was already retried down to the
+		// smallest context that could load, a format rejection fails
+		// deterministically, and an explicit 4xx refusal without transient text
+		// will not heal on resend. A runaway is excluded here too: it already
+		// took its one retry above, with a correction in history — the backoff
+		// ladder would just replay the same loop.
+		if !runaway && !m.compacting && m.streamRetries < maxStreamRetries && streamRetryable(msg.err) {
 			m.streamRetries++
 			delay := streamRetryDelay(m.streamRetries, msg.err)
 			m.logActivity(fmt.Sprintf("stream error, retrying (%d/%d): %v", m.streamRetries, maxStreamRetries, msg.err))

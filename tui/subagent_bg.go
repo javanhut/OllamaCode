@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -200,6 +201,43 @@ func (s *subagentStore) running() []*subagentJob {
 		}
 	}
 	return out
+}
+
+// all returns every job, running or finished, sorted by id — the /jobs modal
+// lists what ran, not just what is still running.
+func (s *subagentStore) all() []*subagentJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*subagentJob, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i].id < out[k].id })
+	return out
+}
+
+// cancel stops one running job by id, reporting whether anything was stopped.
+// Like cancelAll it marks the job interrupted, so its completion notification
+// does not auto-wake the parent.
+func (s *subagentStore) cancel(id int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j := s.jobs[id]
+	if j == nil {
+		return false
+	}
+	// Already interrupted counts as stopped even though the worker has not
+	// recorded its report yet, so a second keypress reports the truth.
+	if done, _, _ := j.snapshot(); done || j.wasInterrupted() {
+		return false
+	}
+	j.mu.Lock()
+	j.interrupted = true
+	j.mu.Unlock()
+	if j.cancel != nil {
+		j.cancel()
+	}
+	return true
 }
 
 // cancelAll stops every running job (interrupt path). Jobs finish with a

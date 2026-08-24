@@ -38,6 +38,13 @@ func (m *Model) downgradeToolCallFormat() bool {
 	return toolCallConstraintCache.Downgrade(agent.ConstraintKey(m.host, m.modelName))
 }
 
+// disableToolCallFormat drops straight to the unconstrained rung. The host
+// accepted the schema, so no rejection will ever step the ladder down, but the
+// model looped trying to satisfy it — acceptance is not compatibility.
+func (m *Model) disableToolCallFormat() {
+	toolCallConstraintCache.Disable(agent.ConstraintKey(m.host, m.modelName))
+}
+
 // subagentConstraintOptions passes the small-tier constraint posture (and the
 // shared rung cache) to a headless child loop, so a small model routed into a
 // sub-agent gets the same first-pass decoding help as the interactive loop.

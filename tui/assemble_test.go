@@ -75,6 +75,34 @@ func TestAssembleMessagesToastsWhenHistoryDropped(t *testing.T) {
 	}
 }
 
+func TestAssembleMessagesKeepsSystemOnlyAtTheHead(t *testing.T) {
+	// Ollama's newer renderers 500 with "system message must be at the beginning"
+	// on any system message past index 0 — including the dynamic tail.
+	m := &Model{host: api.OllamaHost{}, notes: &sessionNotes{}, contextLimit: 200000}
+	m.history = []api.Message{
+		msg("user", "a"),
+		msg("assistant", "b"),
+		msg("system", "[DREAMS WHILE THE USER WAS AWAY] ..."),
+		msg("user", "Hello"),
+	}
+
+	out := m.assembleMessages("")
+	if out[0].Role != "system" {
+		t.Fatalf("head must stay system, got %q", out[0].Role)
+	}
+	for i, v := range out[1:] {
+		if v.Role == "system" {
+			t.Fatalf("system message survived at index %d: %q", i+1, v.Content)
+		}
+	}
+	if !strings.Contains(out[3].Content, "[SYSTEM] [DREAMS") {
+		t.Fatalf("demoted message lost its marker: %q", out[3].Content)
+	}
+	if last := out[len(out)-1]; last.Role != "user" || !strings.HasPrefix(last.Content, "[SYSTEM] ") {
+		t.Fatalf("dynamic tail = (%s) %q", last.Role, last.Content)
+	}
+}
+
 func TestObservePromptEvalIgnoresZero(t *testing.T) {
 	m := &Model{}
 	m.observePromptEval(500)

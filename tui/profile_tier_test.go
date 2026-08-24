@@ -220,3 +220,29 @@ func TestPlanGateToolsSurviveLeanFilterAndCap(t *testing.T) {
 		}
 	}
 }
+
+// Plan mode instructs the model to record its plan and ask the user. A small
+// model's schema cap used to prune exactly those tools, leaving the turn
+// narrating a plan it had no way to save.
+func TestSchemaCapKeepsPlanModeWorkflowTools(t *testing.T) {
+	m := &Model{
+		mode:    PlanMode,
+		profile: ModelProfile{CapabilityTier: "small", MaxVisibleTools: 6},
+		history: []api.Message{{Role: "user", Content: "search the web for the newest api docs"}},
+	}
+	m.tools = baseRegistry(&sessionNotes{}, &todoList{}, nil)
+	m.tools.Register(m.switchModeTool())
+	selected := m.toolsForMode()
+	if len(selected) > 6 {
+		t.Fatalf("cap exceeded: %d tools", len(selected))
+	}
+	names := map[string]bool{}
+	for _, tool := range selected {
+		names[tool.Function.Name] = true
+	}
+	for want := range pinnedToolNames(PlanMode) {
+		if !names[want] {
+			t.Errorf("schema cap pruned pinned tool %q: %v", want, names)
+		}
+	}
+}

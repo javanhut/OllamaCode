@@ -91,13 +91,19 @@ func TestStreamingTextUsesStablePlainRendering(t *testing.T) {
 	m.viewport.SetWidth(80)
 	turn := assistantTurn{
 		streaming: true,
-		segments:  []turnSegment{{text: "# unfinished heading\n```go\nfunc main()"}},
+		segments:  []turnSegment{{live: true, text: "**done** paragraph\n\n# unfinished heading\n```go\nfunc main()"}},
 	}
 	var b strings.Builder
 	m.writeAssistantTurn(&b, &turn, false)
 	got := stripANSI(b.String())
+	// The tail is still being written — reformatting it re-flows the layout on
+	// every frame, so it stays raw until its block closes.
 	if !strings.Contains(got, "# unfinished heading") || !strings.Contains(got, "```go") {
-		t.Fatalf("streaming text was reformatted before completion:\n%s", got)
+		t.Fatalf("streaming tail was reformatted before completion:\n%s", got)
+	}
+	// Everything above it is complete Markdown and renders as such.
+	if strings.Contains(got, "**done**") {
+		t.Fatalf("completed block was not rendered as Markdown:\n%s", got)
 	}
 }
 

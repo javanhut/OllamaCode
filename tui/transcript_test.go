@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
@@ -117,6 +118,97 @@ func TestAskUserQuestionVisibleWhenToolCollapsed(t *testing.T) {
 		}
 		if !strings.Contains(out, "describe task · cancel") {
 			t.Fatalf("expand=%v: answer options not visible:\n%s", expand, out)
+		}
+	}
+}
+
+// A reply that arrives as transport — a JSON tool call, a <tool_call> tag — is
+// machinery, not an answer. Painting it live spelled the raw envelope into the
+// transcript token by token before completion could route it.
+func TestStructuredStreamIsWithheldFromLiveRender(t *testing.T) {
+	for _, opening := range []string{`{"name":"read_file"`, `<tool_call>{"name"`, `[{"name":"grep"`} {
+		mm, _ := New().Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+		m := mm.(*Model)
+		m.history = append(m.history, api.Message{Role: "user", Content: "read the config"})
+		m.streaming = true
+		m.stream = &streamState{}
+		m.streamBuf.WriteString(opening)
+		m.stream.visibility = true
+		m.stream.hideContent = likelyStructuredOutput(m.streamBuf.String())
+		if !m.stream.hideContent {
+			t.Fatalf("%q was not classified as transport", opening)
+		}
+		m.refreshTranscript()
+		if got := stripANSI(m.transcript.String()); strings.Contains(got, `"name"`) {
+			t.Errorf("transport painted live for %q:\n%s", opening, got)
+		}
+	}
+
+	// Prose still streams as it always did.
+	mm, _ := New().Update(tea.WindowSizeMsg{Width: 120, Height: 34})
+	m := mm.(*Model)
+	m.history = append(m.history, api.Message{Role: "user", Content: "read the config"})
+	m.streaming = true
+	m.stream = &streamState{}
+	m.streamBuf.WriteString("Here is what LIVEPROSE the config does")
+	m.stream.visibility = true
+	m.stream.hideContent = likelyStructuredOutput(m.streamBuf.String())
+	m.refreshTranscript()
+	if !strings.Contains(stripANSI(m.transcript.String()), "LIVEPROSE") {
+		t.Error("plain prose stopped rendering live")
+	}
+}
+
+// The unfinished tail of a live answer renders raw while a sealed one goes
+// through glamour, so the two must agree on margin, wrap width, and trailing
+// blank lines — otherwise the answer shifts and the gaps around tool calls
+// change the moment the turn completes.
+func TestWriteAssistantTurn_StreamingMatchesSealed(t *testing.T) {
+	prose := strings.Repeat("some prose about the repo and how its pieces fit together ", 6)
+	for _, text := range []string{prose, prose + "\n\n"} {
+		for _, width := range []int{60, 90, 120} {
+			var out [2]string
+			for i, streaming := range []bool{true, false} {
+				m := orderedTurnModel()
+				m.history[0].Content = text
+				m.viewport.SetWidth(width)
+
+				turn, _ := m.collectAssistantTurn(0)
+				turn.streaming = streaming
+				turn.segments[0].live = streaming
+				var b strings.Builder
+				m.writeAssistantTurn(&b, &turn, false)
+				lines := strings.Split(ansi.Strip(b.String()), "\n")
+				for j := range lines {
+					lines[j] = strings.TrimRight(lines[j], " ")
+				}
+				out[i] = strings.Join(lines, "\n")
+			}
+			if out[0] != out[1] {
+				t.Fatalf("width=%d text=%q streaming:\n%s\n\nsealed:\n%s", width, text, out[0], out[1])
+			}
+		}
+	}
+}
+
+// The stable-prefix memo is keyed by width as well as content: a resize
+// mid-stream rebuilds the renderer, and replaying the old memo would leave the
+// finished blocks wrapped for the old width until the next block landed.
+func TestStreamMarkdownRewrapsOnResize(t *testing.T) {
+	m := &Model{md: newMarkdownRenderer()}
+	text := strings.Repeat("some prose about the repo and how its pieces fit together ", 6) + "\n\n"
+
+	m.viewport.SetWidth(120)
+	wide := m.streamMarkdown(text)
+	m.viewport.SetWidth(60)
+	narrow := m.streamMarkdown(text)
+
+	if narrow == wide {
+		t.Fatal("resize did not re-render the stable prefix")
+	}
+	for _, line := range strings.Split(ansi.Strip(narrow), "\n") {
+		if w := ansi.StringWidth(strings.TrimRight(line, " ")); w > 60 {
+			t.Fatalf("line %d wide after resize to 60: %q", w, line)
 		}
 	}
 }

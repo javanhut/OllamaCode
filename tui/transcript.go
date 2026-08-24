@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
 )
@@ -88,8 +89,11 @@ func (m *Model) refreshTranscript() {
 				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
-			if m.streamBuf.Len() > 0 {
-				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String()})
+			// A reply that opened as transport (JSON, <tool_call>) is withheld
+			// until completion decides what it is: live-painting it spelled the
+			// envelope into the transcript character by character.
+			if m.streamBuf.Len() > 0 && (m.stream == nil || !m.stream.hideContent) {
+				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String(), live: true})
 			}
 		case m.retrieving || m.compacting || m.verifying:
 			// Turn-start gates (RAG retrieval, compaction) and the verify gate
@@ -170,6 +174,7 @@ func (m *Model) cachedTurn(t *assistantTurn, start, next int) string {
 type turnSegment struct {
 	text string         // non-empty => text segment
 	tool *toolCallEntry // non-nil => tool-call segment
+	live bool           // text is the answer still being streamed, not a finished message
 }
 
 // assistantTurn is one rendered Layla block: all assistant content between
@@ -307,20 +312,8 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	for i := 0; i < len(t.segments); i++ {
 		seg := t.segments[i]
 		if seg.tool == nil {
-			if t.streaming {
-				// Render the blocks that are already complete, keep the still-
-				// arriving tail as plain text: rendering an unfinished
-				// fence/list/table makes the layout jump every time it becomes
-				// valid, and deferring everything to completion made the whole
-				// answer reformat at once.
-				stable, tail := splitStableMarkdown(seg.text)
-				if rendered := m.streamMarkdown(stable); rendered != "" {
-					b.WriteString(rendered)
-					if strings.TrimSpace(tail) != "" {
-						b.WriteString("\n\n")
-					}
-				}
-				b.WriteString(stripControl(tail))
+			if seg.live {
+				b.WriteString(m.liveMarkdown(seg.text))
 			} else {
 				b.WriteString(m.renderMarkdown(seg.text, true))
 			}
@@ -474,8 +467,34 @@ func (m *Model) streamMarkdown(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return ""
 	}
-	if s != m.streamMDSrc {
-		m.streamMDSrc, m.streamMD = s, m.renderMarkdown(s, false)
+	// Width is part of the key: a resize mid-stream rebuilds the renderer, and a
+	// memo from the old width would keep the finished blocks wrapped wrong until
+	// the next one lands.
+	if s != m.streamMDSrc || m.viewport.Width() != m.streamMDWidth {
+		m.streamMDSrc, m.streamMDWidth = s, m.viewport.Width()
+		m.streamMD = m.renderMarkdown(s, false)
 	}
 	return m.streamMD
+}
+
+// liveMarkdown renders the answer that is still streaming: the blocks that have
+// closed go through Glamour, the tail that is still arriving stays plain. The
+// tail is laid out in Glamour's own document geometry — blank line above,
+// 2-space margin, and its text width (it gets width-2 and keeps a 2-space
+// margin each side) — so nothing shifts when the block closes and re-renders.
+// The model's trailing blank lines go too: kept, they stack with the newlines
+// around a tool-call group into a multi-line hole mid-turn.
+func (m *Model) liveMarkdown(s string) string {
+	stable, tail := splitStableMarkdown(s)
+	out := m.streamMarkdown(stable)
+	tail = strings.TrimRight(stripControl(tail), "\n")
+	if tail == "" {
+		return out
+	}
+	sep := "\n  "
+	if out != "" {
+		sep = "\n\n  "
+	}
+	wrapped := ansi.Wordwrap(tail, max(m.viewport.Width()-6, 20), "")
+	return out + sep + strings.Join(strings.Split(wrapped, "\n"), "\n  ")
 }

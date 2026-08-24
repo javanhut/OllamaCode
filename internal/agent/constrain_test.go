@@ -416,3 +416,22 @@ func TestRun_FinalizeIsNeverConstrained(t *testing.T) {
 		t.Fatal("the forced final synthesis is a prose turn: no tools, no format")
 	}
 }
+
+// The unconstrained unwrap is deliberately narrow: only the exact one-key
+// envelope, never an ordinary JSON answer the model meant to send.
+func TestUnwrapResponseEnvelopeIsExact(t *testing.T) {
+	if got, ok := UnwrapResponseEnvelope(`{"response":"clean prose"}`); !ok || got != "clean prose" {
+		t.Fatalf("exact response envelope = (%q, %v)", got, ok)
+	}
+	for _, content := range []string{
+		`{"response":"keep the object","status":"ok"}`,
+		`{"name":"read_file","arguments":{}}`,
+		`"plain JSON string"`,
+		`{"response":"  "}`,
+		"just prose",
+	} {
+		if got, ok := UnwrapResponseEnvelope(content); ok {
+			t.Errorf("ordinary content %q was unwrapped as %q", content, got)
+		}
+	}
+}

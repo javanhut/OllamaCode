@@ -202,8 +202,17 @@ func (s *Store) PromoteAll() (int, error) {
 	return n, s.save()
 }
 
-// LongTermSummary returns long-term entries as a markdown list, oldest first.
-// Empty string if no entries.
+// Long-term memory stays fully searchable through Recall, but only a small,
+// recent working set belongs in every prompt. Unbounded injection let stale
+// notes dominate prompt evaluation on local models.
+const (
+	maxInjectedLongTermEntries = 12
+	maxInjectedLongTermChars   = 2000
+)
+
+// LongTermSummary returns a bounded, deduplicated working set of the newest
+// long-term entries as a markdown list, oldest first. Recall still searches
+// the complete store. Empty string if no entries.
 func (s *Store) LongTermSummary() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -215,10 +224,28 @@ func (s *Store) LongTermSummary() string {
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
 	})
+	// Newest first while selecting, so the budget keeps the most recent notes;
+	// the result is reversed back to oldest-first for the prompt.
+	seen := make(map[string]bool, len(sorted))
+	selected := make([]string, 0, min(len(sorted), maxInjectedLongTermEntries))
+	used := 0
+	for i := len(sorted) - 1; i >= 0 && len(selected) < maxInjectedLongTermEntries; i-- {
+		content := strings.TrimSpace(sorted[i].Content)
+		key := strings.ToLower(strings.Join(strings.Fields(content), " "))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		line := "- " + content
+		if used+len(line)+1 > maxInjectedLongTermChars {
+			continue
+		}
+		selected = append(selected, line)
+		used += len(line) + 1
+	}
 	var b strings.Builder
-	for _, e := range sorted {
-		b.WriteString("- ")
-		b.WriteString(e.Content)
+	for i := len(selected) - 1; i >= 0; i-- {
+		b.WriteString(selected[i])
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")

@@ -337,9 +337,15 @@ func (m *Model) toolsForMode() []tools.Tool {
 		return nil
 	}
 	lean := m.profile.smallModel()
+	// Workflow-critical tools survive both the small-model filter and the schema
+	// cap. Without this a small model in plan mode is told it MUST record the
+	// plan with update_session_notes before switch_mode is allowed — while the
+	// lean filter has already removed every notes tool, so the turn cannot leave
+	// plan mode at all.
+	pinned := pinnedToolNames(m.mode)
 	out := make([]tools.Tool, 0, len(all))
 	for _, t := range all {
-		if lean && !t.Policy.SmallModelSafe {
+		if lean && !t.Policy.SmallModelSafe && !pinned[t.Function.Name] {
 			continue
 		}
 		if t.Function.Name == "spawn_subagent" && !m.profile.canDelegate() {
@@ -361,9 +367,36 @@ func (m *Model) toolsForMode() []tools.Tool {
 		maxVisible = 18
 	}
 	if maxVisible > 0 && len(out) > maxVisible {
-		out = selectRelevantTools(out, m.latestUserRequest(), maxVisible)
+		keep := make([]tools.Tool, 0, len(pinned))
+		rest := make([]tools.Tool, 0, len(out))
+		for _, t := range out {
+			if pinned[t.Function.Name] {
+				keep = append(keep, t)
+			} else {
+				rest = append(rest, t)
+			}
+		}
+		out = keep
+		if room := maxVisible - len(keep); room > 0 {
+			out = append(out, selectRelevantTools(rest, m.latestUserRequest(), min(room, len(rest)))...)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
 	}
 	return out
+}
+
+// pinnedToolNames returns the tools that make each mode's state machine usable.
+// These names are still subject to registry, mode-policy and repeat-guard
+// filtering; pinning only exempts them from schema-budget pruning.
+func pinnedToolNames(mode Mode) map[string]bool {
+	pinned := map[string]bool{"switch_mode": true}
+	if mode == PlanMode {
+		pinned["ask_user"] = true
+		pinned["read_session_notes"] = true
+		pinned["update_session_notes"] = true
+		pinned["append_session_notes"] = true
+	}
+	return pinned
 }
 
 // latestUserRequest is the relevance query for selectRelevantTools, so it has

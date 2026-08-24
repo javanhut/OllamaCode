@@ -1145,3 +1145,45 @@ func TestLoopGuardModalRendersReasonAndChoices(t *testing.T) {
 		t.Fatalf("stagnation must not offer a ban choice:\n%s", out)
 	}
 }
+
+// A model repeating itself keeps the connection healthy, so no idle timeout
+// ever fires. The output itself has to be the signal.
+func TestStreamOutputRunaway(t *testing.T) {
+	// Varied prose: every line differs, so no fragment recurs.
+	var prose strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&prose, "step %d covers tui/mode.go and the policy table for case %d.\n", i, i*7)
+	}
+	if streamOutputRunaway(prose.String(), false) {
+		t.Error("ordinary long prose flagged as a loop")
+	}
+	if streamOutputRunaway("", false) || streamOutputRunaway("short answer", false) {
+		t.Error("short content flagged as a loop")
+	}
+	loop := strings.Repeat(`{"name":"switch_mode","arguments":{"mode":"write"}}`, 10)
+	if !streamOutputRunaway(loop, false) {
+		t.Error("repeated switch_mode transport not flagged")
+	}
+	repeated := strings.Repeat("I will now check the file to understand the structure. ", 40)
+	if !streamOutputRunaway(repeated, false) {
+		t.Error("a phrase repeated 40 times not flagged")
+	}
+	// A constrained reply is one call or one short envelope; its ceiling is
+	// low enough that varied output past it still counts as a runaway.
+	if !streamOutputRunaway(prose.String(), true) {
+		t.Error("constrained reply past its ceiling not flagged")
+	}
+	// A long answer that repeats the same boilerplate line a few times across
+	// the whole reply is not a loop — only a repeat at the tail is.
+	var listing strings.Builder
+	for i := range 400 {
+		if i%80 == 0 {
+			listing.WriteString("\tif err != nil {\n\t\treturn fmt.Errorf(\"read config: %w\", err)\n\t}\n")
+			continue
+		}
+		fmt.Fprintf(&listing, "line %d of the listing, unique content for symbol_%d\n", i, i)
+	}
+	if streamOutputRunaway(listing.String(), false) {
+		t.Error("repeated boilerplate spread across a long answer flagged as a loop")
+	}
+}

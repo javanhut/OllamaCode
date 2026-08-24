@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,45 @@ func TestForget(t *testing.T) {
 	st, lt := store.Recall("")
 	if len(st) != 0 || len(lt) != 1 || lt[0].Content != "beta" {
 		t.Errorf("after forget, expected only 'beta' in long-term, got %+v %+v", st, lt)
+	}
+}
+
+// Every prompt carries the long-term summary, so it has to be a bounded working
+// set: newest entries win, duplicates collapse, and the whole store stays
+// searchable through Recall.
+func TestLongTermSummaryIsBounded(t *testing.T) {
+	store, err := New(filepath.Join(t.TempDir(), "mem.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range maxInjectedLongTermEntries * 2 {
+		if _, err := store.Remember(fmt.Sprintf("note %02d", i), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A duplicate of the newest note must not consume a second slot.
+	if _, err := store.Remember(fmt.Sprintf("note %02d", maxInjectedLongTermEntries*2-1), true); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := store.LongTermSummary()
+	lines := strings.Split(summary, "\n")
+	if len(lines) > maxInjectedLongTermEntries {
+		t.Errorf("summary injected %d entries, cap is %d", len(lines), maxInjectedLongTermEntries)
+	}
+	if len(summary) > maxInjectedLongTermChars {
+		t.Errorf("summary is %d chars, cap is %d", len(summary), maxInjectedLongTermChars)
+	}
+	if !strings.Contains(summary, "note 23") {
+		t.Error("newest note was dropped from the working set")
+	}
+	if strings.Contains(summary, "note 00") {
+		t.Error("oldest note survived the cap")
+	}
+	if got := strings.Count(summary, "note 23"); got != 1 {
+		t.Errorf("duplicate note appears %d times", got)
+	}
+	if _, lt := store.Recall(""); len(lt) < maxInjectedLongTermEntries*2 {
+		t.Errorf("Recall lost entries: %d in the store", len(lt))
 	}
 }

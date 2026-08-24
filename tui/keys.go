@@ -136,6 +136,50 @@ func (m *Model) cycleSettingsFocus(step int) {
 	m.focusSettingsField(fields[(i+step+len(fields))%len(fields)])
 }
 
+// updateJobs drives the /jobs modal: a flat list of background shell jobs and
+// sub-agent jobs with a per-row kill. Killing needs no confirmation — the jobs
+// are user-started and SIGKILL/cancel is the existing semantic everywhere else
+// (shell_output(kill=true), esc during a sub-agent run).
+func (m *Model) updateJobs(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	rows := m.jobRows()
+	switch msg.String() {
+	case "up", "k":
+		if m.jobsCursor > 0 {
+			m.jobsCursor--
+		}
+	case "down", "j":
+		if m.jobsCursor < len(rows)-1 {
+			m.jobsCursor++
+		}
+	case "x", "d":
+		if len(rows) == 0 || m.jobsCursor >= len(rows) {
+			return m, nil
+		}
+		row := rows[m.jobsCursor]
+		switch {
+		case row.done:
+			m.toast = fmt.Sprintf("job %d already finished", row.id)
+		case row.shell:
+			if _, err := jobRegistry().Cancel(row.id); err != nil {
+				m.toast = err.Error()
+			} else {
+				m.toast = fmt.Sprintf("job %d killed", row.id)
+			}
+		case m.subagents != nil && m.subagents.cancel(row.id):
+			m.toast = fmt.Sprintf("sub-agent job %d cancelled", row.id)
+		default:
+			m.toast = fmt.Sprintf("no running sub-agent job %d", row.id)
+		}
+	case "r":
+		// The rows are read live on every paint; this is just an explicit nudge.
+		m.toast = "refreshed"
+	case "esc", "q", "enter":
+		m.state = stateChat
+		m.input.Focus()
+	}
+	return m, nil
+}
+
 func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// A pull is streaming: only allow cancel.
 	if m.pulling {
@@ -1014,6 +1058,24 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/stats":
 			m.input.Reset()
 			m.state = stateStats
+			return m, nil
+		case "/compact":
+			m.input.Reset()
+			// force: the user asked for it, so a pruning pass that happens to clear
+			// the automatic threshold must not cancel the summary they wanted.
+			if cmd := m.compactContext(true); cmd != nil {
+				return m, cmd // the toast is set inside compactContext
+			}
+			if m.compacting {
+				m.toast = "already compacting"
+			} else {
+				m.toast = "history too short to compact"
+			}
+			return m, nil
+		case "/jobs":
+			m.input.Reset()
+			m.jobsCursor = 0
+			m.state = stateJobs
 			return m, nil
 		case "/show_thinking", "/thinking":
 			m.input.Reset()

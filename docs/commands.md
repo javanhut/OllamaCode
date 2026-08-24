@@ -220,6 +220,8 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/diff` | View the last turn's diffs full-screen |
 | `/copy` | Copy the last response to the clipboard |
 | `/stats` | Timing and token totals |
+| `/jobs` | List background shell and sub-agent jobs; `x` kills the highlighted one |
+| `/compact` | Compress the older half of the history into a summary now |
 
 ### Notes and memory
 

@@ -48,6 +48,8 @@ var slashCommands = []struct {
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 	{"/stats", "session timing and token totals"},
+	{"/jobs", "list and kill background shell and sub-agent jobs"},
+	{"/compact", "compress older history into a summary now"},
 	{"/show_thinking", "toggle live and saved model reasoning"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
@@ -136,6 +138,8 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.diffModal()))
 	case stateStats:
 		v.SetContent(m.overlayModal(base, m.statsModal()))
+	case stateJobs:
+		v.SetContent(m.overlayModal(base, m.jobsModal()))
 	default:
 		v.SetContent(base)
 	}

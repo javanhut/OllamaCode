@@ -3,6 +3,7 @@ package tui
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"path/filepath"
@@ -78,6 +79,53 @@ func streamRetryable(err error) bool {
 		return false
 	}
 	return true
+}
+
+// errRunawayModelStream ends a stream that is still emitting tokens but has
+// stopped saying anything new. It rides the normal stream-error path so the
+// turn gets the usual one retry rather than a special-cased recovery.
+var errRunawayModelStream = errors.New("model output loop detected — response stopped making progress")
+
+// streamOutputRunaway catches a model that is still producing tokens but has
+// stopped making progress. Idle timeouts cannot see this failure mode: the
+// connection is healthy, the transcript is just filling with the same bytes.
+func streamOutputRunaway(content string, constrained bool) bool {
+	limit := 64 * 1024
+	if constrained {
+		// A constrained reply is one tool call or one short prose envelope.
+		// Anything near this size is already a loop.
+		limit = 8 * 1024
+	}
+	if len(content) > limit {
+		return true
+	}
+	if len(content) < 384 {
+		return false
+	}
+	for _, marker := range []string{`\"mode\":\"write\"`, `"mode":"write"`, `\"name\":\"switch_mode\"`, `"name":"switch_mode"`} {
+		if strings.Count(content, marker) >= 4 {
+			return true
+		}
+	}
+	// Sample several suffix positions so chunk boundaries do not hide a repeated
+	// phrase. Four prior copies of a 64-byte fragment is strong loop evidence.
+	// The search is limited to the recent tail: a real loop repeats NOW, while a
+	// long legitimate answer may well contain the same boilerplate line four
+	// times over 60KB and must not be killed for it.
+	// ponytail: O(window) substring scans per chunk at 30 Hz; index the tail if
+	// the window ever grows.
+	const window = 8 * 1024
+	for offset := 0; offset <= 48; offset += 16 {
+		end := len(content) - offset
+		if end < 64 {
+			continue
+		}
+		fragment := content[end-64 : end]
+		if strings.Count(content[max(0, end-64-window):end-64], fragment) >= 4 {
+			return true
+		}
+	}
+	return false
 }
 
 func maxStepsFromConfig(c config) int {

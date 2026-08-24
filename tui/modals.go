@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/jobs"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -302,6 +303,100 @@ func (m *Model) pickerModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// jobRow is one row in the /jobs modal: a background shell job
+// (run_shell background=true) or a background sub-agent job.
+// jobRegistry is the job source for the /jobs modal. It is a variable so tests
+// can point the modal at a fresh registry: the process registry is global and
+// keeps finished jobs forever, so one test starting a background shell would
+// otherwise show up in every later test's rows.
+var jobRegistry = jobs.Default
+
+type jobRow struct {
+	shell  bool // true = shell job; false = sub-agent job
+	id     int
+	done   bool
+	status string // "running (…)" / "exited N" / "done (…)"
+	text   string // command line or task summary
+}
+
+// jobRows snapshots both job registries. Both keep finished jobs on purpose,
+// so the modal doubles as a "what ran" list, not just a kill switch.
+func (m *Model) jobRows() []jobRow {
+	var rows []jobRow
+	// Shell jobs live in the unified registry (internal/jobs); their label is
+	// already the one-line form of the command, so a heredoc or multi-line
+	// script cannot wreck the list layout.
+	for _, j := range jobRegistry().List() {
+		if j.Kind() != jobs.KindShell {
+			continue
+		}
+		rows = append(rows, jobRow{
+			shell:  true,
+			id:     j.ID(),
+			done:   j.State() != jobs.StatusRunning,
+			status: j.StatusLine(),
+			text:   j.Label(),
+		})
+	}
+	if m.subagents != nil {
+		for _, j := range m.subagents.all() {
+			done, _, _ := j.snapshot()
+			tasks := "1 task"
+			if len(j.tasks) != 1 {
+				tasks = fmt.Sprintf("%d tasks", len(j.tasks))
+			}
+			rows = append(rows, jobRow{id: j.id, done: done, status: j.statusLine(), text: tasks + ": " + strings.Join(j.tasks, " | ")})
+		}
+	}
+	return rows
+}
+
+// jobsModal lists background shell and sub-agent jobs, mirroring the model
+// picker's scrollable-list chrome.
+func (m *Model) jobsModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Background jobs", "esc", innerW))
+	b.WriteString("\n\n")
+
+	rows := m.jobRows()
+	if len(rows) == 0 {
+		b.WriteString(modalMutedStyle.Render(truncatePlain("no background jobs — run_shell background jobs and sub-agents show up here", innerW)))
+		b.WriteString("\n")
+	} else {
+		if m.jobsCursor >= len(rows) {
+			m.jobsCursor = len(rows) - 1
+		}
+		view := pickerWindow(len(rows), m.jobsCursor, 8)
+		for i := view.start; i < view.end; i++ {
+			r := rows[i]
+			kind := "agent"
+			if r.shell {
+				kind = "shell"
+			}
+			row := truncatePlain(fmt.Sprintf("#%-3d %-5s %-24s %s", r.id, kind, r.status, r.text), innerW-4)
+			if i == m.jobsCursor {
+				b.WriteString("  " + modalSelectStyle.Render(padCell(" "+row+" ", innerW-2)))
+			} else {
+				b.WriteString("   " + modalBodyStyle.Render(padCell(row, innerW-3)))
+			}
+			b.WriteString("\n")
+		}
+		if view.start > 0 || view.end < len(rows) {
+			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("   %d / %d", m.jobsCursor+1, len(rows))))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
+		modalMutedStyle.Render("   x/d ") + modalBodyStyle.Render("kill") +
+		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh") +
+		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("close"))
+	return modalStyle.Width(w).Render(b.String())
+}
+
 // pullErrorHint maps the common /api/pull failure modes to actionable guidance,
 // since the daemon's raw error ("file does not exist", "unauthorized") rarely
 // tells the user what to actually do. Returns "" when nothing useful applies.
@@ -568,7 +663,7 @@ func (m *Model) questionModal() string {
 	innerW := m.modalInner()
 
 	lines := []string{m.modalHeader("The model is asking", "esc=type instead", innerW), ""}
-	for _, line := range strings.Split(ansi.Wrap(m.question.Question, innerW, ""), "\n") {
+	for line := range strings.SplitSeq(ansi.Wrap(m.question.Question, innerW, ""), "\n") {
 		lines = append(lines, modalBodyStyle.Render(line))
 	}
 	lines = append(lines, "")

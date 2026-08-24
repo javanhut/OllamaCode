@@ -23,6 +23,13 @@ type streamState struct {
 	modelSource string // "local" or "cloud" — set at stream start for error diagnosis
 	gen         int    // turn generation this stream belongs to
 	constrained bool   // request carried a small-tier constrained-decoding format
+	// visibility/hideContent classify the reply's transport ONCE, on the first
+	// non-blank chunk: a reply that opens as JSON or a tool-call tag is machinery,
+	// not an answer, and painting it live spelled the raw envelope into the
+	// transcript token by token. It is still buffered — completion decides what
+	// (if anything) of it is prose.
+	visibility  bool
+	hideContent bool
 	// toolsSuppressed records that this request's tools were withheld by
 	// suppressToolsOnce (a loop guard or the step budget), not merely absent.
 	// The reply is read back against it: a tool call in a reply to a request we
@@ -34,6 +41,18 @@ type streamState struct {
 // A 30 Hz terminal paint is quick enough to look continuous while leaving
 // enough room for layout and input handling on large transcripts.
 const streamRenderInterval = time.Second / 30
+
+// likelyStructuredOutput reports whether a reply opens with transport rather
+// than prose. Judged on the leading characters only: an answer that merely
+// contains a JSON block later still renders normally.
+func likelyStructuredOutput(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") ||
+		strings.HasPrefix(trimmed, "<tool_call") || strings.HasPrefix(trimmed, "<function=")
+}
 
 // pullStreamState tracks an in-flight model download driven from the picker.
 
