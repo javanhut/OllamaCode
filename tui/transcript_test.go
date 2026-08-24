@@ -206,7 +206,7 @@ func TestStreamMarkdownRewrapsOnResize(t *testing.T) {
 	if narrow == wide {
 		t.Fatal("resize did not re-render the stable prefix")
 	}
-	for _, line := range strings.Split(ansi.Strip(narrow), "\n") {
+	for line := range strings.SplitSeq(ansi.Strip(narrow), "\n") {
 		if w := ansi.StringWidth(strings.TrimRight(line, " ")); w > 60 {
 			t.Fatalf("line %d wide after resize to 60: %q", w, line)
 		}

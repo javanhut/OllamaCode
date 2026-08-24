@@ -30,6 +30,14 @@ type streamState struct {
 	// (if anything) of it is prose.
 	visibility  bool
 	hideContent bool
+	// promptTokens is the assembled prompt's estimated size, and firstTokenBy the
+	// deadline it buys: the model may still be loading, and prefill is linear in
+	// prompt size, so a healthy request can sit silent for minutes before its
+	// first token. Later chunks fall back to modelStreamIdleTimeout as this
+	// deadline passes. Both are set at stream start and never written again —
+	// waitForStream reads them from its goroutine.
+	promptTokens int
+	firstTokenBy time.Time
 	// toolsSuppressed records that this request's tools were withheld by
 	// suppressToolsOnce (a loop guard or the step budget), not merely absent.
 	// The reply is read back against it: a tool call in a reply to a request we
@@ -302,6 +310,12 @@ func (m *Model) waitForStream() tea.Cmd {
 	if s == nil {
 		return nil
 	}
+	// Silence before the first token is prefill, not a stalled connection: hold
+	// the longer deadline until it lapses, then fall back to the flat idle gap.
+	idle := modelStreamIdleTimeout
+	if remaining := time.Until(s.firstTokenBy); remaining > idle {
+		idle = remaining
+	}
 	return func() tea.Msg {
 		select {
 		case chunk, ok := <-s.resp:
@@ -343,13 +357,13 @@ func (m *Model) waitForStream() tea.Cmd {
 				return chatDoneMsg{gen: s.gen}
 			}
 			return chatErrMsg{gen: s.gen, err: err}
-		case <-time.After(modelStreamIdleTimeout):
+		case <-time.After(idle):
 			if s.cancel != nil {
 				s.cancel()
 			}
-			err := fmt.Errorf("stream idle timeout after %s — no response from model", modelStreamIdleTimeout)
+			err := fmt.Errorf("stream idle timeout after %s — no response from model", idle.Round(time.Second))
 			if s.modelSource != "" {
-				err = fmt.Errorf("stream idle timeout after %s — no response from %s model", modelStreamIdleTimeout, s.modelSource)
+				err = fmt.Errorf("stream idle timeout after %s — no response from %s model", idle.Round(time.Second), s.modelSource)
 			}
 			return chatErrMsg{gen: s.gen, err: err}
 		}
@@ -534,7 +548,10 @@ func (m *Model) startStream() tea.Cmd {
 	if strings.Contains(m.host.URL(), "ollama.com") {
 		source = "cloud"
 	}
-	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen, constrained: constrained, toolsSuppressed: suppressed}
+	promptTokens := estimateMsgsTokens(msgs)
+	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen,
+		constrained: constrained, toolsSuppressed: suppressed,
+		promptTokens: promptTokens, firstTokenBy: time.Now().Add(prefillBudget(promptTokens))}
 	m.streaming = true
 	m.streamBuf.Reset()
 	m.thinkTail = ""
@@ -672,3 +689,18 @@ COMMUNICATION:
 - Lead with the result or the evidence that determines the next action.
 - Keep progress updates brief. Avoid filler, canned enthusiasm, repeated summaries, and theatrical certainty.
 - Be firm about actual risk and gentle with the person. Humor is optional; correctness is not.`
+
+// prefillBudget is how long the first token of a reply may take. The model may
+// still be loading, and prefill is linear in prompt size: a resumed session of
+// 77k tokens spends ~4 minutes on a big local model before it emits anything,
+// and the flat idle timeout used to kill that healthy request just short of its
+// first token. The rate floor is deliberately pessimistic — waiting on a slow
+// box beats hanging up on work in progress, and esc still interrupts.
+func prefillBudget(promptTokens int) time.Duration {
+	return modelStreamIdleTimeout + time.Duration(promptTokens/prefillFloorTokensPerSecond)*time.Second
+}
+
+// prefillFloorTokensPerSecond is the slowest prefill we plan for. Measured
+// ~330 tok/s for a 35B model at 77k tokens on Apple silicon; the floor leaves
+// room for a smaller machine or a cold model.
+const prefillFloorTokensPerSecond = 100

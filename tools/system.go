@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -105,11 +106,8 @@ func ParseAskUser(args json.RawMessage) AskUserQuestion {
 	// A recommended label that names no option would mark a row that does not
 	// exist; drop it rather than render a phantom recommendation.
 	if rec := strings.TrimSpace(a.Recommended); rec != "" {
-		for _, opt := range out.Options {
-			if opt == rec {
-				out.Recommended = rec
-				break
-			}
+		if slices.Contains(out.Options, rec) {
+			out.Recommended = rec
 		}
 	}
 	return out

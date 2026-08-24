@@ -46,10 +46,7 @@ func streamRetryDelay(attempt int, err error) time.Duration {
 	if d, ok := api.RetryAfterDelay(err); ok {
 		return min(d, streamRetryProviderMax)
 	}
-	delay := streamRetryBaseDelay << (attempt - 1)
-	if delay > streamRetryMaxDelay {
-		delay = streamRetryMaxDelay
-	}
+	delay := min(streamRetryBaseDelay<<(attempt-1), streamRetryMaxDelay)
 	jitter := 0.75 + rand.Float64()*0.5
 	return time.Duration(float64(delay) * jitter)
 }

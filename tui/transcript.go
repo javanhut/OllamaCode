@@ -296,6 +296,11 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 			phase = " Compacting context..."
 		case m.verifying:
 			phase = " Verifying..."
+		case m.prefilling():
+			// A long prompt is minutes of silence while the model reads it. Left as
+			// "Thinking...", that reads as a hang; the size and the ticking clock
+			// say the request is alive and roughly how long it has to go.
+			phase = fmt.Sprintf(" Reading %dk tokens of context...%s", m.stream.promptTokens/1000, m.elapsedSuffix())
 		}
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(phase))
@@ -498,3 +503,14 @@ func (m *Model) liveMarkdown(s string) string {
 	wrapped := ansi.Wordwrap(tail, max(m.viewport.Width()-6, 20), "")
 	return out + sep + strings.Join(strings.Split(wrapped, "\n"), "\n  ")
 }
+
+// prefilling reports that the turn is waiting on the first token of a prompt
+// big enough for the wait to be measured in minutes.
+func (m *Model) prefilling() bool {
+	return m.stream != nil && m.stream.promptTokens >= prefillNoticeTokens &&
+		m.streamBuf.Len() == 0 && m.thinkTail == ""
+}
+
+// prefillNoticeTokens is where a prompt gets its own status line: below it the
+// wait is short enough that "Thinking..." is honest.
+const prefillNoticeTokens = 16000

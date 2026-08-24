@@ -716,7 +716,7 @@ func (m *Model) loopGuardModal() string {
 		reason = m.loopEscalation.reason()
 		options = loopEscalationOptions(m.loopEscalation)
 	}
-	for _, line := range strings.Split(ansi.Wrap(reason, innerW, ""), "\n") {
+	for line := range strings.SplitSeq(ansi.Wrap(reason, innerW, ""), "\n") {
 		lines = append(lines, modalBodyStyle.Render(line))
 	}
 	lines = append(lines, "")

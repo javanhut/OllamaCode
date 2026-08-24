@@ -280,11 +280,11 @@ func TestFreshnessLedgerRace(t *testing.T) {
 
 	l := NewFreshnessLedger()
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			for j := 0; j < 50; j++ {
+			for range 50 {
 				l.Observe(p)
 				l.RecordMutation([]string{p})
 				_ = l.CheckMutation("edit_file", []string{p})
@@ -306,15 +306,13 @@ func TestFreshnessConcurrentInvokes(t *testing.T) {
 	r := freshnessRegistry()
 	ctx := WithFreshnessLedger(context.Background(), NewFreshnessLedger())
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 20; j++ {
+	for range 4 {
+		wg.Go(func() {
+			for range 20 {
 				_, _ = r.Invoke(ctx, freshnessCall(t, "read_file", map[string]any{"path": p}))
 				_, _ = r.Invoke(ctx, freshnessCall(t, "append_file", map[string]any{"path": p, "content": "x"}))
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

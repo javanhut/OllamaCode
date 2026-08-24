@@ -96,7 +96,7 @@ func loadStash() []stashEntry {
 		return nil
 	}
 	var entries []stashEntry
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if line == "" {
 			continue
 		}

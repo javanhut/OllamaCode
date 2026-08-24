@@ -14,10 +14,7 @@ import (
 func TestStreamRetryDelayBackoffBounds(t *testing.T) {
 	err := errors.New("read: connection reset by peer")
 	for attempt := 1; attempt <= 8; attempt++ {
-		want := streamRetryBaseDelay << (attempt - 1)
-		if want > streamRetryMaxDelay {
-			want = streamRetryMaxDelay
-		}
+		want := min(streamRetryBaseDelay<<(attempt-1), streamRetryMaxDelay)
 		lo, hi := time.Duration(float64(want)*0.74), time.Duration(float64(want)*1.26)
 		for range 50 {
 			got := streamRetryDelay(attempt, err)

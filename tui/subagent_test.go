@@ -775,7 +775,7 @@ func TestSubagentHistoryRetentionCap(t *testing.T) {
 
 	total := maxRetainedSubagentHistories + 2
 	completed := make([]*subagentJob, 0, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if _, err := tool.Handler(context.Background(), json.RawMessage(fmt.Sprintf(`{"task":"task %d"}`, i))); err != nil {
 			t.Fatalf("spawn %d failed: %v", i, err)
 		}
