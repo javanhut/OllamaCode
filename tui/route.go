@@ -215,6 +215,25 @@ func (m *Model) settingsTargets() []string {
 	return append(out, "")
 }
 
+// pickerTargets lists the endpoints /models can browse: the default host, then
+// each provider. No trailing slot — the picker chooses a model, it never creates
+// an endpoint.
+func (m *Model) pickerTargets() []string {
+	return append([]string{""}, slices.Sorted(maps.Keys(m.cfg.Providers))...)
+}
+
+// pickerHost is the endpoint the picker is listing models from, and its provider
+// name. Without this /models could only ever show the endpoint already routed,
+// so a second provider's models were unreachable from the picker.
+func (m *Model) pickerHost() (api.OllamaHost, string) {
+	targets := m.pickerTargets()
+	if m.pickerTarget <= 0 || m.pickerTarget >= len(targets) {
+		return m.defaultHost(), ""
+	}
+	name := targets[m.pickerTarget]
+	return m.providerHost(name), name
+}
+
 // settingsIsNew reports whether the modal is on the "add a provider" slot.
 func (m *Model) settingsIsNew() bool {
 	return m.settingsTarget == len(m.settingsTargets())-1
@@ -240,9 +259,9 @@ func (m *Model) settingsIsProvider() bool {
 // host has no name, env var, or wire format to set.
 func (m *Model) settingsFields() []settingsField {
 	if !m.settingsIsProvider() {
-		return []settingsField{settingsFocusURL, settingsFocusKey}
+		return []settingsField{settingsFocusTarget, settingsFocusURL, settingsFocusKey}
 	}
-	fields := []settingsField{settingsFocusName, settingsFocusURL, settingsFocusKey, settingsFocusEnv, settingsFocusNative}
+	fields := []settingsField{settingsFocusTarget, settingsFocusName, settingsFocusURL, settingsFocusKey, settingsFocusEnv, settingsFocusNative}
 	// Trust only means anything for the Cursor agent; the HTTP kinds have no
 	// workspace to trust.
 	if m.settingsKind == api.ProviderCursor {
@@ -270,7 +289,7 @@ func (m *Model) loadSettingsInputs() {
 	default:
 		set("", m.cfg.Host, m.cfg.APIKey, "", api.ProviderOpenAI, false)
 	}
-	m.focusSettingsField(m.settingsFields()[0])
+	m.focusSettingsField(m.settingsFields()[1])
 }
 
 // validProviderName rejects names that would break route specs: the colon
@@ -636,21 +655,31 @@ func (m *Model) showRoutes() {
 	m.viewport.GotoBottom()
 }
 
-const providerUsage = "usage: /provider new · /provider <name> to edit · /provider remove <name> — no args lists them"
+const providerUsage = "usage: /provider opens the modal · /provider <name> to edit · /provider list · /provider remove <name>"
 
 // providerCommand implements /provider. Adding and editing happen in the
 // connection modal, not on this line: an API key typed here would be visible on
 // screen and recallable from input history.
 func (m *Model) providerCommand(args string) {
 	fields := strings.Fields(args)
+	// Bare /provider goes straight into the modal — it is the list, with a row
+	// per endpoint and a trailing blank one. Printing a text list first and
+	// asking for a second command was a hop with nothing in it.
 	if len(fields) == 0 {
-		m.showProviders()
+		if len(m.cfg.Providers) == 0 {
+			m.openSettings(newProviderTarget)
+		} else {
+			m.openSettings(slices.Sorted(maps.Keys(m.cfg.Providers))[0])
+		}
 		return
 	}
 
 	switch fields[0] {
 	case "new", "add":
 		m.openSettings(newProviderTarget)
+
+	case "list", "ls":
+		m.showProviders()
 
 	case "key", "edit":
 		if len(fields) != 2 {

@@ -148,9 +148,8 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Next / previous field |
-| `↑` / `↓` | Switch endpoint (default host, each provider, + new provider) |
-| `Space` / `←` / `→` | Cycle the wire format on the Wire row; toggle the Trust row |
+| `↑` / `↓` or `Tab` / `Shift+Tab` | Next / previous field |
+| `Space` / `←` / `→` | Change the focused row: Endpoint (default host, each provider, + new provider), Wire format, Trust |
 | `Enter` | Save and test the selected endpoint |
 | `Ctrl+D` | Delete the selected provider |
 | `Esc` | Cancel |
@@ -160,8 +159,9 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 | Key | Action |
 |---|---|
 | `↑` / `↓` or `k` / `j` | Move |
-| `Enter` | Select |
-| `p` | Pull a new model, with live progress |
+| `←` / `→` | List a different endpoint (default host, then each provider) |
+| `Enter` | Select — a provider's model is stored as `<provider>:<model>` |
+| `p` | Pull a new model, with live progress (default host only) |
 | `r` | Refresh the list |
 | `Esc` | Close |
 
@@ -182,8 +182,9 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 | `/route <mode> <spec>` | Bind a model to a mode |
 | `/route <mode> off` | Unbind one mode |
 | `/route off` | Disable routing entirely |
-| `/provider` | List configured endpoints |
-| `/provider new` | Add one (modal) |
+| `/provider` | Open the endpoint modal |
+| `/provider new` | Open it on the blank slot |
+| `/provider list` | Print configured endpoints |
 | `/provider <name>` | Edit one (modal) |
 | `/provider remove <name>` | Delete it and any routes bound to it |
 | `/settings` | Edit the default host's URL and key |

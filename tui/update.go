@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -105,7 +106,38 @@ func droppedToolCallNotice(calls []tools.ToolCall) string {
 	return fmt.Sprintf("[TOOL CALL DROPPED] Tools were disabled for that message, so your %s call was NOT executed — nothing ran and no result is coming. Reply in plain text: answer with what you already know, or state your blocker.", name)
 }
 
+// promptState raises a prompt modal — permission, question, loop guard — but
+// only when the user is not already inside a modal of their own. Stomping the
+// endpoint modal mid-typing throws away everything typed into it, and answering
+// the prompt drops you back at chat, not at the half-filled form. Held prompts
+// come up the moment that modal closes (see resumeDeferredPrompt).
+func (m *Model) promptState(s state) {
+	if m.state != stateChat {
+		m.deferredPrompt = s
+		return
+	}
+	m.state = s
+}
+
+// resumeDeferredPrompt shows a prompt that arrived while a modal was open. It
+// runs on every Update return, so the prompt appears on the same keystroke that
+// closed the modal. stateSettings is the zero value and means "nothing held".
+func (m *Model) resumeDeferredPrompt() {
+	if m.deferredPrompt == stateSettings || m.state != stateChat {
+		return
+	}
+	s := m.deferredPrompt
+	m.deferredPrompt = stateSettings
+	// The turn can be cancelled while the modal is up (ctrl+c, /clear, a branch
+	// rewind), which leaves nothing to approve.
+	if s == statePermission && m.pending == nil {
+		return
+	}
+	m.state = s
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	defer m.resumeDeferredPrompt()
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -280,11 +312,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dismissMention()
 			return m, nil
 		}
-		// Not at a permission prompt: there, esc means "deny this call" and is
-		// handled by updatePermission, not by cancelling the whole turn. Same for
-		// the jobs modal, which can be opened mid-turn: esc closes it.
+		// Only from chat: inside any modal esc means "close this", not "cancel the
+		// turn" — at a permission prompt it means "deny this call" (updatePermission),
+		// and the jobs and endpoint modals can both be opened mid-turn.
 		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil &&
-			m.state != statePermission && m.state != stateJobs {
+			m.state == stateChat {
 			m.cancelSubagents()
 			return m, m.interruptTurn()
 		}
@@ -497,9 +529,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		m.statusErr = false
 		m.picker = 0
+		// A list can arrive from the endpoint modal too, so take the picker's
+		// endpoint from the list rather than assuming ←→ put it there.
+		if i := slices.Index(m.pickerTargets(), msg.from); i >= 0 {
+			m.pickerTarget = i
+		}
 		// Land the cursor on the just-pulled model if we have one, otherwise on
-		// the currently selected model.
-		_, cursorTo := m.splitRouteSpec(m.cfg.Model)
+		// the configured default — but only when it lives on the endpoint being
+		// listed, or browsing a provider highlights a same-named model elsewhere.
+		cursorTo := ""
+		if provider, bare := m.splitRouteSpec(m.cfg.Model); provider == msg.from {
+			cursorTo = bare
+		}
 		if m.pullSelect != "" {
 			cursorTo = m.pullSelect
 			m.pullSelect = ""
@@ -568,6 +609,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.urlInput.Focus()
 			}
+		} else if m.state == stateModelPicker {
+			m.models = nil // the previous endpoint's list is not this one's
 		} else {
 			m.lastError = fmt.Sprintf("connect failed: %v", msg.err)
 			m.refreshTranscript()
@@ -1367,7 +1410,9 @@ func (m *Model) waitForPull() tea.Cmd {
 	}
 }
 
-func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.host, m.activeProvider()) }
+// fetchModels lists from whichever endpoint the picker is pointed at, so ←→ in
+// /models browses every configured provider instead of only the routed one.
+func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.pickerHost()) }
 
 // fetchModelsFrom lists models from a specific endpoint, so the settings modal
 // can verify the endpoint it just saved rather than whichever one is routed.

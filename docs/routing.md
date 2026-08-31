@@ -59,9 +59,11 @@ The prefix is part of the identity, not decoration. **A model name stored
 without its provider resolves against the default host**, which is how you get a
 404 from your local daemon for a model only the provider has.
 
-That means the model picker records where a list came from. Open `/models` while
-plan mode is routed to Cursor, pick one, and the default becomes
-`cursor:<model>` — not the bare name. `/model use` accepts either form:
+That means the model picker records where a list came from. `/models` opens on
+the endpoint you are routed to and `←→` walk the rest — default host, then each
+provider — so the default model can be set from any of them, not just the one
+already in use. Pick a Cursor model and the default becomes `cursor:<model>`,
+not the bare name. `/model use` accepts either form:
 
 ```
 /model use qwen3-coder:30b
@@ -77,11 +79,11 @@ configured endpoint. The prefix only counts when it names a provider that
 actually exists — `qwen3-coder:30b` stays a model name, `lmstudio:qwen3-coder:30b`
 does not.
 
-Add one with `/provider new`, which opens the connection modal:
+Add one with `/provider`, which opens the connection modal:
 
 ```
 ┌─ Endpoints                                            esc ─┐
-│  ↑↓ ‹ + new provider ›  3/3                                │
+│  Endpoint  ‹ + new provider ›  3/3                         │
 │                                                            │
 │  Name  openrouter                                          │
 │  URL   https://openrouter.ai/api/v1                        │
@@ -90,9 +92,14 @@ Add one with `/provider new`, which opens the connection modal:
 │  Wire  ‹ openai (/v1/chat/completions) ›  space            │
 │  $OPENROUTER_API_KEY is set — it overrides this field      │
 │                                                            │
-│  tab field  ↑↓ endpoint  enter save & test  ctrl+d delete  │
+│  ↑↓ field  ←→ change  enter save & test  ctrl+d delete     │
 └────────────────────────────────────────────────────────────┘
 ```
+
+`↑↓` walk the rows; `←→` change whichever row is focused, including **Endpoint**
+— that one reloads the form, so it never happens by accident while typing. A
+permission prompt or question arriving mid-edit waits for the modal to close
+instead of replacing it.
 
 `enter` saves and immediately lists models from the endpoint you just edited —
 a model list coming back is proof the key works.
@@ -103,8 +110,9 @@ secret never reaches `config.json`.
 
 | | |
 |---|---|
-| `/provider` | list what's configured |
-| `/provider new` | blank slot |
+| `/provider` | open the modal |
+| `/provider new` | open it on the blank slot |
+| `/provider list` | print what's configured |
 | `/provider <name>` | edit that one |
 | `/provider remove <name>` | delete it, and any routes bound to it |
 

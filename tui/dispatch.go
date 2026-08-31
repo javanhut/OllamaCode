@@ -251,7 +251,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 				// where this call's placeholder landed so a picked answer can
 				// rewrite it as the tool result (see applyQuestionAnswer).
 				m.questionResult = len(m.history) - len(batchResults) + questionIndex
-				m.state = stateQuestion
+				m.promptState(stateQuestion)
 			}
 			m.pauseForUser("waiting for your answer", "awaiting_user_answer")
 			m.finalizeCheckpoint(m.lastUserMessage())
@@ -348,7 +348,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 				m.loopEscalation = nil
 				m.applyLoopGuardStops(esc)
 			} else {
-				m.state = stateLoopGuard
+				m.promptState(stateLoopGuard)
 				m.toast = "agent appears stuck"
 				m.refreshTranscript()
 				m.viewport.GotoBottom()
@@ -557,7 +557,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 					m.pending.preview += m.routeNote(req.target)
 				}
 			}
-			m.state = statePermission
+			m.promptState(statePermission)
 			m.refreshTranscript()
 			break
 		}

@@ -180,6 +180,7 @@ func (m *Model) rewindTo(cut int) {
 	m.pending = nil
 	m.streamBuf.Reset()
 	m.streamThinking.Reset()
+	m.deferredPrompt = stateSettings // nothing left to approve or answer
 	if m.state == statePermission {
 		m.state = stateChat
 	}

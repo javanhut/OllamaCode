@@ -119,7 +119,8 @@ const (
 type settingsField int
 
 const (
-	settingsFocusName settingsField = iota
+	settingsFocusTarget settingsField = iota // which endpoint is being edited
+	settingsFocusName
 	settingsFocusURL
 	settingsFocusKey
 	settingsFocusEnv
@@ -296,11 +297,13 @@ type Model struct {
 	envInput        textinput.Model // env var holding the provider's key
 	settingsFocus   settingsField
 	settingsTarget  int    // index into settingsTargets(); 0 = default host, last = new provider
+	deferredPrompt  state  // prompt that arrived while a modal was open; stateSettings = none
 	settingsKind    string // wire format of the provider being edited
 	settingsTrust   bool   // cursor providers only: pass --trust
 	models          []string
 	modelsFrom      string // provider the model list came from; "" = default host
 	picker          int
+	pickerTarget    int    // index into pickerTargets(); which endpoint /models is listing
 	pickerPurpose   string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
 	pairLocalModel  string
 	pairCursor      string

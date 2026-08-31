@@ -129,7 +129,7 @@ func (m *Model) submit() tea.Cmd {
 	if !approvedOffloadedPlan {
 		if offer, reasons := m.shouldOfferEscalation(value); offer {
 			m.routeAsk, m.routeReasons = value, reasons
-			m.state = stateRouteConfirm
+			m.promptState(stateRouteConfirm)
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			return tea.Batch(cmds...)
@@ -212,6 +212,7 @@ func (m *Model) interruptTurn() tea.Cmd {
 	m.finishTurnClock() // bank what the cancelled turn cost before the reset
 	m.resetTurnGuards()
 	m.streamBuf.Reset()
+	m.deferredPrompt = stateSettings // nothing left to approve or answer
 	if m.state == statePermission {
 		m.state = stateChat
 	}

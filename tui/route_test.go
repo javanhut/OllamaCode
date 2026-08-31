@@ -9,8 +9,11 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 
+	tea "charm.land/bubbletea/v2"
+
 	"charm.land/bubbles/v2/textarea"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 // Profiles are pre-seeded so resolveProfile short-circuits on the cache and the
@@ -377,8 +380,8 @@ func TestSettingsCreatesProvider(t *testing.T) {
 	if !m.settingsIsNew() {
 		t.Fatal("did not land on the new-provider slot")
 	}
-	if len(m.settingsFields()) != 5 {
-		t.Errorf("got %d fields, want name/url/key/env/wire", len(m.settingsFields()))
+	if len(m.settingsFields()) != 6 {
+		t.Errorf("got %d fields, want endpoint/name/url/key/env/wire", len(m.settingsFields()))
 	}
 
 	m.nameInput.SetValue("lmstudio")
@@ -1097,5 +1100,108 @@ func TestPickedAnswerCountsAsPlanReview(t *testing.T) {
 	}
 	if m.planGateBlocks(WriteMode) {
 		t.Fatal("gate stayed shut after the user picked an answer")
+	}
+}
+
+// A permission prompt arriving while the endpoint modal is open must not stomp
+// it — that discards everything typed and leaves the user with nothing to go
+// back to. It waits until the modal closes.
+func TestPromptWaitsForOpenModal(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.input = textarea.New()
+	m.openSettings(newProviderTarget)
+	m.nameInput.SetValue("lmstudio")
+
+	m.pending = &pendingBatch{calls: []tools.ToolCall{{}}}
+	m.promptState(statePermission)
+	if m.state != stateSettings {
+		t.Fatal("permission prompt closed the endpoint modal mid-edit")
+	}
+	if m.nameInput.Value() != "lmstudio" {
+		t.Fatal("typed name was lost")
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.state != statePermission {
+		t.Fatalf("state %v after closing the modal, want the held permission prompt", m.state)
+	}
+
+	// A cancelled turn drops the held prompt instead of raising a modal with
+	// nothing behind it.
+	m.state, m.deferredPrompt, m.pending = stateSettings, statePermission, nil
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.state != stateChat {
+		t.Fatalf("state %v, want chat — the pending batch is gone", m.state)
+	}
+}
+
+// Walking the form with ↑↓ must not switch endpoints: that reloads the inputs
+// and silently wipes whatever was typed.
+func TestSettingsArrowsWalkFieldsNotEndpoints(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.cfg.Providers = map[string]providerConfig{"p": {BaseURL: "u"}}
+	m.openSettings(newProviderTarget)
+	m.nameInput.SetValue("lmstudio")
+
+	target := m.settingsTarget
+	for range 3 {
+		m.updateSettings(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.settingsTarget != target || m.nameInput.Value() != "lmstudio" {
+		t.Fatal("↑↓ switched endpoints and dropped the typed name")
+	}
+
+	m.focusSettingsField(settingsFocusTarget)
+	m.updateSettings(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.settingsTarget == target {
+		t.Fatal("→ on the endpoint row did not switch endpoints")
+	}
+}
+
+// With several providers configured, /models must be able to list any of them —
+// not just whichever endpoint happens to be routed — and a pick keeps the
+// provider prefix so the default model resolves back to the right endpoint.
+func TestPickerBrowsesEveryEndpoint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := settingsModel(t)
+	m.input = textarea.New()
+	m.streamBuf, m.transcript = &strings.Builder{}, &strings.Builder{}
+	m.md, m.notesMd = newMarkdownRenderer(), newMarkdownRenderer()
+	m.cfg.Providers = map[string]providerConfig{
+		"openrouter": {BaseURL: "https://openrouter.ai/api/v1"},
+		"lmstudio":   {BaseURL: "http://localhost:1234/v1"},
+	}
+	if got := m.pickerTargets(); !slices.Equal(got, []string{"", "lmstudio", "openrouter"}) {
+		t.Fatalf("picker endpoints %q, want the default host plus both providers", got)
+	}
+
+	m.state = stateModelPicker
+	m.updatePicker(tea.KeyPressMsg{Code: tea.KeyRight})
+	if _, from := m.pickerHost(); from != "lmstudio" {
+		t.Fatalf("→ listed %q, want lmstudio", from)
+	}
+	m.updatePicker(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if _, from := m.pickerHost(); from != "" {
+		t.Fatalf("← listed %q, want the default host", from)
+	}
+
+	// A list arriving from the endpoint modal moves the picker with it, so ←→
+	// carries on from where the list actually came from.
+	m.Update(modelsLoadedMsg{models: []string{"gpt-5"}, from: "openrouter"})
+	if _, from := m.pickerHost(); from != "openrouter" {
+		t.Fatalf("picker endpoint %q, want openrouter", from)
+	}
+
+	m.updatePicker(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.cfg.Model != "openrouter:gpt-5" {
+		t.Fatalf("default model %q, want the provider-qualified spec", m.cfg.Model)
 	}
 }

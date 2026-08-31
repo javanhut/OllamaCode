@@ -28,20 +28,28 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		m.cycleSettingsFocus(-1)
 		return m, nil
-	case "up", "down":
-		// No textinput binds up/down, so they're free to switch which endpoint is
-		// being edited. Unsaved edits to the current one are dropped.
-		targets := m.settingsTargets()
-		step := 1
-		if msg.String() == "up" {
-			step = -1
-		}
-		m.settingsTarget = (m.settingsTarget + step + len(targets)) % len(targets)
-		m.loadSettingsInputs()
-		m.statusMsg = ""
-		m.statusErr = false
+	case "up":
+		m.cycleSettingsFocus(-1)
+		return m, nil
+	case "down":
+		m.cycleSettingsFocus(1)
 		return m, nil
 	case " ", "left", "right":
+		// Switching endpoints drops whatever is typed, so it lives on its own
+		// focusable row: ↑↓ walking the form can no longer wipe it by accident.
+		if m.settingsFocus == settingsFocusTarget {
+			targets := m.settingsTargets()
+			step := 1
+			if msg.String() == "left" {
+				step = -1
+			}
+			m.settingsTarget = (m.settingsTarget + step + len(targets)) % len(targets)
+			m.loadSettingsInputs()
+			m.focusSettingsField(settingsFocusTarget)
+			m.statusMsg = ""
+			m.statusErr = false
+			return m, nil
+		}
 		if m.settingsFocus == settingsFocusTrust {
 			m.settingsTrust = !m.settingsTrust
 			return m, nil
@@ -56,7 +64,7 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// The Trust row only exists for the cursor kind; cycling away from it
 			// would otherwise strand focus on a row that is no longer rendered.
 			if !slices.Contains(m.settingsFields(), m.settingsFocus) {
-				m.focusSettingsField(m.settingsFields()[0])
+				m.focusSettingsField(settingsFocusNative)
 			}
 			return m, nil
 		}
@@ -84,7 +92,7 @@ func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.keyInput, cmd = m.keyInput.Update(msg)
 	case settingsFocusEnv:
 		m.envInput, cmd = m.envInput.Update(msg)
-	case settingsFocusNative: // toggle row: nothing to type into
+	case settingsFocusTarget, settingsFocusNative, settingsFocusTrust: // selector rows: nothing to type into
 	default:
 		m.urlInput, cmd = m.urlInput.Update(msg)
 	}
@@ -224,6 +232,23 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.picker++
 		}
 		return m, nil
+	case "left", "right":
+		// Browse another endpoint's models. The pairing flow is mid-way through a
+		// two-step choice and owns which endpoint it lists.
+		targets := m.pickerTargets()
+		if m.pickerPurpose != "" || len(targets) < 2 {
+			return m, nil
+		}
+		step := 1
+		if msg.String() == "left" {
+			step = -1
+		}
+		m.pickerTarget = (m.pickerTarget + step + len(targets)) % len(targets)
+		m.models = nil
+		m.picker = 0
+		m.statusMsg = "loading…"
+		m.statusErr = false
+		return m, m.fetchModels()
 	case "esc":
 		m.state = stateChat
 		m.input.Focus()
@@ -236,7 +261,7 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.fetchModels()
 	case "p":
-		if m.pickerPurpose == "cursor_pair" {
+		if m.pickerPurpose == "cursor_pair" || m.modelsFrom != "" {
 			return m, nil
 		}
 		m.pullErr = ""
@@ -873,6 +898,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "/models":
 			m.input.Reset()
 			m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
+			m.pickerTarget = max(slices.Index(m.pickerTargets(), m.activeProvider()), 0)
 			m.statusMsg = "refreshing…"
 			m.statusErr = false
 			return m, m.fetchModels()

@@ -94,13 +94,19 @@ func (m *Model) settingsModal() string {
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Endpoints", "esc", innerW))
 	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("↑↓ ") +
-		modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-18, 8))+" ›") +
-		modalMutedStyle.Render(fmt.Sprintf("  %d/%d", m.settingsTarget+1, len(targets))))
-	b.WriteString("\n\n")
 
 	for _, f := range m.settingsFields() {
 		switch f {
+		case settingsFocusTarget:
+			row := modalMutedStyle.Render("Endpoint  ") +
+				modalBodyStyle.Render("‹ "+truncatePlain(label, max(innerW-22, 8))+" ›") +
+				modalMutedStyle.Render(fmt.Sprintf("  %d/%d", m.settingsTarget+1, len(targets)))
+			if m.settingsFocus == settingsFocusTarget {
+				row = modalMutedStyle.Render("Endpoint  ") +
+					modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-22, 8))+" › ") +
+					modalMutedStyle.Render(fmt.Sprintf("←→  %d/%d", m.settingsTarget+1, len(targets)))
+			}
+			b.WriteString(row + "\n\n")
 		case settingsFocusName:
 			b.WriteString(m.nameInput.View() + "\n")
 		case settingsFocusURL:
@@ -143,8 +149,8 @@ func (m *Model) settingsModal() string {
 		b.WriteString("\n\n")
 	}
 
-	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("field") +
-		modalMutedStyle.Render("   ↑↓ ") + modalBodyStyle.Render("endpoint") +
+	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("field") +
+		modalMutedStyle.Render("   ←→ ") + modalBodyStyle.Render("change") +
 		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("save & test")
 	if target != "" {
 		hint += modalMutedStyle.Render("   ctrl+d ") + modalBodyStyle.Render("delete")
@@ -201,10 +207,27 @@ func (m *Model) pickerModal() string {
 	b.WriteString(m.modalHeader(title, "esc", innerW))
 	b.WriteString("\n\n")
 
-	host := strings.TrimPrefix(strings.TrimPrefix(m.cfg.Host, "http://"), "https://")
+	// The endpoint row only earns its space once there is somewhere else to go.
+	targets := m.pickerTargets()
+	if m.pickerPurpose == "" && len(targets) > 1 {
+		label := "default host"
+		if m.modelsFrom != "" {
+			label = m.modelsFrom
+		}
+		b.WriteString(modalMutedStyle.Render("Endpoint  ") +
+			modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-24, 8))+" › ") +
+			modalMutedStyle.Render(fmt.Sprintf("←→  %d/%d", m.pickerTarget+1, len(targets))))
+		b.WriteString("\n")
+	}
+
+	endpoint, _ := m.pickerHost()
+	host := strings.TrimPrefix(strings.TrimPrefix(endpoint.URL(), "http://"), "https://")
 	if m.pickerPurpose == "cursor_pair" {
 		host = fmt.Sprintf("%s for explore/write + %s for plan", m.pairLocalModel, m.pairCursor)
 	} else {
+		if host == "" {
+			host = "the cursor agent on PATH"
+		}
 		host = "on " + host
 	}
 	b.WriteString(modalMutedStyle.Render(truncatePlain(host, innerW)))
@@ -227,6 +250,17 @@ func (m *Model) pickerModal() string {
 		return modalStyle.Width(w).Render(b.String())
 	}
 
+	// Browsing to an endpoint that is down must say so — otherwise the list just
+	// comes back empty with no reason given.
+	if m.statusMsg != "" {
+		style := modalMutedStyle
+		if m.statusErr {
+			style = modalErrorStyle
+		}
+		b.WriteString(style.Render(truncatePlain(m.statusMsg, innerW)))
+		b.WriteString("\n\n")
+	}
+
 	if m.pullErr != "" {
 		b.WriteString(modalErrorStyle.Render(truncatePlain("pull failed: "+m.pullErr, innerW)))
 		b.WriteString("\n")
@@ -238,7 +272,11 @@ func (m *Model) pickerModal() string {
 	}
 
 	if len(m.models) == 0 {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("no models installed — press p to pull one", innerW)))
+		empty := "no models installed — press p to pull one"
+		if m.modelsFrom != "" {
+			empty = "no models listed by " + m.modelsFrom
+		}
+		b.WriteString(modalMutedStyle.Render(truncatePlain(empty, innerW)))
 		b.WriteString("\n")
 	} else {
 		b.WriteString(modalAccentStyle.Render("Available"))
@@ -246,8 +284,14 @@ func (m *Model) pickerModal() string {
 		view := pickerWindow(len(m.models), m.picker, 8)
 		for i := view.start; i < view.end; i++ {
 			name := m.models[i]
+			// The stored default is a route spec, so a provider's models only
+			// match once the prefix is put back on.
+			spec := name
+			if m.modelsFrom != "" {
+				spec = m.modelsFrom + ":" + name
+			}
 			marker := "  "
-			if name == m.cfg.Model {
+			if spec == m.cfg.Model {
 				marker = modalAccentStyle.Render(" •")
 			}
 			row := truncatePlain(name, innerW-4)
@@ -293,8 +337,8 @@ func (m *Model) pickerModal() string {
 	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
 		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render(enterAction) +
 		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
-	if m.pickerPurpose != "cursor_pair" {
-		if cursor := m.cursorPlanProvider(); cursor != "" && m.modelsFrom == "" {
+	if m.pickerPurpose != "cursor_pair" && m.modelsFrom == "" {
+		if cursor := m.cursorPlanProvider(); cursor != "" {
 			hint += modalMutedStyle.Render("   c ") + modalBodyStyle.Render("pair Cursor plan")
 		}
 		hint += modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull")
