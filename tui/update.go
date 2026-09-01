@@ -1087,6 +1087,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		idx := min(msg.index, len(m.history))
 		m.archiveSummary = msg.summary
 		m.archivedThrough = idx
+		// The summary may have consumed the earlier context messages and the
+		// archive boundary has just moved past them, so the next turn owes a full
+		// baseline rather than a delta against a history the model no longer sees.
+		m.contextSnapshot = nil
 		// The measured counts describe the PRE-compaction prompt, and so does the
 		// in-flight turn's (compaction starts before the request goes out).
 		// Leaving them would re-fire compaction from endTurnTail and halve the

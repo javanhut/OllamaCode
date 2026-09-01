@@ -93,16 +93,22 @@ workspace, tmp, and the per-user build caches compilers need. The command
 string itself is not parsed or confined — in auto mode that is precisely why
 the sandbox exists. With neither binary on PATH the command runs as before
 and the first result carries a one-time warning; `shell_sandbox: false` in
-config is the explicit opt-out.
+config is the explicit opt-out. A `terminal_*` session is wrapped by that same
+sandbox and starts from the same `jailCheck`ed `working_dir`; the `terminal_*`
+tools are unavailable in explore and plan mode entirely, because an allowlist
+can vet the command a session opens with but not what `terminal_send` types
+into it afterwards.
 
-Every shell the model can reach — `run_shell` foreground and background, the
-verification gate's compile check, and the linter, all three of which run code
-the model just wrote — starts with a scrubbed environment: variables whose name
-contains `key`, `secret`, `token`, `password`, `passwd`, `credential`, `_pat`
-or `dsn` are dropped, as is any value shaped like a URL with a password in it
-(`postgres://app:s3cr3t@host/db`). `env_list` and `env_get` apply the same
-filter, so there is no second door. `PATH`, `HOME`, `LANG`, `TERM` and the rest
-are untouched.
+Every shell the model can reach — `run_shell` foreground and background,
+`terminal_*` sessions, the verification gate's compile check, and the linter,
+every one of which runs code the model chose or just wrote — starts with a
+scrubbed environment: variables whose name contains `key`, `secret`, `token`,
+`password`, `passwd`, `credential`, `_pat` or `dsn` are dropped, as is any
+value shaped like a URL with a password in it (`postgres://app:s3cr3t@host/db`).
+`env_list` and `env_get` apply the same filter, so there is no second door.
+`PATH`, `HOME`, `LANG` and the rest are untouched — a terminal session is the
+one exception, and only for `TERM`, which it sets to `dumb` so escape sequences
+do not pollute the output the model reads.
 
 This stops casual environment dumping — `env`, a build script that prints its
 environment, a test that reads `os.Getenv`. It is not a boundary against a

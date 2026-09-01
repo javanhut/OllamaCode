@@ -84,6 +84,8 @@ caps are unchanged either way.
 |---|:-:|:-:|:-:|:-:|
 | `run_shell` | allowlist | | ✓ | ✓ |
 | `shell_output` | | | ✓ | ✓ |
+| `terminal_open` / `terminal_send` | | | ✓ | ✓ |
+| `terminal_read` / `terminal_list` / `terminal_close` | | | ✓ | ✓ |
 | `job_list` / `job_output` | ✓ | ✓ | ✓ | ✓ |
 | `job_kill` | | | ✓ | ✓ |
 | `process_list` | ✓ | ✓ | ✓ | ✓ |
@@ -99,6 +101,21 @@ Background jobs — shell commands from `run_shell(background=true)` and
 sub-agents from `spawn_subagent` — share one registry and one id space, so
 "job 3" is unambiguous. `job_list`, `job_output`, and `job_kill` work for both
 kinds; `shell_output` predates them and remains as the shell-only wrapper.
+
+The `terminal_*` family is a persistent pty session: a real shell with a
+keyboard attached, for the interactive programs `run_shell` structurally cannot
+reach — `python`/`node` REPLs, `ssh`, `git rebase -i`, and scaffolding prompts
+like `npm create` or `cargo generate`. `terminal_open` returns a session id,
+`terminal_send` types into it and reads what comes back, `terminal_read` drains
+without typing, `terminal_close` kills and reaps. Sessions register into the
+same job id space as background shells and sub-agents, so `job_list` shows them
+and `job_kill` closes them. A send's result reports three orthogonal facts:
+`alive`, `wait_reason` (`silence`, `timeout`, or `session_exit`) and
+`exit_code`. `wait_reason=silence` with `alive=true` is the ordinary case — the
+program stopped printing and is sitting at its prompt — and is **not** an
+ending; only `session_exit` means the shell is gone. Unix only: on Windows the
+tools exist but report that no pty is available, and `run_shell` is the
+substitute.
 
 ## Version control
 

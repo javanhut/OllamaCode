@@ -162,6 +162,10 @@ func (m *Model) endTurnTail() []tea.Cmd {
 		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
 			Metadata: map[string]any{"reason": "completed", "steps": m.stepCount, "open_todos": m.todos.openCount(), "verification": m.lastVerification}})
 	}
+	// The turn just finished cleanly, so its whole generation span is the one
+	// /rate names, on a fresh slate. This is the only "completed" exit; the
+	// interrupt, error and denial paths never reach here.
+	m.ratedFrom, m.ratedTo, m.turnRating = m.turnFirstGen, m.turnGen, ""
 	// Bank the turn's timing, then re-render: the caller already refreshed the
 	// transcript before this point, so without a second pass the ⏱ footer (and
 	// the /show_thinking block) wouldn't appear until the next redraw.

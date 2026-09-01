@@ -188,6 +188,8 @@ func (m *Model) rewindTo(cut int) {
 	msgs, summary, archived, pruned := m.stateAt(cut)
 	m.history = msgs
 	m.archiveSummary, m.archivedThrough, m.prunedThrough = summary, archived, pruned
+	m.contextSnapshot = nil                         // the truncation can take the context baseline with it
+	m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // the rateable turn may be one of the ones just dropped
 
 	for idx := range m.turnRecords {
 		if idx >= len(m.history) {
@@ -245,10 +247,12 @@ func (m *Model) loadCommand(name string) {
 	m.history = append([]api.Message(nil), s.Messages...)
 	repaired := m.repairInterruptedTurn()
 	m.archiveSummary, m.archivedThrough, m.prunedThrough = s.ArchiveSummary, s.ArchivedThrough, s.PrunedThrough
+	m.contextSnapshot = nil // the snapshot described the conversation just replaced
 	m.sessionName = name
 	m.sessionTitle, m.titlePinned = s.Title, s.TitlePinned
 	m.titleGenTried = hasAssistantReply(m.history)
-	m.turnRecords = nil // timings belong to the session we just left
+	m.turnRecords = nil                             // timings belong to the session we just left
+	m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // and so does the turn a rating would have named
 	m.notes.set(s.Notes)
 	m.modelName = s.Model
 	if s.Mode != "" {

@@ -23,7 +23,8 @@ type DatasetRecord struct {
 
 // ExportOptions tunes which trajectories survive filtering.
 type ExportOptions struct {
-	MinCalls int // minimum successful tool calls per record; <= 0 means 1
+	MinCalls  int  // minimum successful tool calls per record; <= 0 means 1
+	OnlyRated bool // keep only turns a human rated good with /rate
 }
 
 // ExportStats summarizes filtering so drops are auditable.
@@ -40,6 +41,8 @@ const (
 	DropToolError       = "tool_error"       // a tool call returned an error envelope
 	DropArgumentFailure = "argument_failure" // a call needed argument repair, even a successful one
 	DropTooFewCalls     = "too_few_calls"    // fewer successful calls than MinCalls
+	DropRatedBad        = "rated_bad"        // a human rated the turn bad with /rate
+	DropUnrated         = "unrated"          // OnlyRated is set and no rating covers the turn
 )
 
 // Export reads one redacted trace and converts its successful tool-call
@@ -58,6 +61,11 @@ const (
 // from) drops the whole trajectory, because the recorded assistant message may
 // not match the repaired call that actually ran. Redacted content is passed
 // through unchanged.
+//
+// Human ratings ride the same trace as turn_rating events (tui /rate). A turn
+// rated bad is dropped unconditionally: "it completed" is exactly the signal
+// that cannot tell a right answer from a wrong one, which is why the rating
+// exists.
 func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, error) {
 	if opts.MinCalls <= 0 {
 		opts.MinCalls = 1
@@ -66,7 +74,7 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 	var records []DatasetRecord
 	finish := func(t *trajectory) {
 		stats.Candidates++
-		rec, reason := t.record(opts.MinCalls)
+		rec, reason := t.record(opts)
 		if reason != "" {
 			stats.Dropped[reason]++
 			return
@@ -78,15 +86,37 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 	var marked *trajectory
 	groups := map[int]*trajectory{}
 	var groupOrder []int
+	var spans []ratingSpan
 	// model_request payloads are deltas (see Recorder.RecordRequest), so the
 	// system prompt and the current user turn usually appear only in the first
 	// request that introduced them. Carry them forward as the replay advances.
 	session := &trajectory{}
+	// endSession closes out everything one recorded session accumulated. It is
+	// what keeps a turn number meaningful: generations restart at 1 in every
+	// process, and the configured trace is opened O_APPEND, so without a
+	// boundary groups[1] would splice one run's turn 1 onto an unrelated run's
+	// turn 1 — and a /rate verdict typed in the second run would decide the
+	// export fate of the first run's identically-numbered turns.
+	endSession := func() {
+		for _, turn := range groupOrder {
+			g := groups[turn]
+			g.rating = ratingFor(spans, turn)
+			finish(g)
+		}
+		groups, groupOrder, spans = map[int]*trajectory{}, nil, nil
+		session = &trajectory{} // its prompt and system prompt belong to the run that just ended
+	}
 	err := Replay(path, func(ev Event) error {
 		if ev.Kind == "model_request" {
 			session.extractContext(ev)
 		}
 		switch {
+		case ev.Kind == "session_start":
+			if marked != nil {
+				finish(marked) // a headless run that never closed its last turn
+				marked = nil
+			}
+			endSession()
 		case ev.Kind == "turn_start":
 			if marked != nil {
 				finish(marked) // previous turn never closed: abandoned
@@ -102,6 +132,13 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 				marked.completed = reason == "completed"
 				finish(marked)
 				marked = nil
+			}
+		case ev.Kind == "turn_rating":
+			// Recorded when the user types /rate, long after the turn's own
+			// events and deliberately with no Event.Turn: matched above the
+			// Turn > 0 case so a rating can never open a group of its own.
+			if span, ok := ratingSpanOf(ev); ok {
+				spans = append(spans, span)
 			}
 		case ev.Turn > 0:
 			// Interactive events are keyed by user-turn number; sub-agent and
@@ -128,9 +165,10 @@ func Export(path string, opts ExportOptions) ([]DatasetRecord, ExportStats, erro
 	if marked != nil {
 		finish(marked)
 	}
-	for _, turn := range groupOrder {
-		finish(groups[turn])
-	}
+	// Headless turns (finish(marked) above) are never rated: /rate exists only
+	// in the TUI, and those trajectories close mid-replay anyway, before a
+	// later rating event could be read.
+	endSession()
 	stats.Kept = len(records)
 	return records, stats, nil
 }
@@ -143,7 +181,56 @@ type trajectory struct {
 	tools     []string
 	seq       []Event // tool and payload-bearing model_response events, in order
 	completed bool
-	marked    bool // bounded by turn_start/turn_end (headless run)
+	marked    bool   // bounded by turn_start/turn_end (headless run)
+	rating    string // human verdict from /rate; "" when unrated
+}
+
+// ratingSpan is one /rate verdict and the generations it covers. A range, not
+// a single number, because the TUI bumps its generation once per tool round:
+// one user turn is a span of generations, and the last one holds only the
+// final prose reply — a rating naming that generation alone would land on the
+// one group the exporter already discards for having no tool calls.
+type ratingSpan struct {
+	from, to int
+	rating   string
+}
+
+// ratingFor returns the verdict covering turn, scanning backwards so a user
+// who changed their mind gets the last word. A slice plus this scan costs one
+// pass per group; expanding spans into a map would let a corrupt trace with a
+// huge range allocate without bound.
+func ratingFor(spans []ratingSpan, turn int) string {
+	for i := len(spans) - 1; i >= 0; i-- {
+		if turn >= spans[i].from && turn <= spans[i].to {
+			return spans[i].rating
+		}
+	}
+	return ""
+}
+
+func ratingSpanOf(ev Event) (ratingSpan, bool) {
+	rating, _ := ev.Metadata["rating"].(string)
+	if rating != "good" && rating != "bad" {
+		return ratingSpan{}, false
+	}
+	to := metaInt(ev.Metadata["turn"])
+	if to <= 0 {
+		return ratingSpan{}, false
+	}
+	from := metaInt(ev.Metadata["from_turn"])
+	if from <= 0 || from > to {
+		from = to // older or malformed ratings name a single generation
+	}
+	return ratingSpan{from: from, to: to, rating: rating}, true
+}
+
+// metaInt reads a metadata number: Replay decodes JSON numbers as float64.
+func metaInt(value any) int {
+	if f, ok := value.(float64); ok {
+		return int(f)
+	}
+	n, _ := value.(int)
+	return n
 }
 
 func (t *trajectory) absorb(ev Event) {
@@ -211,8 +298,17 @@ func (t *trajectory) extractContext(ev Event) {
 // record converts the trajectory into a dataset record, or reports the drop
 // reason it failed a filter. Tool events between two model responses form one
 // assistant tool-call round, preserving the call -> result -> next-call shape.
-func (t *trajectory) record(minCalls int) (DatasetRecord, string) {
+func (t *trajectory) record(opts ExportOptions) (DatasetRecord, string) {
 	rec := DatasetRecord{Model: t.model, System: t.system, Tools: t.tools}
+	// The human verdict outranks every mechanical filter, so it is checked
+	// first: a trajectory a human called wrong must never be reported as
+	// dropped for some incidental reason that would go away on the next run.
+	if t.rating == "bad" {
+		return rec, DropRatedBad
+	}
+	if opts.OnlyRated && t.rating != "good" {
+		return rec, DropUnrated
+	}
 	if strings.TrimSpace(t.prompt) == "" {
 		return rec, DropNoPrompt
 	}
@@ -271,7 +367,7 @@ func (t *trajectory) record(minCalls int) (DatasetRecord, string) {
 		return rec, reason
 	}
 	flush()
-	if calls < minCalls {
+	if calls < opts.MinCalls {
 		return rec, DropTooFewCalls
 	}
 	if finalAnswer != "" {

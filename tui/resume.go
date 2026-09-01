@@ -109,12 +109,14 @@ func (m *Model) restoreSession(id string) {
 	m.history = append([]api.Message(nil), s.Messages...)
 	repaired := m.repairInterruptedTurn()
 	m.archiveSummary, m.archivedThrough, m.prunedThrough = s.ArchiveSummary, s.ArchivedThrough, s.PrunedThrough
+	m.contextSnapshot = nil // the snapshot described the conversation just replaced
 	m.sessionName = id
 	m.sessionTitle, m.titlePinned = s.Title, s.TitlePinned
 	// A resumed conversation's first reply is in the past; the one-shot title
 	// generation belongs to the process that was there for it.
 	m.titleGenTried = hasAssistantReply(m.history)
-	m.turnRecords = nil // timings belong to the process that produced them
+	m.turnRecords = nil                             // timings belong to the process that produced them
+	m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // and so does the turn a rating would have named
 	if m.notes != nil && s.Notes != "" {
 		m.notes.set(s.Notes)
 	}

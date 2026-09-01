@@ -42,6 +42,7 @@ outranks a stored key. Prefer that over typing the key.
 | `trace` | Opt in to redacted JSONL execution tracing (off by default) |
 | `trace_path` | Optional trace destination; defaults to the OS cache directory |
 | `shell_sandbox` | `false` disables the OS-level sandbox around `run_shell` (sandbox-exec on macOS, bwrap on Linux); on by default |
+| `context_delta` | `true` sends the stable half of the per-turn context block (mode rules, security note, batching rule, archive summary, long-term memory) once and re-sends it only when it changes, instead of every turn; off by default until `cmd/eval` shows mode adherence holds |
 | `jail_allowlist` | List of extra absolute directory roots the file tools may touch and the shell sandbox may write, beyond the workspace |
 | `face` | `false` hides the mascot overlay |
 | `welcome` | `false` hides the startup panel |

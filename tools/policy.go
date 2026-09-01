@@ -120,6 +120,17 @@ var toolPolicies = func() map[string]ToolPolicy {
 	// job_kill terminates a process group or a sub-agent, like shell_output's
 	// kill flag; job_list/job_output are plain reads (classified above).
 	m["job_kill"] = policy(ModeMutable, true, false, false, ToolCostLow)
+	// A persistent shell is run_shell with the timeout removed and a keyboard
+	// attached: unavailable in explore and plan, permission-prompted in write,
+	// open in auto. ModeMutable, NOT run_shell's ModeExploreShell — the explore
+	// allowlist vets an opening command and cannot vet what terminal_send types
+	// into a live REPL afterwards, so the mode gate is the boundary here rather
+	// than the allowlist. Destructive so write mode prompts on every call. Not
+	// small-model safe: five tools for driving an interactive REPL is past what
+	// a lean model can steer, and they would crowd out its toolset.
+	for _, name := range []string{"terminal_open", "terminal_send", "terminal_read", "terminal_list", "terminal_close"} {
+		m[name] = policy(ModeMutable, false, true, false, ToolCostHigh)
+	}
 	// These tools combine read-only defaults with mutating optional actions, so
 	// they remain visible for inspection but always pass through permission logic.
 	m["git_branch"] = policy(ModeReadOnly, false, true, false, ToolCostLow)
@@ -161,6 +172,12 @@ var toolPolicies = func() map[string]ToolPolicy {
 	// The ceiling, for a caller holding only the name — ToolCallTimeout reads
 	// the call's own timeout_sec instead.
 	setTimeout(m, shellMaxTimeout+shellGrace, "run_shell")
+	setTimeout(m, inspectTimeout, "terminal_read", "terminal_list")
+	setTimeout(m, mutateTimeout, "terminal_open", "terminal_close") // close awaits the child's exit
+	// Same relationship run_shell has with its own deadline: terminal_send
+	// clamps its wait to terminalMaxWait and then reports, so the harness
+	// ceiling has to outlive that or the report loses the race.
+	setTimeout(m, terminalMaxWait+shellGrace, "terminal_send")
 
 	// Everything left is a default-budget tool. Doing it here rather than at
 	// each lookup means a zero Timeout in the table is impossible, so nobody

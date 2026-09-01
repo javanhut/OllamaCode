@@ -403,7 +403,18 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
-		if call.Function.Name == "run_shell" {
+		// terminal_open joins run_shell here as defence in depth, not as the
+		// boundary. The boundary is ModeMutable in tools/policy.go, and it is
+		// what has to hold, because this preflight is TUI-only: the sub-agent
+		// path filters by name through toolAllowedInMode and never reaches this
+		// code, and internal/agent's executor does no mode gating at all. An
+		// allowlist could not hold a terminal anyway — it vets the opening
+		// command, and terminal_send types whatever it likes afterwards, which
+		// is why no allowlist is applied to terminal_send's input: a token
+		// filter on live REPL keystrokes buys false confidence. This is here so
+		// that if the policy is ever widened to ModeExploreShell the allowlist
+		// applies automatically instead of silently not existing.
+		if call.Function.Name == "run_shell" || call.Function.Name == "terminal_open" {
 			cmd := safeshell.ExtractShellCommand(call.Function.Arguments)
 
 			// Explore-mode read-only allowlist (per-segment bin/sub check).
@@ -698,6 +709,16 @@ func computePreview(call tools.ToolCall) string {
 	case "run_shell":
 		cmd, _ := args["command"].(string)
 		return fmt.Sprintf("shell: %s", cmd)
+	case "terminal_open":
+		cmd, _ := args["command"].(string)
+		if strings.TrimSpace(cmd) == "" {
+			cmd = "(default shell)"
+		}
+		return fmt.Sprintf("open terminal: %s", cmd)
+	case "terminal_send":
+		id, _ := args["id"].(float64)
+		input, _ := args["input"].(string)
+		return fmt.Sprintf("terminal %d ← %s", int(id), truncatePreview(input, 10))
 	case "git_add":
 		paths, _ := args["paths"].(string)
 		return fmt.Sprintf("git add %s", paths)

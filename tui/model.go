@@ -151,6 +151,7 @@ type config struct {
 	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
 	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
 	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
+	ContextDelta  bool                       `json:"context_delta,omitempty"`  // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
 	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
 	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
 	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by model name
@@ -425,10 +426,18 @@ type Model struct {
 	archivedThrough int  // messages before this are compacted away; archiveSummary stands in for them
 	prunedThrough   int  // tool results before this project as their envelope headline only
 	compacting      bool // guards against overlapping compaction passes
+	// contextSnapshot is the last rendered text of each STABLE context source,
+	// keyed by source name — what reconcileContext diffs the current sources
+	// against so an unchanged turn emits nothing. It MUST be cleared wherever
+	// history is replaced or archived past: `m.archivedThrough` is the grep that
+	// finds those sites, because a snapshot describing a history the model no
+	// longer has will silently suppress a baseline it can never get back.
+	contextSnapshot map[string]string
 	retrieving      bool // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
 	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	turnFirstGen        int             // first generation of the turn in flight; /rate covers the whole span, not just the last round
 	streamRetries       int             // transient stream errors retried this turn
 	overflowErr         error           // the context-overflow error a forced compaction is running for; non-nil means a retry is owed when it lands
 	overflowTokens      int             // ditto, in estimated tokens
@@ -533,8 +542,18 @@ type Model struct {
 
 	// Per-turn record, keyed by the index of the user message that started the
 	// turn, so each answer can report what it cost and what it was thinking.
-	turnRecords    map[int]turnRecord
-	turnAnchor     int
+	turnRecords map[int]turnRecord
+	turnAnchor  int
+	// /rate: the generation span of the last turn that COMPLETED, and the
+	// verdict already given to it (for bare /rate). ratedTo is 0 whenever there
+	// is nothing to rate. Deliberately not the in-flight turnFirstGen/turnGen
+	// pair: a queued follow-up starts the next turn inside endTurnTail itself,
+	// and the turn that just finished has to stay rateable across that. Only
+	// endTurnTail sets them; the places that end the turn's existence —
+	// interrupt, rewind, /clear, and loading another conversation — clear them.
+	ratedFrom      int
+	ratedTo        int
+	turnRating     string
 	turnStart      time.Time
 	turnToolStart  time.Time
 	turnToolTime   time.Duration
@@ -734,6 +753,15 @@ func New() *Model {
 		}
 		if recorder, err := tracepkg.Open(tracePath); err == nil {
 			m.trace = recorder
+			// This trace is append-only across runs while turn generations
+			// restart at 1 in every process, so the boundary is not cosmetic:
+			// internal/trace.Export groups interactive turns BY generation
+			// number and scopes /rate verdicts to the session that emitted
+			// them. Same event enableDebug writes for the fresh debug trace.
+			cwd, _ := os.Getwd()
+			_ = recorder.Record(tracepkg.Event{Kind: "session_start", Metadata: map[string]any{
+				"surface": "tui", "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 2,
+			}})
 		} else if m.toast == "" {
 			m.toast = "trace disabled: " + err.Error()
 		}

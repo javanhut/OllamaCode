@@ -75,7 +75,15 @@ func (m *Model) refreshTranscript() {
 				i = next
 			default:
 				flushTurn()
-				if msg.Content != "" {
+				// A context update is addressed to the model and is the very block
+				// this split exists to stop re-sending — rendering it whole would put
+				// the mode rules back on the user's screen every time they change. A
+				// one-liner rather than nothing: an advisory already breaks
+				// assistant-turn grouping, and a silent break reads as a paint bug.
+				if strings.HasPrefix(msg.Content, contextUpdateMarker) {
+					b.WriteString(mutedStyle.Render("· context updated"))
+					b.WriteString("\n\n")
+				} else if msg.Content != "" {
 					b.WriteString(m.renderMarkdown(msg.Content, true))
 					b.WriteString("\n\n")
 				}

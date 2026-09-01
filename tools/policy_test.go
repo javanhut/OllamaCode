@@ -159,3 +159,32 @@ func TestPermissionRuleMalformedPatternFailsClosed(t *testing.T) {
 		t.Fatal("a malformed glob must match nothing rather than everything")
 	}
 }
+
+// The mode gate is the boundary for terminal sessions — not the safeshell
+// allowlist, which can only vet the opening command. Untagged on purpose, so
+// the contract is checked on platforms where the pty itself does not exist.
+func TestTerminalToolsAbsentFromReadOnlyModes(t *testing.T) {
+	for _, name := range []string{"terminal_open", "terminal_send", "terminal_read", "terminal_list", "terminal_close"} {
+		p := PolicyForName(name)
+		if p.Allows(ModeExplore) || p.Allows(ModePlan) {
+			t.Errorf("%s must be unreachable from explore and plan mode: %+v", name, p)
+		}
+		if !p.Allows(ModeWrite) || !p.Allows(ModeAuto) {
+			t.Errorf("%s should be available in write and auto mode: %+v", name, p)
+		}
+		if !p.Destructive {
+			t.Errorf("%s must be destructive so write mode prompts on every call: %+v", name, p)
+		}
+		if p.SmallModelSafe {
+			t.Errorf("%s should not be offered to small models: %+v", name, p)
+		}
+		if p.Timeout <= 0 {
+			t.Errorf("%s has no timeout", name)
+		}
+	}
+	// A ceiling below the handler's own max wait would let the harness deadline
+	// kill terminal_send before it can report its result.
+	if got := PolicyForName("terminal_send").Timeout; got <= terminalMaxWait {
+		t.Fatalf("terminal_send's deadline %s must outlive its own max wait %s", got, terminalMaxWait)
+	}
+}

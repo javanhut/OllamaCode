@@ -48,6 +48,7 @@ var slashCommands = []struct {
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
 	{"/stats", "session timing and token totals"},
+	{"/rate", "rate the last turn good/bad for the fine-tune dataset"},
 	{"/jobs", "list and kill background shell and sub-agent jobs"},
 	{"/compact", "compress older history into a summary now"},
 	{"/show_thinking", "toggle live and saved model reasoning"},

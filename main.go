@@ -96,6 +96,9 @@ func main() {
 	// Language servers are child processes; without this they outlive the
 	// session that started them.
 	defer tools.CloseLSP()
+	// Terminal sessions are child shells; closing awaits each child's exit
+	// rather than returning once the signal is sent, so nothing is left running.
+	defer tools.CloseTerminals()
 	debugPath := ""
 	if f.debug {
 		debugPath, err = filepath.Abs("ocode.log")

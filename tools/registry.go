@@ -271,6 +271,14 @@ func DefaultRegistry() *Registry {
 	r.Register(JobListTool())
 	r.Register(JobOutputTool())
 	r.Register(JobKillTool())
+	// Registered on every platform: on one without a pty the handler returns a
+	// clear "not supported" error, which tells the model more than an absent
+	// tool does.
+	r.Register(TerminalOpenTool())
+	r.Register(TerminalSendTool())
+	r.Register(TerminalReadTool())
+	r.Register(TerminalListTool())
+	r.Register(TerminalCloseTool())
 	r.Register(WebFetchTool())
 	r.Register(WebSearchTool())
 	r.Register(GetProjectTreeTool())

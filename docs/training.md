@@ -22,6 +22,7 @@ Flags:
   (default: the TUI's trace path, `os.UserCacheDir()/ollama_code/trace.jsonl`).
 - `-out` — output JSONL path (default: stdout).
 - `-min-calls` — minimum successful tool calls per record (default `1`).
+- `-only-rated` — keep only turns you rated `good` with `/rate` (default off).
 
 Progress and drop statistics go to stderr, e.g.
 `42 trajectories: 17 kept, 25 dropped incomplete=9 tool_error=8 argument_failure=5 too_few_calls=3`.
@@ -42,6 +43,11 @@ The exporter only trains on clean demonstrations. A trajectory is dropped when:
   pair. First-pass-clean calls only.
 - **`too_few_calls`** — fewer successful calls than `-min-calls`.
 - **`no_prompt`** — the user turn couldn't be recovered from the trace.
+- **`rated_bad`** — a human typed `/rate bad` for the turn. Checked ahead of
+  every other filter and dropped unconditionally: "it completed" cannot tell a
+  right answer from a wrong one, which is the whole reason the rating exists.
+- **`unrated`** — `-only-rated` was set and no rating covers the turn. Headless
+  traces are unrateable by construction, so `-only-rated` yields TUI turns only.
 
 Redaction is one-way: the exporter passes already-redacted arguments and
 results through verbatim and never un-redacts anything. Two gaps in what
@@ -54,6 +60,23 @@ traces capture, noted rather than synthesized:
   them; the reference is the system prompt in the repo version that produced
   the trace (`cmd/eval/main.go` for eval runs). Interactive traces carry the
   full system prompt in the recorded request payload, and it is exported.
+
+### Rating turns
+
+`/rate good|bad [note]` in the TUI rates the turn that just completed; bare
+`/rate` prints the verdict it currently carries. Ratings are appended to the
+same redacted trace as `turn_rating` events carrying
+`{turn, from_turn, rating, note}`, where the two generations span every tool
+round of the turn — one user turn is a range, because the last generation holds
+only the final prose reply and no tool calls. The last rating for a turn wins,
+so changing your mind is just typing `/rate` again. Requires `"trace": true` in
+the config; with tracing off the command says so rather than dropping the
+verdict silently.
+
+Generation numbers restart at 1 in every run and the trace file is appended to
+across runs, so both grouping and ratings are scoped to the `session_start`
+event each run writes: a verdict never reaches an identically-numbered turn
+from a different session.
 
 ### Dataset schema
 

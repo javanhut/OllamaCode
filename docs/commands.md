@@ -221,6 +221,7 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/diff` | View the last turn's diffs full-screen |
 | `/copy` | Copy the last response to the clipboard |
 | `/stats` | Timing and token totals |
+| `/rate good\|bad [note]` | Rate the last completed turn for the fine-tune dataset; bare `/rate` shows the current verdict (see [training.md](training.md)) |
 | `/jobs` | List background shell and sub-agent jobs; `x` kills the highlighted one |
 | `/compact` | Compress the older half of the history into a summary now |
 

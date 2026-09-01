@@ -28,6 +28,7 @@ func main() {
 	tracePath := flag.String("trace", defaultTracePath(), "redacted trace file, or a directory of .jsonl traces")
 	out := flag.String("out", "", "output JSONL path (default stdout)")
 	minCalls := flag.Int("min-calls", 1, "minimum successful tool calls per exported record")
+	onlyRated := flag.Bool("only-rated", false, "keep only turns rated good with /rate")
 	flag.Parse()
 
 	paths, err := traceFiles(*tracePath)
@@ -39,7 +40,7 @@ func main() {
 	var records []tracepkg.DatasetRecord
 	totals := tracepkg.ExportStats{Dropped: map[string]int{}}
 	for _, path := range paths {
-		recs, stats, err := tracepkg.Export(path, tracepkg.ExportOptions{MinCalls: *minCalls})
+		recs, stats, err := tracepkg.Export(path, tracepkg.ExportOptions{MinCalls: *minCalls, OnlyRated: *onlyRated})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
 			continue

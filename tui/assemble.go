@@ -15,7 +15,11 @@ const generationReserve = 4096
 // assembleMessages builds the final message list sent to the model under a hard
 // token ceiling derived from the active context limit. Ordering is:
 //
-//	[static systemPrompt] -> newest-fitting history -> [volatile dynamic tail]
+//	[static systemPrompt] -> newest-fitting history -> [dynamic tail]
+//
+// The tail is the whole dynamic block, or — under cfg.ContextDelta — only its
+// volatile half, the stable half having been appended into history by
+// reconcileContext as a durable message that is re-sent only when it changes.
 //
 // History is included newest-first until the budget is exhausted, then emitted
 // oldest-first. Whole messages are kept — a tool-result message is never sent
@@ -33,11 +37,36 @@ func (m *Model) assembleMessages(ragBlock string) []api.Message {
 	}
 
 	sys := api.Message{Role: "system", Content: m.activeSystemPrompt()}
-	dyn := api.Message{Role: "system", Content: m.buildDynamicContext(ragBlock)}
+	// Under ContextDelta the stable half of the block rides history as durable
+	// messages and only the volatile tail is re-sent. reconcileContext appends to
+	// m.history, so it has to run before deriveModelMessages projects it below.
+	var tail string
+	if m.cfg.ContextDelta {
+		m.reconcileContext()
+		tail = m.volatileContext(ragBlock)
+	} else {
+		tail = m.buildDynamicContext(ragBlock)
+	}
+	dyn := api.Message{Role: "system", Content: tail}
 	base := estimateMsgTokens(sys) + estimateMsgTokens(dyn)
 
 	visible := m.deriveModelMessages()
 	start := historyWindow(visible, budget-base)
+	if start > 0 && m.cfg.ContextDelta {
+		// The window is evicting messages, and the durable baseline may be among
+		// them — so this request cannot lean on history to carry the stable half.
+		// Fall back to the whole block in the tail, for THIS request only.
+		//
+		// Clearing contextSnapshot here instead, which is what this used to do,
+		// is a positive feedback loop: the next assembly re-appends a full
+		// baseline into history, which evicts more messages, which keeps the drop
+		// firing. Eleven rounds of it and the window held seven identical
+		// [CONTEXT UPDATE] copies and not one conversation message. The snapshot
+		// stays as it is: nothing was lost that the tail is not now carrying.
+		dyn = api.Message{Role: "system", Content: m.buildDynamicContext(ragBlock)}
+		base = estimateMsgTokens(sys) + estimateMsgTokens(dyn)
+		start = historyWindow(visible, budget-base)
+	}
 	if start > 0 {
 		// This is context loss with NO archive summary behind it — compaction
 		// should have run before it came to this. It shipped silent; say it out loud.

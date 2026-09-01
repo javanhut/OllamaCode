@@ -1,10 +1,10 @@
 // Package jobs is the unified background-job registry. Background shell
-// commands (tools/shell_bg.go) and background sub-agent jobs
-// (tui/subagent_bg.go) register into ONE shared id space, so "job 3" is
-// unambiguous no matter which producer started it. The registry owns identity
-// and lifecycle state; producers own the execution resources and report
-// through Hooks. The model-facing job_list / job_output / job_kill tools live
-// in tools/jobs.go.
+// commands (tools/shell_bg.go), background sub-agent jobs
+// (tui/subagent_bg.go) and persistent terminal sessions (tools/terminal.go)
+// register into ONE shared id space, so "job 3" is unambiguous no matter which
+// producer started it. The registry owns identity and lifecycle state;
+// producers own the execution resources and report through Hooks. The
+// model-facing job_list / job_output / job_kill tools live in tools/jobs.go.
 package jobs
 
 import (
@@ -21,6 +21,7 @@ type Kind string
 const (
 	KindShell    Kind = "shell"
 	KindSubagent Kind = "subagent"
+	KindTerminal Kind = "terminal"
 )
 
 // Status is the lifecycle state of a job: running, then exactly one terminal

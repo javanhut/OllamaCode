@@ -13,6 +13,7 @@ import (
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/session"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -299,6 +300,53 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// rateCommand implements /rate: a human verdict on the turn that just
+// finished. The rating rides the existing redacted trace as a turn_rating
+// event, so cmd/finetune picks it up in the pass it already makes over the
+// file. from_turn is what actually names the turn: startStream bumps turnGen
+// once per tool round, so a user turn is a RANGE of generations whose last one
+// holds only the final prose reply — rating that generation alone would rate
+// the one group the exporter already throws away.
+func (m *Model) rateCommand(args string) {
+	verdict, note, _ := strings.Cut(args, " ")
+	verdict = strings.ToLower(strings.TrimSpace(verdict))
+	note = strings.TrimSpace(note)
+	// Above the empty-verdict branch: bare /rate must not answer "unrated",
+	// which reads as an invitation, in the states where the verdict it invites
+	// would then be refused.
+	if m.ratedTo == 0 {
+		m.toast = "no completed turn to rate yet"
+		return
+	}
+	if verdict == "" {
+		if m.turnRating == "" {
+			m.toast = "last turn is unrated — /rate good|bad [note]"
+		} else {
+			m.toast = "last turn rated " + m.turnRating
+		}
+		return
+	}
+	if verdict != "good" && verdict != "bad" {
+		m.toast = "usage: /rate good|bad [note]"
+		return
+	}
+	// Swallowing a rating silently would be worse than refusing it: the whole
+	// point of the keystroke is that the signal reaches the dataset.
+	if m.trace == nil {
+		m.toast = `rating not recorded — tracing is off (set "trace": true in config)`
+		return
+	}
+	meta := map[string]any{"turn": m.ratedTo, "from_turn": m.ratedFrom, "rating": verdict}
+	if note != "" {
+		meta["note"] = note
+	}
+	// Event.Turn is deliberately left zero: the exporter opens a trajectory
+	// group for any event carrying a turn, and a rating must not become one.
+	_ = m.trace.Record(tracepkg.Event{Kind: "turn_rating", Model: m.modelName, Metadata: meta})
+	m.turnRating = verdict
+	m.toast = "turn rated " + verdict
 }
 
 // modelUsage is shown whenever /model args don't parse.
@@ -872,6 +920,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.rewindCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rewind")))
 			return m, nil
 		}
+		if val == "/rate" || strings.HasPrefix(val, "/rate ") {
+			m.input.Reset()
+			m.rateCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rate")))
+			return m, nil
+		}
 		if val == "/research" || strings.HasPrefix(val, "/research ") {
 			m.input.Reset()
 			return m, m.researchCommand(strings.TrimSpace(strings.TrimPrefix(val, "/research")))
@@ -916,9 +969,11 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.queue = nil
 			m.history = nil
 			m.archiveSummary, m.archivedThrough, m.prunedThrough = "", 0, 0
+			m.contextSnapshot = nil // no history left to hold the baseline
 			m.sessionName, m.sessionTitle = "", ""
 			m.titlePinned, m.titleGenTried = false, false
 			m.turnRecords = nil
+			m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // the rateable turn is part of the conversation being cleared
 			m.historyIndex = len(m.userHistory)
 			m.lastError = ""
 			m.mentionBlock = "" // attachments belong to the conversation just cleared

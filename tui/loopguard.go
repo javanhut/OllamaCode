@@ -143,6 +143,11 @@ func (m *Model) turnStepLimit() int {
 // every new user turn (fresh submit or a dequeued message).
 func (m *Model) resetTurnGuards() {
 	m.startTurnClock()
+	// The next stream this turn starts will be turnGen+1, and /rate has to
+	// cover every round the turn goes on to produce. The rateable span is NOT
+	// cleared here: endTurnTail dequeues a queued message, so this runs inside
+	// the completion of the very turn that just became rateable.
+	m.turnFirstGen = m.turnGen + 1
 	m.stepCount = 0
 	m.streamRetries = 0
 	// Overflow recovery is scoped to the USER TURN, not the session — without
