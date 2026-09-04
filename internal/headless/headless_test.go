@@ -192,7 +192,6 @@ func TestRunRefusesStaleEdit(t *testing.T) {
 	}
 }
 
-
 func TestReportJSONShape(t *testing.T) {
 	res := agent.Result{
 		Output: "done", Steps: 2, ToolCalls: 3, ToolErrors: 1,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -105,8 +106,8 @@ func newFakeMCPHTTPServer(t *testing.T) (*httptest.Server, *fakeMCPHTTP) {
 func (f *fakeMCPHTTP) lastHeader(name string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for i := len(f.headers) - 1; i >= 0; i-- {
-		if value := f.headers[i].Get(name); value != "" {
+	for _, v := range slices.Backward(f.headers) {
+		if value := v.Get(name); value != "" {
 			return value
 		}
 	}

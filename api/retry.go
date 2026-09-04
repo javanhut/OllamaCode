@@ -39,8 +39,7 @@ func (e *StatusError) RetryAfter() (time.Duration, bool) {
 // carrying a *StatusError. Callers should honor it over their own backoff —
 // the provider explicitly asked — but still cap it at something sane.
 func RetryAfterDelay(err error) (time.Duration, bool) {
-	var se *StatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*StatusError](err); ok {
 		return se.RetryAfter()
 	}
 	return 0, false
@@ -53,8 +52,7 @@ func StatusCodeOf(err error) int {
 	if err == nil {
 		return 0
 	}
-	var se *StatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*StatusError](err); ok {
 		return se.Code
 	}
 	var code int

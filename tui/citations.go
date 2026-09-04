@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -233,8 +234,8 @@ func citationProblems(root, answer string) []string {
 // message). This is the loop guard: the gate fires at most once per turn
 // without needing any per-turn Model field.
 func citationCorrectionIssued(history []api.Message) bool {
-	for i := len(history) - 1; i >= 0; i-- {
-		msg := history[i]
+	for _, msg := range slices.Backward(history) {
+
 		if isUserTurn(msg) {
 			return false
 		}

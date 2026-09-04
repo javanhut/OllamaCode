@@ -86,8 +86,7 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 	// real evidence the model must read, and Err stays nil so failure counters
 	// and dataset export keep meaning "the tool itself broke". Only the
 	// envelope's ok flag reports the command's verdict.
-	var cmdFail *tools.CommandFailure
-	if errors.As(err, &cmdFail) {
+	if cmdFail, ok := errors.AsType[*tools.CommandFailure](err); ok {
 		event.ExitCode = cmdFail.ExitCode
 		if e.StructuredResults == nil || *e.StructuredResults {
 			event.Result = tools.EncodeCommandFailure(call.Function.Name, cmdFail.Output, cmdFail.ExitCode)

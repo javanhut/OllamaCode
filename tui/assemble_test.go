@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,11 +189,11 @@ func TestPruneToolResultsStubsOnlyTheProjection(t *testing.T) {
 	// The PROJECTION is what shrinks.
 	seen := 0
 	visible := m.deriveModelMessages()
-	for i := len(visible) - 1; i >= 0; i-- {
-		if visible[i].Role != "tool" {
+	for i, v := range slices.Backward(visible) {
+		if v.Role != "tool" {
 			continue
 		}
-		env, ok := tools.DecodeToolResult(visible[i].Content)
+		env, ok := tools.DecodeToolResult(v.Content)
 		if !ok {
 			t.Fatalf("message %d stopped decoding as an envelope", i)
 		}

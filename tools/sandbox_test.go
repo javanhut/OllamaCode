@@ -260,8 +260,7 @@ func TestRunShellSandboxConfinement(t *testing.T) {
 	run := func(args map[string]string) string {
 		t.Helper()
 		out, err := shell.Handler(ctx, jailArgs(t, args))
-		var failed *CommandFailure
-		if errors.As(err, &failed) {
+		if failed, ok := errors.AsType[*CommandFailure](err); ok {
 			return failed.Output
 		}
 		if err != nil {

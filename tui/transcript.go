@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -415,8 +416,8 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 
 func (m *Model) lastTurnDiffs() string {
 	var diffs []string
-	for i := len(m.history) - 1; i >= 0; i-- {
-		msg := m.history[i]
+	for _, msg := range slices.Backward(m.history) {
+
 		if isUserTurn(msg) {
 			break
 		}
@@ -433,9 +434,9 @@ func (m *Model) lastTurnDiffs() string {
 }
 
 func (m *Model) lastUserMessage() string {
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if isUserTurn(m.history[i]) {
-			s := m.history[i].Content
+	for _, v := range slices.Backward(m.history) {
+		if isUserTurn(v) {
+			s := v.Content
 			if len(s) > 48 {
 				s = s[:48] + "…"
 			}
@@ -446,9 +447,9 @@ func (m *Model) lastUserMessage() string {
 }
 
 func lastAssistantMessage(history []api.Message) string {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
-			return history[i].Content
+	for _, h := range slices.Backward(history) {
+		if h.Role == "assistant" && strings.TrimSpace(h.Content) != "" {
+			return h.Content
 		}
 	}
 	return ""

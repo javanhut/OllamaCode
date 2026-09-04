@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,8 +19,8 @@ import (
 // which every turn entry point already goes through.
 func (m *Model) startTurnClock() {
 	m.turnAnchor = -1
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if isUserTurn(m.history[i]) {
+	for i, v := range slices.Backward(m.history) {
+		if isUserTurn(v) {
 			m.turnAnchor = i
 			break
 		}

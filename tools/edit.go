@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -109,8 +110,8 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 
 	// Apply replacements from the bottom up so earlier indices stay valid.
 	out := append([]string(nil), cLines...)
-	for idx := len(starts) - 1; idx >= 0; idx-- {
-		i := starts[idx]
+	for _, i := range slices.Backward(starts) {
+
 		fileIndent := leadingWS(out[i])
 		oldIndent := leadingWS(oLines[0])
 		repl := strings.Split(reindentBlock(newNorm, oldIndent, fileIndent), "\n")

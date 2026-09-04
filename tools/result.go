@@ -174,8 +174,8 @@ func clipToLineFrom(s string, limit int) (clipped string, ok bool) {
 		return s, true
 	}
 	t := s[len(s)-limit:]
-	if i := strings.IndexByte(t, '\n'); i >= 0 {
-		return t[i+1:], true
+	if _, after, ok := strings.Cut(t, "\n"); ok {
+		return after, true
 	}
 	return t, false
 }

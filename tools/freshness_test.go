@@ -64,8 +64,7 @@ func TestFreshnessStaleEditRefused(t *testing.T) {
 	// A third party rewrote the file: the next edit from the stale copy is refused.
 	os.WriteFile(p, []byte("two\n\nuser added this\n"), 0o644)
 	_, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "two", "new_string": "three"}))
-	var se *StaleFileError
-	if !errors.As(err, &se) {
+	if _, ok := errors.AsType[*StaleFileError](err); !ok {
 		t.Fatalf("stale edit was allowed (err=%v)", err)
 	}
 	if !strings.Contains(err.Error(), "changed on disk") || !strings.Contains(err.Error(), "edit_file") {

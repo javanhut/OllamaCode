@@ -3,6 +3,7 @@ package trace
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/javanhut/ollama_code/api"
@@ -200,9 +201,9 @@ type ratingSpan struct {
 // pass per group; expanding spans into a map would let a corrupt trace with a
 // huge range allocate without bound.
 func ratingFor(spans []ratingSpan, turn int) string {
-	for i := len(spans) - 1; i >= 0; i-- {
-		if turn >= spans[i].from && turn <= spans[i].to {
-			return spans[i].rating
+	for _, span := range slices.Backward(spans) {
+		if turn >= span.from && turn <= span.to {
+			return span.rating
 		}
 	}
 	return ""
@@ -284,12 +285,12 @@ func (t *trajectory) extractContext(ev Event) {
 	if !delta && t.system == "" && len(msgs) > 0 && msgs[0].Role == "system" {
 		t.system = msgs[0].Content
 	}
-	for i := len(msgs) - 1; i >= 0; i-- {
+	for _, msg := range slices.Backward(msgs) {
 		// Advisory skipped: a recorded request carries the loop guards'
 		// user-role nudges too, and "[REPEATING ACTION] …" is not the turn's
 		// prompt for a training record.
-		if msgs[i].Role == "user" && !msgs[i].Advisory {
-			t.prompt = msgs[i].Content
+		if msg.Role == "user" && !msg.Advisory {
+			t.prompt = msg.Content
 			return
 		}
 	}

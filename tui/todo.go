@@ -139,9 +139,9 @@ func (m *Model) reconcileTodosAtTurnEnd() int {
 }
 
 func (m *Model) latestAssistantContent() string {
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role == "assistant" && strings.TrimSpace(m.history[i].Content) != "" {
-			return m.history[i].Content
+	for _, v := range slices.Backward(m.history) {
+		if v.Role == "assistant" && strings.TrimSpace(v.Content) != "" {
+			return v.Content
 		}
 	}
 	return ""

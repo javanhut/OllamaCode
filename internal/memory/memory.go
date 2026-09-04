@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -244,8 +245,8 @@ func (s *Store) LongTermSummary() string {
 		used += len(line) + 1
 	}
 	var b strings.Builder
-	for i := len(selected) - 1; i >= 0; i-- {
-		b.WriteString(selected[i])
+	for _, s := range slices.Backward(selected) {
+		b.WriteString(s)
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")

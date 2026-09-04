@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -116,8 +117,8 @@ func colorizeDiff(diff string, width int) string {
 // lastNonEmptyLine returns the last line of s with content, for one-line tickers.
 func lastNonEmptyLine(s string) string {
 	lines := strings.Split(s, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if ln := strings.TrimSpace(lines[i]); ln != "" {
+	for _, line := range slices.Backward(lines) {
+		if ln := strings.TrimSpace(line); ln != "" {
 			return ln
 		}
 	}

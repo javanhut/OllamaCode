@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
+	"slices"
 	"sort"
 	"strings"
 
@@ -403,9 +404,9 @@ func pinnedToolNames(mode Mode) map[string]bool {
 // to be the human's request: a loop-guard advisory rides the user role too, and
 // letting one through would silently rewrite which tools a small model can see.
 func (m *Model) latestUserRequest() string {
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if isUserTurn(m.history[i]) {
-			return strings.ToLower(m.history[i].Content)
+	for _, v := range slices.Backward(m.history) {
+		if isUserTurn(v) {
+			return strings.ToLower(v.Content)
 		}
 	}
 	return ""

@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
@@ -149,8 +150,8 @@ func (m *Model) deriveModelMessages() []api.Message {
 func historyWindow(history []api.Message, budget int) int {
 	remaining := budget
 	start := len(history)
-	for i := len(history) - 1; i >= 0; i-- {
-		cost := estimateMsgTokens(history[i])
+	for i, h := range slices.Backward(history) {
+		cost := estimateMsgTokens(h)
 		if remaining-cost < 0 && start < len(history) {
 			break // keep at least the most recent message even if oversized
 		}
@@ -230,8 +231,8 @@ const keepIntactToolResults = 8
 func (m *Model) pruneToolResults() bool {
 	boundary := 0
 	kept := 0
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role != "tool" {
+	for i, v := range slices.Backward(m.history) {
+		if v.Role != "tool" {
 			continue
 		}
 		kept++

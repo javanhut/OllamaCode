@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -41,9 +42,9 @@ func symbolAt(line string, keywords map[string]bool) (sym string, col int, ok bo
 		return "", 0, false
 	}
 	pick := spans[len(spans)-1]
-	for i := len(spans) - 1; i >= 0; i-- {
-		if !keywords[line[spans[i][0]:spans[i][1]]] {
-			pick = spans[i]
+	for _, span := range slices.Backward(spans) {
+		if !keywords[line[span[0]:span[1]]] {
+			pick = span
 			break
 		}
 	}

@@ -20,7 +20,7 @@ func openTestTerminal(t *testing.T, command string) (int, int) {
 		t.Fatalf("terminal_open: %v", err)
 	}
 	// A missing-sandbox notice can precede the result line, so scan lines.
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		var id, pid int
 		if _, err := fmt.Sscanf(line, "terminal %d opened (pid %d)", &id, &pid); err == nil {
 			return id, pid
@@ -34,7 +34,7 @@ func openTestTerminal(t *testing.T, command string) (int, int) {
 // not good enough here: the pty echoes the typed command back, so a substring
 // check passes on the echo alone even when the program produced nothing.
 func hasLine(s, want string) bool {
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.TrimSpace(line) == want {
 			return true
 		}
