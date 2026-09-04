@@ -154,7 +154,7 @@ type config struct {
 	ContextDelta  bool                       `json:"context_delta,omitempty"`  // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
 	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
 	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
-	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by model name
+	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by provider-qualified model identity
 	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
 	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
 	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
@@ -282,33 +282,34 @@ var (
 )
 
 type Model struct {
-	cfg             config
-	host            api.OllamaHost
-	tools           *tools.Registry
-	mcpServers      []tools.MCPServer
-	trace           *tracepkg.Recorder
-	lastCalibration *calibration.Result
-	notes           *sessionNotes
-	todos           *todoList
-	mode            Mode
-	state           state
-	urlInput        textinput.Model
-	keyInput        textinput.Model
-	nameInput       textinput.Model // provider name; the default host has none
-	envInput        textinput.Model // env var holding the provider's key
-	settingsFocus   settingsField
-	settingsTarget  int    // index into settingsTargets(); 0 = default host, last = new provider
-	deferredPrompt  state  // prompt that arrived while a modal was open; stateSettings = none
-	settingsKind    string // wire format of the provider being edited
-	settingsTrust   bool   // cursor providers only: pass --trust
-	models          []string
-	modelsFrom      string // provider the model list came from; "" = default host
-	picker          int
-	pickerTarget    int    // index into pickerTargets(); which endpoint /models is listing
-	pickerPurpose   string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
-	pairLocalModel  string
-	pairCursor      string
-	modelName       string
+	cfg              config
+	host             api.OllamaHost
+	tools            *tools.Registry
+	mcpServers       []tools.MCPServer
+	trace            *tracepkg.Recorder
+	lastCalibration  *calibration.Result
+	notes            *sessionNotes
+	todos            *todoList
+	mode             Mode
+	state            state
+	urlInput         textinput.Model
+	keyInput         textinput.Model
+	nameInput        textinput.Model // provider name; the default host has none
+	envInput         textinput.Model // env var holding the provider's key
+	settingsFocus    settingsField
+	settingsTarget   int    // index into settingsTargets(); 0 = default host, last = new provider
+	deferredPrompt   state  // prompt that arrived while a modal was open; stateSettings = none
+	settingsKind     string // wire format of the provider being edited
+	settingsTrust    bool   // cursor providers only: pass --trust
+	models           []string
+	modelsFrom       string // provider the model list came from; "" = default host
+	modelListRequest uint64 // invalidates stale/out-of-order /models responses
+	picker           int
+	pickerTarget     int    // index into pickerTargets(); which endpoint /models is listing
+	pickerPurpose    string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
+	pairLocalModel   string
+	pairCursor       string
+	modelName        string
 
 	// Model pulling (from the model picker). pullInput captures the name to
 	// pull; pullStream/progress fields drive the live download UI.

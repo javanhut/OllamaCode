@@ -55,9 +55,11 @@ outranks a stored key. Prefer that over typing the key.
 
 ## `profiles`
 
-Keyed by model name. Discovered from `/api/show` and cached, so `num_ctx` and
-tool support match the actual model rather than a hardcoded guess. Edit to
-override.
+Keyed by model identity: a model on the default host uses its bare name, while
+a model on another endpoint uses `provider:model`. This keeps same-named models
+on different endpoints from sharing context and sampling settings. Profiles are
+discovered from `/api/show` and cached, so `num_ctx` and tool support match the
+actual model rather than a hardcoded guess. Edit to override.
 
 ```json
 "profiles": {

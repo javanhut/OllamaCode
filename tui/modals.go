@@ -729,18 +729,23 @@ func (m *Model) questionModal() string {
 		}
 		lines = append(lines, modalBodyStyle.Render("  "+label))
 	}
+	custom := fmt.Sprintf("%d. Type a different answer…", len(m.question.Options)+1)
+	if m.questionCursor == len(m.question.Options) {
+		lines = append(lines, modalSelectStyle.Render(" "+custom+" "))
+	} else {
+		lines = append(lines, modalBodyStyle.Render("  "+custom))
+	}
 	if m.question.MultiSelect {
 		lines = append(lines, "",
 			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
 				modalMutedStyle.Render("space ")+modalBodyStyle.Render("toggle   ")+
 				modalMutedStyle.Render("enter ")+modalBodyStyle.Render("confirm   ")+
-				modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+				modalMutedStyle.Render("type/esc ")+modalBodyStyle.Render("own answer"))
 	} else {
 		lines = append(lines, "",
 			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
 				modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
-				modalMutedStyle.Render("enter ")+modalBodyStyle.Render("send   ")+
-				modalMutedStyle.Render("esc ")+modalBodyStyle.Render("answer freely"))
+				modalMutedStyle.Render("type/esc ")+modalBodyStyle.Render("own answer"))
 	}
 
 	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))

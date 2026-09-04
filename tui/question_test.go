@@ -84,8 +84,42 @@ func TestQuestionCursorStopsAtEnds(t *testing.T) {
 	for range 3 {
 		m.updateQuestion(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
-	if m.questionCursor != 1 {
-		t.Fatalf("cursor ran past the last option: %d", m.questionCursor)
+	if m.questionCursor != 2 {
+		t.Fatalf("cursor did not stop on the free-form row: %d", m.questionCursor)
+	}
+}
+
+func TestQuestionFreeformRowOpensTyping(t *testing.T) {
+	m := parkedQuestionModel(tools.AskUserQuestion{Question: "Proceed?", Options: []string{"yes", "no"}})
+	m.questionCursor = len(m.question.Options)
+	m.updateQuestion(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.state != stateChat || !m.hasPendingQuestion() {
+		t.Fatal("free-form row did not leave the question pending while opening chat input")
+	}
+	if !strings.Contains(m.toast, "press Enter") {
+		t.Fatalf("toast = %q, want typing instructions", m.toast)
+	}
+}
+
+func TestTypingInQuestionStartsFreeformAnswer(t *testing.T) {
+	m := parkedQuestionModel(tools.AskUserQuestion{Question: "Proceed?", Options: []string{"yes", "no"}})
+	m.updateQuestion(tea.KeyPressMsg{Code: 'M', Text: "M"})
+	if m.state != stateChat || m.input.Value() != "M" || !m.hasPendingQuestion() {
+		t.Fatalf("typing was swallowed instead of opening free-form input: state=%v input=%q", m.state, m.input.Value())
+	}
+}
+
+func TestTypedQuestionAnswerCompletesParkedToolCall(t *testing.T) {
+	m := parkedQuestionModel(tools.AskUserQuestion{Question: "Proceed?", Options: []string{"yes", "no"}})
+	m.input.SetValue("Use SQLite, but keep the storage interface generic")
+	if !m.takePendingQuestionAnswer(m.input.Value()) {
+		t.Fatal("free-form answer was not recognized as the pending question's answer")
+	}
+	if got := m.history[2].Content; got != "ANSWER: Use SQLite, but keep the storage interface generic" {
+		t.Fatalf("tool result = %q", got)
+	}
+	if m.input.Value() != "" || m.hasPendingQuestion() {
+		t.Fatal("free-form answer did not clear the input and pending question")
 	}
 }
 
@@ -208,7 +242,7 @@ func TestSingleSelectIgnoresSpace(t *testing.T) {
 func TestQuestionModalRendersOptions(t *testing.T) {
 	m := questionModel("postgres", "sqlite")
 	out := m.questionModal()
-	for _, want := range []string{"Which database", "1. postgres", "2. sqlite", "esc"} {
+	for _, want := range []string{"Which database", "1. postgres", "2. sqlite", "3. Type a different answer", "esc"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("modal missing %q:\n%s", want, out)
 		}

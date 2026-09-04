@@ -238,18 +238,18 @@ prose:
 │  1. postgres                                        │
 │  2. sqlite                                          │
 │  3. mysql                                           │
+│  4. Type a different answer…                        │
 │                                                     │
-│ ↑/↓ move   1-9 pick   enter send   esc answer freely │
+│ ↑/↓ move   1-9 pick   type/esc own answer           │
 └─────────────────────────────────────────────────────┘
 ```
 
-The chosen label is sent as your next message, so the model gets back one of its
-own strings rather than free-form text it has to interpret — which is the
-difference between a decided turn and another clarifying round, especially for a
-small model. `esc` closes the picker without answering, for when none of the
-options is the real answer; the model is still waiting either way. `options` is
-an array, though a pipe-separated string is still salvaged for models that send
-the older shape.
+The options are shortcuts, not a restriction. Choose one, move to **Type a
+different answer**, press `esc`, or simply start typing while the picker is
+open. Both a selected label and free-form text complete the original
+`ask_user` call as `ANSWER: <text>`; the question is never left unresolved in
+model history. `options` is an array, though a pipe-separated string is still
+salvaged for models that send the older shape.
 
 ## Small-model toolset
 

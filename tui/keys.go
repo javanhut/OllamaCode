@@ -20,6 +20,7 @@ import (
 func (m *Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		m.modelListRequest++ // invalidate an endpoint probe still in flight
 		m.state = stateChat
 		m.input.Focus()
 		return m, nil
@@ -251,6 +252,7 @@ func (m *Model) updatePicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusErr = false
 		return m, m.fetchModels()
 	case "esc":
+		m.modelListRequest++ // a late list reply must not reopen the picker
 		m.state = stateChat
 		m.input.Focus()
 		return m, nil
@@ -380,13 +382,17 @@ func (m *Model) modelInfoCommand(args string) {
 			m.toast = "ctx must be a number ≥ 1024"
 			return
 		}
+		if m.modelName == "" {
+			m.toast = "no model selected — use /models to pick one"
+			return
+		}
 		p := m.profile
 		p.NumCtx = n
 		// An explicit override outranks a ceiling learned from an earlier
 		// allocation failure — the GPU may have freed up since.
 		m.host.ForgetContextCeiling(m.modelName)
 		m.saveProfile(p)
-		m.toast = fmt.Sprintf("num_ctx for %s set to %d", m.modelName, m.contextLimit)
+		m.toast = fmt.Sprintf("num_ctx for %s set to %d", m.activeModelLabel(), m.contextLimit)
 		return
 	case "temp":
 		if len(fields) != 2 {
@@ -398,10 +404,14 @@ func (m *Model) modelInfoCommand(args string) {
 			m.toast = "temp must be a number between 0.0 and 2.0"
 			return
 		}
+		if m.modelName == "" {
+			m.toast = "no model selected — use /models to pick one"
+			return
+		}
 		p := m.profile
 		p.Temperature = &f
 		m.saveProfile(p)
-		m.toast = fmt.Sprintf("temperature for %s set to %.2f", m.modelName, f)
+		m.toast = fmt.Sprintf("temperature for %s set to %.2f", m.activeModelLabel(), f)
 		return
 	default:
 		// A bare name is shorthand for "/model use <name>".
@@ -429,7 +439,7 @@ func (m *Model) saveProfile(p ModelProfile) {
 	if m.cfg.Profiles == nil {
 		m.cfg.Profiles = map[string]ModelProfile{}
 	}
-	m.cfg.Profiles[m.modelName] = p
+	m.cfg.Profiles[m.profileKey()] = p
 	saveConfig(m.cfg)
 	m.applyProfile(p)
 }
@@ -442,7 +452,7 @@ func (m *Model) showModelInfo() {
 	}
 	p := m.profile
 	var b strings.Builder
-	fmt.Fprintf(&b, "Current model: %s\n", m.modelName)
+	fmt.Fprintf(&b, "Current model: %s\n", m.activeModelLabel())
 	fmt.Fprintf(&b, "- context (num_ctx): %d tokens\n", m.contextLimit)
 	if p.ParamsB > 0 {
 		fmt.Fprintf(&b, "- parameters: %.1fB\n", p.ParamsB)
@@ -484,12 +494,10 @@ func (m *Model) showModelInfo() {
 
 // cancelPull aborts an in-flight model download and clears the streaming state.
 
-// updateQuestion drives the ask_user option picker. Esc does not cancel the
-// question — there is nothing to cancel, the model is already waiting — it just
-// closes the picker so the answer can be typed instead, which is what an option
-// list that does not cover the real answer needs. A typed answer goes through
-// submit() as a user message and the parked tool result keeps its placeholder,
-// so each question is answered by exactly one delivery path.
+// updateQuestion drives the ask_user option picker. Options are shortcuts, not
+// a constraint: selecting the final row, pressing Esc, or simply beginning to
+// type opens free-form input. That text completes the parked tool call, just as
+// selecting an option does, so the model never sees an unanswered question.
 func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	options := m.question.Options
 	if len(options) == 0 {
@@ -498,20 +506,21 @@ func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key := msg.String(); key {
-	case "up", "k":
+	case "up":
 		if m.questionCursor > 0 {
 			m.questionCursor--
 		}
 		return m, nil
-	case "down", "j":
-		if m.questionCursor < len(options)-1 {
+	case "down":
+		// One extra row is always available for a free-form answer.
+		if m.questionCursor < len(options) {
 			m.questionCursor++
 		}
 		return m, nil
 	case " ", "space":
 		// Space toggles the focused row's checkbox; single-select questions
 		// ignore it, so space never eats a keypress that means nothing.
-		if !m.question.MultiSelect {
+		if !m.question.MultiSelect || m.questionCursor >= len(options) {
 			return m, nil
 		}
 		if m.questionChecked == nil {
@@ -520,11 +529,11 @@ func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.questionChecked[m.questionCursor] = !m.questionChecked[m.questionCursor]
 		return m, nil
 	case "esc":
-		m.state = stateChat
-		m.input.Focus()
-		m.toast = "type your answer"
-		return m, nil
+		return m.beginQuestionFreeform()
 	case "enter":
+		if m.questionCursor == len(options) {
+			return m.beginQuestionFreeform()
+		}
 		if m.question.MultiSelect {
 			return m.resolveQuestion(m.multiSelectAnswer())
 		}
@@ -534,11 +543,47 @@ func (m *Model) updateQuestion(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.resolveQuestion([]string{options[m.questionCursor]})
 	default:
 		choice, ok := chooseQuestionOption(key, m.questionCursor, options)
-		if !ok {
-			return m, nil
+		if ok {
+			return m.resolveQuestion([]string{choice})
 		}
-		return m.resolveQuestion([]string{choice})
+		// Typing should feel like typing, not like a swallowed modal key. Seed
+		// the chat input with this event; subsequent characters go there normally.
+		if msg.Text != "" && !strings.ContainsAny(msg.Text, "\r\n") {
+			m.beginQuestionFreeform()
+			m.input.SetValue(msg.Text)
+			m.input.CursorEnd()
+		}
+		return m, nil
 	}
+}
+
+// beginQuestionFreeform closes only the dropdown, not the pending question.
+// The next ordinary chat submission is delivered as the ask_user tool result
+// by takePendingQuestionAnswer, preserving the same paused model turn.
+func (m *Model) beginQuestionFreeform() (tea.Model, tea.Cmd) {
+	m.state = stateChat
+	m.input.Focus()
+	m.toast = "type your own answer and press Enter"
+	return m, nil
+}
+
+func (m *Model) hasPendingQuestion() bool {
+	i := m.questionResult
+	return m.question.Question != "" && i >= 0 && i < len(m.history) &&
+		m.history[i].Role == "tool" && m.history[i].ToolName == "ask_user"
+}
+
+// takePendingQuestionAnswer converts free-form input into the result of the
+// parked ask_user call. Treating it as a new user turn leaves the tool call
+// visibly unanswered in model history, which encourages another ask_user call
+// and traps the user in a prompt loop.
+func (m *Model) takePendingQuestionAnswer(answer string) bool {
+	if !m.hasPendingQuestion() || strings.TrimSpace(answer) == "" {
+		return false
+	}
+	m.input.Reset()
+	m.applyQuestionAnswer(answer)
+	return true
 }
 
 // checkedQuestionOptions returns the toggled labels in list order, so the
@@ -952,6 +997,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.pickerPurpose, m.pairLocalModel, m.pairCursor = "", "", ""
 			m.pickerTarget = max(slices.Index(m.pickerTargets(), m.activeProvider()), 0)
+			m.state = stateModelPicker
+			m.input.Blur()
 			m.statusMsg = "refreshing…"
 			m.statusErr = false
 			return m, m.fetchModels()
@@ -1223,6 +1270,12 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
 			return m, nil
+		}
+		if m.takePendingQuestionAnswer(val) {
+			cmd := m.startStream()
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, cmd
 		}
 		if m.modelName == "" {
 			m.input.Reset()

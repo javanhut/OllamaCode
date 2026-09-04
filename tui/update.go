@@ -66,7 +66,8 @@ type modelsLoadedMsg struct {
 	// from names the provider the list came from ("" = default host). Selecting
 	// a model has to remember this or the name is stored bare and every unbound
 	// mode then asks the LOCAL daemon for a model only that provider has.
-	from string
+	from    string
+	request uint64
 }
 
 // modelsAutoMsg carries the model list fetched at startup so the first available
@@ -74,7 +75,11 @@ type modelsLoadedMsg struct {
 type modelsAutoMsg struct {
 	models []string
 }
-type connectErrMsg struct{ err error }
+type connectErrMsg struct {
+	err     error
+	from    string
+	request uint64
+}
 
 type companionTranscriptMsg struct{ text string }
 type companionErrorMsg struct{ err error }
@@ -524,6 +529,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case modelsLoadedMsg:
+		// Escaping a loading picker must keep it closed. Likewise, a slow reply
+		// from the endpoint we just left must not replace the current list.
+		if m.state != stateModelPicker && m.state != stateSettings {
+			return m, nil
+		}
+		if msg.request != 0 && msg.request != m.modelListRequest {
+			return m, nil
+		}
 		m.models = msg.models
 		m.modelsFrom = msg.from
 		m.statusMsg = ""
@@ -601,6 +614,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.fetchModels()
 
 	case connectErrMsg:
+		// Model-list probes are modal work. If the user already closed the modal,
+		// the late network error is stale and should not become a chat error.
+		if m.state != stateSettings && m.state != stateModelPicker {
+			return m, nil
+		}
+		if msg.request != 0 && msg.request != m.modelListRequest {
+			return m, nil
+		}
 		m.statusMsg = msg.err.Error()
 		m.statusErr = true
 		if m.state == stateSettings {
@@ -1422,16 +1443,18 @@ func (m *Model) fetchModels() tea.Cmd { return m.fetchModelsFrom(m.pickerHost())
 // can verify the endpoint it just saved rather than whichever one is routed.
 // from is carried through to the picker so a selection keeps its provider.
 func (m *Model) fetchModelsFrom(host api.OllamaHost, from string) tea.Cmd {
+	m.modelListRequest++
+	request := m.modelListRequest
 	return func() tea.Msg {
 		list, err := host.GetModelList()
 		if err != nil {
-			return connectErrMsg{err: err}
+			return connectErrMsg{err: err, from: from, request: request}
 		}
 		names := make([]string, 0, len(list.Models))
 		for _, mod := range list.Models {
 			names = append(names, mod.Name)
 		}
-		return modelsLoadedMsg{models: names, from: from}
+		return modelsLoadedMsg{models: names, from: from, request: request}
 	}
 }
 

@@ -85,5 +85,5 @@ func (m *Model) applyCalibration() {
 	profile := m.profile
 	profile.CapabilityTier = result.Recommended
 	m.saveProfile(profile)
-	m.toast = fmt.Sprintf("applied %s tier to %s from calibration %.0f%%", result.Recommended, m.modelName, result.Score()*100)
+	m.toast = fmt.Sprintf("applied %s tier to %s from calibration %.0f%%", result.Recommended, m.activeModelLabel(), result.Score()*100)
 }

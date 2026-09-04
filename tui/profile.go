@@ -22,13 +22,19 @@ func (m *Model) resolveProfile() {
 	if name == "" {
 		return
 	}
+	key := m.profileKey()
 
 	// cursor-agent is an agent, not a model: it reads the workspace itself and
 	// speaks no tool protocol, so offering it OllamaCode's tools would only get
 	// fake tool JSON back inside its prose. SupportsTools false makes startStream
 	// send none.
 	if m.host.IsCursor() {
-		m.applyProfile(ModelProfile{NumCtx: maxContextBudget, SupportsTools: false})
+		p := ModelProfile{NumCtx: maxContextBudget, SupportsTools: false}
+		if cached, ok := m.cfg.Profiles[key]; ok && cached.NumCtx > 0 {
+			p = cached
+			p.SupportsTools = false
+		}
+		m.applyProfile(p)
 		return
 	}
 
@@ -39,7 +45,7 @@ func (m *Model) resolveProfile() {
 	// so it is treated as a big model (full prompt, full toolset).
 	if m.host.IsOpenAI() {
 		p := ModelProfile{NumCtx: maxContextBudget, SupportsTools: true}
-		if cached, ok := m.cfg.Profiles[name]; ok && cached.NumCtx > 0 {
+		if cached, ok := m.cfg.Profiles[key]; ok && cached.NumCtx > 0 {
 			p = cached
 		}
 		m.applyProfile(p)
@@ -49,7 +55,7 @@ func (m *Model) resolveProfile() {
 	if m.cfg.Profiles != nil {
 		// ParamsB == 0 also re-probes profiles cached before tier detection
 		// existed; one /api/show per model switch is cheap and self-heals.
-		if p, ok := m.cfg.Profiles[name]; ok && p.NumCtx > 0 && p.ParamsB > 0 {
+		if p, ok := m.cfg.Profiles[key]; ok && p.NumCtx > 0 && p.ParamsB > 0 {
 			m.applyProfile(p)
 			return
 		}
@@ -68,14 +74,14 @@ func (m *Model) resolveProfile() {
 		}
 		p.ParamsB = show.ParamsB()
 	}
-	if cached, ok := m.cfg.Profiles[name]; ok {
+	if cached, ok := m.cfg.Profiles[key]; ok {
 		p = preserveProfileOverrides(p, cached)
 	}
 
 	if m.cfg.Profiles == nil {
 		m.cfg.Profiles = map[string]ModelProfile{}
 	}
-	m.cfg.Profiles[name] = p
+	m.cfg.Profiles[key] = p
 	saveConfig(m.cfg)
 	m.applyProfile(p)
 }

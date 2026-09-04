@@ -135,6 +135,13 @@ func (m *Model) activeModelLabel() string {
 	return m.modelName
 }
 
+// profileKey is the stable identity used for per-model settings. Model names
+// are only unique within an endpoint: a local "auto" and "cursor:auto" must
+// not share context or sampling overrides.
+func (m *Model) profileKey() string {
+	return m.activeModelLabel()
+}
+
 // selectModel makes a picked model the default, keeping the provider it was
 // listed from. Storing it bare is what made every unbound mode ask the local
 // daemon for a model only the provider has, and 404.

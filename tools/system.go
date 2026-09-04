@@ -118,7 +118,7 @@ func AskUserTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "ask_user",
-			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as a list the user picks from with one keypress, so you get back exactly one of your own labels instead of free-form prose to interpret. The user's pick is delivered as this tool's result (ANSWER: <label>). Set multi_select=true when several options may apply at once; the result then lists every chosen label. Set recommended to the option you would pick — it is listed first and marked, but the user can still choose anything else. After calling this, STOP and wait — the answer arrives as the tool result.",
+			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as quick suggestions, but the user can always type a different answer. Either response is delivered as this tool's result (ANSWER: <text>); treat free-form detail as authoritative instead of forcing it back into an option. Set multi_select=true when several suggested options may apply at once. Set recommended to the option you would pick — it is listed first and marked. After calling this, STOP and wait — the answer arrives as the tool result.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
