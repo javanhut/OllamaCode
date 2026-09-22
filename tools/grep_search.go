@@ -77,6 +77,14 @@ func runRipgrep(ctx context.Context, rg string, q grepQuery) (string, error) {
 	for _, g := range q.Globs {
 		argv = append(argv, "-g", g)
 	}
+	// rg skips only what the ignore files list; a repo that never listed
+	// node_modules would still flood the output. Apply the same skip list as
+	// the grep fallback, unless the search names a skipped dir explicitly.
+	if q.Recursive && !pathInSkippedDir(q.Path) {
+		for dir := range gitignore.DefaultSkipDirs {
+			argv = append(argv, "-g", "!"+dir+"/")
+		}
+	}
 	argv = append(argv, "-e", q.Pattern, "--", q.Path)
 	out, err := exec.CommandContext(ctx, rg, argv...).CombinedOutput()
 	text := strings.TrimRight(stripANSI(string(out)), "\n")
