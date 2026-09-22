@@ -65,6 +65,48 @@ func (r *Registry) ParseToolCallsFromContent(content string) []ToolCall {
 	return nil
 }
 
+// StripToolCalls removes the spans ParseToolCallsFromContent would have
+// executed and returns whatever prose surrounded them. A reply that is a real
+// answer PLUS a trailing tool call must lose only the call: recognizer 1 matches
+// a tag anywhere in the message, so blanking the whole reply threw away the very
+// answer a gate had re-invoked the model to get.
+func StripToolCalls(content string) string {
+	out := toolCallTagRe.ReplaceAllString(content, "")
+	out = functionTagRe.ReplaceAllString(out, "")
+	// Only fences that could BE a call go. jsonFenceRe's language group is
+	// optional, so stripping every match deleted the ```go and ```diff blocks
+	// out of "here is the fix: <code> <tool_call>…" — permanently, since history
+	// is what gets re-sent on every later turn. The models this text-parsing
+	// fallback exists for are exactly the ones that answer that way.
+	out = jsonFenceRe.ReplaceAllStringFunc(out, func(fence string) string {
+		inner := jsonFenceRe.FindStringSubmatch(fence)
+		if len(inner) < 2 || !looksLikeCallJSON(inner[1]) {
+			return fence
+		}
+		return ""
+	})
+	out = strings.TrimSpace(out)
+	// Recognizers 3 and 4 only accept calls that dominate the message, so what is
+	// left of one of those is noise, not an answer.
+	if (strings.HasPrefix(out, "{") && strings.HasSuffix(out, "}")) ||
+		(strings.HasPrefix(out, "[") && strings.HasSuffix(out, "]")) {
+		return ""
+	}
+	return out
+}
+
+// looksLikeCallJSON reports whether a fence's contents could be a tool call:
+// well-formed JSON opening as an object or an array. A code block in any
+// language fails it, which is the whole point — no registry lookup needed,
+// since the recognizers already decided there IS a call in this message.
+func looksLikeCallJSON(s string) bool {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") && !strings.HasPrefix(s, "[") {
+		return false
+	}
+	return json.Valid([]byte(s))
+}
+
 // parseCallObjects parses s as a tool-call object or array of them.
 func (r *Registry) parseCallObjects(s string) []ToolCall {
 	s = strings.TrimSpace(s)
@@ -119,7 +161,7 @@ func (r *Registry) toCallNamed(name string, args json.RawMessage) (ToolCall, boo
 	if name == "" {
 		return ToolCall{}, false
 	}
-	if _, ok := r.tools[name]; !ok {
+	if _, ok := r.Lookup(name); !ok {
 		return ToolCall{}, false
 	}
 	args = bytesTrim(args)

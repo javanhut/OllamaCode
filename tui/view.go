@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -18,9 +17,11 @@ var slashCommands = []struct {
 }{
 	{"/quit", "exit the application"},
 	{"/exit", "exit the application"},
-	{"/settings", "change Ollama URL"},
-	{"/model", "pick a model"},
-	{"/models", "pick a model"},
+	{"/settings", "edit endpoint URLs and API keys"},
+	{"/provider", "add or edit an API endpoint and its key"},
+	{"/model", "show/set/calibrate the current model"},
+	{"/models", "list, switch, or pull models"},
+	{"/route", "bind a model to a mode (big for plan, small for write)"},
 	{"/clear", "reset the conversation"},
 	{"/help", "show help screen"},
 	{"/?", "show help screen"},
@@ -33,6 +34,12 @@ var slashCommands = []struct {
 	{"/sessions", "list saved sessions"},
 	{"/archive", "retrieve compressed archive"},
 	{"/undo", "revert the last turn's file changes"},
+	{"/rewind", "drop the last n turns of conversation (default 1)"},
+	{"/fork", "branch the conversation into a saved session"},
+	{"/rename", "rename the current saved session"},
+	{"/title", "set the session title (pins it against auto-titling)"},
+	{"/stash", "park the current draft, clearing the input"},
+	{"/unstash", "restore the most recently stashed draft"},
 	{"/clearnotes", "clear the session notes scratchpad"},
 	{"/dreams", "show what it dreamt about while idle"},
 	{"/dream", "toggle idle dream mode on/off"},
@@ -40,16 +47,54 @@ var slashCommands = []struct {
 	{"/welcome", "toggle the startup welcome panel on/off"},
 	{"/verify", "toggle auto compile-check after edits"},
 	{"/verbose", "toggle detailed tool output"},
+	{"/stats", "session timing and token totals"},
+	{"/rate", "rate the last turn good/bad for the fine-tune dataset"},
+	{"/jobs", "list and kill background shell and sub-agent jobs"},
+	{"/compact", "compress older history into a summary now"},
+	{"/show_thinking", "toggle live and saved model reasoning"},
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
+	{"/research", "guided web research: dedupe sources, synthesize with citations"},
+	{"/init", "generate or update AGENTS.md project instructions"},
+	{"/instructions", "list loaded AGENTS.md instruction files (reload to re-read)"},
+	{"/commands", "list custom markdown commands (reload to re-read)"},
+}
+
+// isSlashCommand reports whether val is exactly a known command. The suggestion
+// list deliberately omits the exact match, so without this check Enter would
+// swap a fully-typed "/model" for the only remaining suggestion, "/models".
+func isSlashCommand(val string) bool {
+	for _, c := range slashCommands {
+		if c.name == val {
+			return true
+		}
+	}
+	return false
+}
+
+// isBuiltinSlashCommand is isSlashCommand under the name custom-command
+// loading reads it by: a file may not shadow a built-in.
+func isBuiltinSlashCommand(name string) bool { return isSlashCommand(name) }
+
+// isKnownSlashCommand also accepts custom markdown commands.
+func (m *Model) isKnownSlashCommand(val string) bool {
+	if isSlashCommand(val) {
+		return true
+	}
+	_, _, ok := m.findCustomCommand(val)
+	return ok && !strings.Contains(val, " ")
+}
+
+func (m *Model) dismissSlash() {
+	m.slashVisible = false
+	m.slashSuggestions = nil
+	m.slashSelected = 0
 }
 
 func (m *Model) updateSlashSuggestions() {
 	val := m.input.Value()
 	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") || strings.Contains(val, "\n") {
-		m.slashVisible = false
-		m.slashSuggestions = nil
-		m.slashSelected = 0
+		m.dismissSlash()
 		return
 	}
 	var matches []string
@@ -61,6 +106,11 @@ func (m *Model) updateSlashSuggestions() {
 			}
 		}
 	}
+	for _, c := range m.customCommands {
+		if strings.HasPrefix(c.name, val) && val != c.name && !slices.Contains(matches, c.name) {
+			matches = append(matches, c.name)
+		}
+	}
 	if len(matches) > 0 {
 		m.slashVisible = true
 		m.slashSuggestions = matches
@@ -68,9 +118,7 @@ func (m *Model) updateSlashSuggestions() {
 			m.slashSelected = 0
 		}
 	} else {
-		m.slashVisible = false
-		m.slashSuggestions = nil
-		m.slashSelected = 0
+		m.dismissSlash()
 	}
 }
 
@@ -102,8 +150,18 @@ func (m *Model) View() tea.View {
 		v.SetContent(m.overlayModal(base, m.notesModal()))
 	case statePermission:
 		v.SetContent(m.overlayModal(base, m.permissionModal()))
+	case stateQuestion:
+		v.SetContent(m.overlayModal(base, m.questionModal()))
+	case stateLoopGuard:
+		v.SetContent(m.overlayModal(base, m.loopGuardModal()))
+	case stateRouteConfirm:
+		v.SetContent(m.overlayModal(base, m.routeConfirmModal()))
 	case stateDiff:
 		v.SetContent(m.overlayModal(base, m.diffModal()))
+	case stateStats:
+		v.SetContent(m.overlayModal(base, m.statsModal()))
+	case stateJobs:
+		v.SetContent(m.overlayModal(base, m.jobsModal()))
 	default:
 		v.SetContent(base)
 	}
@@ -114,6 +172,12 @@ type windowRange struct{ start, end int }
 
 func (m *Model) viewChat() string {
 	main := m.viewport.View()
+	// Paint the scroll cue over the transcript's last row rather than adding a
+	// band: a band changes the viewport height, which changes whether the user
+	// is at the bottom, which decides whether the cue shows at all.
+	if cue := m.scrollCue(); cue != "" {
+		main = overlay(main, cue, max(m.viewport.Width()-lipgloss.Width(cue), 0), m.viewport.Height()-1)
+	}
 	if bar := m.sidebarView(m.viewport.Height()); bar != "" {
 		main = lipgloss.JoinHorizontal(lipgloss.Top, main, sidebarGap, bar)
 	}
@@ -132,31 +196,74 @@ func (m *Model) headerView() string {
 		width = 80
 	}
 
-	brand := lipgloss.NewStyle().
+	chip := lipgloss.NewStyle().
 		Background(c).
 		Foreground(lipgloss.Color("232")).
 		Bold(true).
-		Padding(0, 1).
-		Render("ollama code")
-	modelText := m.activeModelName()
-	if width < 42 {
-		modelText = ""
+		Padding(0, 1)
+	mode := strings.ToUpper(m.mode.String())
+	brand := chip.Render("ollama code")
+	modeChip := chip.Render(mode)
+	// Shrink the badges before anything is allowed to wrap onto a second row.
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		brand = chip.Render("oc")
 	}
-	model := bodyStyle.Copy().Background(surfaceColor).Bold(true).Render(modelText)
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		modeChip = chip.Render(mode[:1])
+	}
+	if lipgloss.Width(brand)+lipgloss.Width(modeChip) > width {
+		modeChip = ""
+	}
 
-	right := ""
-	metaSpace := width - lipgloss.Width(brand) - lipgloss.Width(model) - 3
-	branch := ""
-	if m.gitBranch != "" && metaSpace > 4 {
-		branch = "  " + truncatePlain(m.gitBranch, metaSpace-2)
+	// Right edge: branch and context usage, then the mode chip — it balances the
+	// brand badge and keeps the mode visible when the sidebar is hidden. The
+	// whole right half of this row used to be dead space.
+	var meta []string
+	if m.gitBranch != "" {
+		// Trim the branch, not the joined string — a long branch name would
+		// otherwise eat the context counter, which is the more useful half.
+		meta = append(meta, truncatePlain(m.gitBranch, max(width/5, 12)))
 	}
-	meta := mutedStyle.Copy().Background(surfaceColor).Render(branch)
+	// Mid-turn the completed count is stale, so the meter shows the live
+	// estimate (history plus the partial reply) whenever it runs ahead.
+	m.ensureMeasuredRatio()
+	tokens := m.displayTokens()
+	if tokens > 0 && m.contextLimit > 0 {
+		meta = append(meta, fmt.Sprintf("%dk/%dk ctx", tokens/1000, m.contextLimit/1000))
+	}
+	metaStyle := mutedStyle.Background(surfaceColor)
+	if m.contextLimit > 0 && tokens > m.contextLimit*8/10 {
+		metaStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(surfaceColor)
+	}
+	// roomFor is what the left side has left once brand, right side and the gap
+	// between them are accounted for. Both the meta and the model name test
+	// against it, so they can't disagree about who gets the last columns.
+	who := m.activeModelName()
+	roomFor := func(right string) int {
+		return width - lipgloss.Width(brand) - lipgloss.Width(right) - 4
+	}
+	right := modeChip
+	if s := strings.Join(meta, " · "); s != "" && width >= 60 {
+		// Identity outranks the meta: only keep branch/ctx if the name still fits.
+		if withMeta := metaStyle.Render(s+"  ") + right; roomFor(withMeta) > lipgloss.Width(who) {
+			right = withMeta
+		}
+	}
+
+	// Left: assistant name plus the loaded model, trimmed to what's left over.
 	left := brand
-	if modelText != "" {
-		left += chromeStyle.Render("  ") + model
+	if room := roomFor(right); room > lipgloss.Width(who) {
+		label := bodyStyle.Background(surfaceColor).Bold(true).Render(who)
+		if name := strings.TrimSpace(m.activeModelLabel()); name != "" {
+			// Below ~10 columns a truncated model name is noise; drop it instead.
+			if avail := room - lipgloss.Width(who) - 3; avail >= 10 {
+				label += mutedStyle.Background(surfaceColor).Render(" · " + truncatePlain(name, avail))
+			}
+		}
+		left += chromeStyle.Render("  ") + label
 	}
-	left += meta
-	pad := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
+
+	pad := max(0, width-lipgloss.Width(left)-lipgloss.Width(right))
 	row := chromeStyle.Width(width).Render(left + chromeStyle.Render(strings.Repeat(" ", pad)) + right)
 	rule := lipgloss.NewStyle().Foreground(c).Render(strings.Repeat("─", width))
 	return row + "\n" + rule
@@ -194,62 +301,141 @@ func slashDesc(name string) string {
 	return ""
 }
 
+// slashDescFor describes built-in and custom commands alike.
+func (m *Model) slashDescFor(name string) string {
+	if d := slashDesc(name); d != "" {
+		return d
+	}
+	for _, c := range m.customCommands {
+		if c.name == name {
+			return c.description
+		}
+	}
+	return ""
+}
+
+// slashMenuRows caps how many commands the completion menu shows at once. A
+// bare "/" matches every command, and drawing all of them buried the transcript
+// and squeezed the sidebar until its box couldn't close.
+const slashMenuRows = 8
+
 func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
 	}
-	rowStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252"))
-	selStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("39")).
-		Foreground(lipgloss.Color("232")).
-		Bold(true)
-	hintStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("245")).
-		Italic(true)
+	return m.suggestionMenuView(m.slashSuggestions, m.slashDescFor, m.slashSelected)
+}
 
-	// Width the rows to the widest command + description so the highlight bar is
-	// a clean vertical block.
+// mentionSuggestionsView renders the @file completion menu — same chrome as
+// the slash menu, no description column (paths are self-describing).
+func (m *Model) mentionSuggestionsView() string {
+	if !m.mentionVisible || len(m.mentionSuggestions) == 0 {
+		return ""
+	}
+	return m.suggestionMenuView(m.mentionSuggestions, func(string) string { return "" }, m.mentionSelected)
+}
+
+// suggestionMenuView draws one completion dropdown: highlighted row, scrolled
+// window, and a hint/caption footer. Shared by the slash-command and @file
+// menus so they look and behave identically.
+func (m *Model) suggestionMenuView(suggestions []string, descFor func(string) string, selected int) string {
+	c := m.mode.color()
+	nameStyle := lipgloss.NewStyle().Foreground(c).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	selStyle := lipgloss.NewStyle().Background(c).Foreground(lipgloss.Color("232")).Bold(true)
+
+	total := len(suggestions)
+	rows := slashMenuRows
+	if m.height > 0 {
+		rows = clamp(m.height/3, 3, slashMenuRows) // never eat the transcript on a short terminal
+	}
+	win := pickerWindow(total, selected, rows)
+
+	hint := "↑↓ move · tab complete · enter select"
+	counter := ""
+	if win.end-win.start < total {
+		counter = fmt.Sprintf("%d/%d", selected+1, total)
+	}
+
+	// Measure across every match, not just the visible window, so the box
+	// doesn't jitter in width while scrolling.
 	nameW, descW := 0, 0
-	for _, s := range m.slashSuggestions {
-		if w := lipgloss.Width(s); w > nameW {
-			nameW = w
-		}
-		if w := lipgloss.Width(slashDesc(s)); w > descW {
-			descW = w
-		}
+	for _, s := range suggestions {
+		nameW = max(nameW, lipgloss.Width(s))
+		descW = max(descW, lipgloss.Width(descFor(s)))
 	}
-	lineW := nameW + descW + 4
+	inner := max(nameW+descW+4, lipgloss.Width(hint)+lipgloss.Width(counter)+2)
+	if m.width > 0 {
+		inner = min(inner, m.width-5) // border (2) + padding (2) + left margin (1)
+	}
+	descCol := max(inner-nameW-4, 1)
 
-	var b strings.Builder
-	for i, s := range m.slashSuggestions {
-		text := fmt.Sprintf(" %-*s  %s", nameW, s, slashDesc(s))
-		st := rowStyle
-		if i == m.slashSelected {
-			st = selStyle
+	var lines []string
+	for i := win.start; i < win.end; i++ {
+		s := suggestions[i]
+		desc := descFor(s)
+		if i == selected {
+			text := fmt.Sprintf("› %-*s  %s", nameW, s, desc)
+			lines = append(lines, selStyle.Width(inner).Render(truncatePlain(text, inner)))
+			continue
 		}
-		b.WriteString(st.Width(lineW).Render(text))
-		b.WriteString("\n")
+		lines = append(lines,
+			"  "+nameStyle.Render(fmt.Sprintf("%-*s", nameW, s))+"  "+descStyle.Render(truncatePlain(desc, descCol)))
 	}
-	b.WriteString(hintStyle.Render(" tab/shift+tab to cycle · enter to select "))
-	return b.String()
+
+	// A rule and a caption row close the box: hint left, position right.
+	lines = append(lines, borderStyle.Render(strings.Repeat("─", inner)))
+	gap := max(inner-lipgloss.Width(hint)-lipgloss.Width(counter), 1)
+	lines = append(lines, hintStyle.Render(hint)+strings.Repeat(" ", gap)+mutedStyle.Render(counter))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c).
+		Padding(0, 1).
+		MarginLeft(1).
+		Width(inner + 4).
+		Render(strings.Join(lines, "\n"))
 }
 
 // inputPrefix renders the label that sits left of the input band. layout()
 // measures it to size the textarea, so the math lives in exactly one place.
+// The label is pinned to a fixed width. It used to swap "message" for the much
+// longer "queued while streaming", which changed the prefix width mid-typing and
+// re-wrapped whatever was already in the buffer.
+const inputLabelWidth = 7
+
 func (m *Model) inputPrefix() string {
 	c := m.mode.color()
 	label := "message"
 	if m.streaming {
-		label = "queued while streaming"
+		label = "queued"
 	}
 	return lipgloss.NewStyle().
 		Background(c).
 		Foreground(lipgloss.Color("232")).
 		Bold(true).
 		Padding(0, 1).
+		Width(inputLabelWidth + 2).
 		Render(label)
+}
+
+// inputPrefixColumn stacks the label over a matching gutter so it lines up with
+// a textarea that has grown past one row. Plain concatenation left rows 2..N
+// starting at column 0 while row 1 sat behind the label.
+func (m *Model) inputPrefixColumn(height int) string {
+	prefix := m.inputPrefix()
+	if height <= 1 {
+		return prefix
+	}
+	gutter := lipgloss.NewStyle().
+		Background(panelColor).
+		Render(strings.Repeat(" ", lipgloss.Width(prefix)))
+	rows := make([]string, height)
+	rows[0] = prefix
+	for i := 1; i < height; i++ {
+		rows[i] = gutter
+	}
+	return strings.Join(rows, "\n")
 }
 
 // narrowStatusLine is the one-line status strip shown above the input band
@@ -257,38 +443,93 @@ func (m *Model) inputPrefix() string {
 // carry status and toast in the sidebar instead. It is always exactly one
 // line so the band height — and the layout math built on it — stays stable.
 func (m *Model) narrowStatusLine() string {
-	if m.sidebarWidth() > 0 {
+	// Width, not sidebarWidth(): layout() measures this band before it knows the
+	// viewport height, and sidebar visibility depends on that height.
+	if m.width >= 60 {
 		return ""
 	}
-	text, busy := m.statusText()
-	var line string
-	if busy {
-		line = m.spinner.View() + " " + bodyStyle.Copy().Bold(true).Render(text)
-	} else {
-		line = mutedStyle.Render(text)
-	}
-	if m.toast != "" {
-		line += "  " + hintStyle.Render(truncatePlain(m.toast, max(m.width-lipgloss.Width(text)-4, 10)))
+	width := max(m.width, 1)
+	line := m.statusLine(width)
+	// The toast gets whatever the status leaves, and is dropped rather than
+	// squeezed below a readable stub: the old 10-column floor pushed the line
+	// past the terminal edge, the terminal wrapped it, and the band this
+	// function promises is one row tall became two.
+	if toast := m.activeToast(); toast != "" {
+		if room := width - lipgloss.Width(line) - 2; room >= 10 {
+			line += "  " + hintStyle.Render(truncatePlain(toast, room))
+		}
 	}
 	return line
 }
 
-func (m *Model) inputView() string {
-	prefix := m.inputPrefix()
+// scrollCue tells the user the transcript continues below when they've scrolled
+// up — otherwise a streaming reply lands off-screen with nothing to say so.
+// Only shown when already scrolled up, so adding the row can't flip the state
+// that produced it.
+func (m *Model) scrollCue() string {
+	if m.viewport.Height() <= 0 || m.viewport.AtBottom() {
+		return ""
+	}
+	below := m.viewport.TotalLineCount() - m.viewport.YOffset() - m.viewport.Height()
+	if below <= 0 {
+		return ""
+	}
+	text := fmt.Sprintf(" ↓ %d more line%s · ctrl+g to jump ", below, plural(below))
+	if w := m.viewport.Width(); lipgloss.Width(text) > w {
+		text = fmt.Sprintf(" ↓ %d ", below)
+		if lipgloss.Width(text) > w {
+			return ""
+		}
+	}
+	return lipgloss.NewStyle().
+		Background(surfaceColor).
+		Foreground(lipgloss.Color("245")).
+		Render(text)
+}
 
+func (m *Model) inputView() string {
 	// The mascot is drawn separately as a corner overlay (see overlayFace), so
 	// the input takes the full width here. The textarea already wraps at the
 	// width layout() gave it (same prefix math), so the band must NOT re-wrap
 	// with Style.Width — that hard re-wrap mangled long pastes into orphan
 	// fragments.
 	input := inputBandStyle.Render(m.input.View())
-	bottomBar := prefix + input
+	bottomBar := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		m.inputPrefixColumn(lipgloss.Height(input)),
+		input,
+	)
 
-	suggestions := m.slashSuggestionsView()
-	if status := m.narrowStatusLine(); status != "" {
-		return suggestions + "\n" + status + "\n" + bottomBar
+	// Join only the bands that have content — an empty suggestion menu used to
+	// contribute a blank row, leaving a dead gap above the input.
+	var bands []string
+	if s := m.searchBar(); s != "" {
+		bands = append(bands, s)
 	}
-	return suggestions + "\n" + bottomBar
+	if s := m.slashSuggestionsView(); s != "" {
+		bands = append(bands, s)
+	}
+	if s := m.mentionSuggestionsView(); s != "" {
+		bands = append(bands, s)
+	}
+	if status := m.narrowStatusLine(); status != "" {
+		bands = append(bands, status)
+	}
+	return strings.Join(append(bands, bottomBar), "\n")
+}
+
+// emptyState is the quiet stand-in for the welcome panel when it's switched
+// off: enough to orient a fresh session without filling the screen.
+func (m *Model) emptyState() string {
+	rows := []string{
+		"",
+		mutedStyle.Render("Ask for a change, or start with a command."),
+		"",
+		hintStyle.Render("/help      ") + mutedStyle.Render("all commands"),
+		hintStyle.Render("shift+tab  ") + mutedStyle.Render("switch mode"),
+		hintStyle.Render("@file      ") + mutedStyle.Render("pull a file into the message"),
+	}
+	return "  " + strings.Join(rows, "\n  ") + "\n"
 }
 
 func (m *Model) welcomePanel() string {
@@ -304,14 +545,14 @@ func (m *Model) welcomePanel() string {
 
 	title := fmt.Sprintf(" Ollama Code %s ", appVersion)
 	topFill := max(0, width-lipgloss.Width(title)-3)
-	panelBorder := borderStyle.Copy().Foreground(m.mode.color())
+	panelBorder := borderStyle.Foreground(m.mode.color())
 	top := panelBorder.Render("╭─") + headingStyle.Render(title) + panelBorder.Render(strings.Repeat("─", topFill)+"╮")
 	bottom := panelBorder.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	inner := width - 4 // 1 char border + 1 char pad on each side
 	rowStyle := lipgloss.NewStyle().Background(surfaceColor)
 
 	rows := []string{""}
-	rows = append(rows, centerCell(bodyStyle.Copy().Bold(true).Render("Layla's in. Let's write something worth keeping."), inner))
+	rows = append(rows, centerCell(bodyStyle.Bold(true).Render("Layla's in. Let's write something worth keeping."), inner))
 	rows = append(rows, "")
 	rows = append(rows, llamaRows(inner)...)
 	rows = append(rows, "")
@@ -403,94 +644,11 @@ const ollamaLlamaSmallASCII = `
       @@@@              @@@@
 `
 
-const ollamaLlamaASCII = `
-                     @@@@                                                  @@@@
-                  @@@@@@@@@@@                                          @@@@@@@@@@@
-                @@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@
-               @@@@@@@@@@@@@@@@@                                    @@@@@@@@@@@@@@@@@
-              @@@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@@
-             @@@@@@@@@  @@@@@@@@@@                                @@@@@@@@@@  @@@@@@@@@
-            @@@@@@@@@    @@@@@@@@@                                @@@@@@@@@    @@@@@@@@@
-            @@@@@@@@@     @@@@@@@@@                              @@@@@@@@@     @@@@@@@@@
-           @@@@@@@@@       @@@@@@@@                              @@@@@@@@       @@@@@@@@@
-           @@@@@@@@@       @@@@@@@@@         @@@@@@@@@@         @@@@@@@@@       @@@@@@@@@
-           @@@@@@@@        @@@@@@@@@    @@@@@@@@@@@@@@@@@@@@    @@@@@@@@@        @@@@@@@@
-           @@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@@@@             @@@@@@@@@@@@@@@@         @@@@@@@@@
-          @@@@@@@@@         @@@@@@@@@@@@                    @@@@@@@@@@@@         @@@@@@@@@
-           @@@@@@@@     @@@@@@@@@@@@@                          @@@@@@@@@@@@@     @@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@@@                              @@@@@@@@@@@@@@@@@@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@@                                @@@@@@@@@@@@@@@@@@@@@@@
-           @@@@@@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@@@@@
-         @@@@@@@@@@@@@@@@@@@@@@@                                    @@@@@@@@@@@@@@@@@@@@@@@
-       @@@@@@@@@@@@@@                                                          @@@@@@@@@@@@@@
-     @@@@@@@@@@@@                                                                  @@@@@@@@@@@@
-    @@@@@@@@@@@                                                                      @@@@@@@@@@@
-   @@@@@@@@@@                                                                          @@@@@@@@@@
-  @@@@@@@@@@                                                                            @@@@@@@@@@
- @@@@@@@@@@                                                                              @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@                                     @@@@@@@@@@                                     @@@@@@@@
-@@@@@@@@             @@@@@@@            @@@@@@@@@@@@@@@@@@@@            @@@@@@@             @@@@@@@@
-@@@@@@@@            @@@@@@@@@@       @@@@@@@@@@@@@@@@@@@@@@@@@@       @@@@@@@@@@            @@@@@@@@
-@@@@@@@@           @@@@@@@@@@@    @@@@@@@@@@@@@@@  @@@@@@@@@@@@@@@    @@@@@@@@@@@           @@@@@@@@
-@@@@@@@@@          @@@@@@@@@@@   @@@@@@@@@                @@@@@@@@@   @@@@@@@@@@@          @@@@@@@@@
-@@@@@@@@@           @@@@@@@@@  @@@@@@@@                      @@@@@@@@  @@@@@@@@@          @@@@@@@@@
- @@@@@@@@@            @@@@@   @@@@@@@                          @@@@@@@   @@@@@            @@@@@@@@@
-  @@@@@@@@@                   @@@@@@         @@@@@@@@@@         @@@@@@                   @@@@@@@@@
-   @@@@@@@@@@                 @@@@@@         @@@@@@@@@@          @@@@@                 @@@@@@@@@@
-    @@@@@@@@@@               @@@@@@            @@@@@@            @@@@@@               @@@@@@@@@@
-    @@@@@@@@@@               @@@@@@            @@@@@@            @@@@@@               @@@@@@@@@@
-    @@@@@@@@@                 @@@@@@           @@@@@@           @@@@@@                 @@@@@@@@@
-   @@@@@@@@@                  @@@@@@@                          @@@@@@@                  @@@@@@@@@
-  @@@@@@@@@                    @@@@@@@@                      @@@@@@@@                    @@@@@@@@@
-  @@@@@@@@@                     @@@@@@@@@@@              @@@@@@@@@@@                     @@@@@@@@@
- @@@@@@@@@                        @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        @@@@@@@@@
- @@@@@@@@@                           @@@@@@@@@@@@@@@@@@@@@@@@@@                           @@@@@@@@@
- @@@@@@@@                                 @@@@@@@@@@@@@@@@                                 @@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
-@@@@@@@@@                                                                                  @@@@@@@@@
- @@@@@@@@                                                                                  @@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-    @@@@@@@@@@                                                                        @@@@@@@@@@
-     @@@@@@@@@@                                                                       @@@@@@@@@
-     @@@@@@@@@                                                                        @@@@@@@@@
-    @@@@@@@@@@                                                                         @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-   @@@@@@@@@                                                                            @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-  @@@@@@@@                                                                                @@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
- @@@@@@@@@                                                                                @@@@@@@@@
-  @@@@@@@@                                                                                @@@@@@@@
-  @@@@@@@@@                                                                              @@@@@@@@@
-   @@@@@@@@                                                                              @@@@@@@@@
-`
-
 func (m *Model) activeModelName() string {
 	if strings.TrimSpace(m.modelName) == "" {
 		return "Layla (no brain)"
 	}
 	return "Layla"
-}
-
-func displayName() string {
-	name := strings.TrimSpace(os.Getenv("USER"))
-	if name == "" {
-		return "there"
-	}
-	return name
 }
 
 func padCell(s string, width int) string {
@@ -527,7 +685,16 @@ func truncatePlain(s string, width int) string {
 		return s
 	}
 	if width <= 3 {
-		return s[:min(len(s), width)]
+		// Rune-wise, not byte-wise: a byte slice can split a multibyte
+		// character (·, ×, a CJK path) into invalid UTF-8.
+		var b strings.Builder
+		for _, r := range s {
+			if lipgloss.Width(b.String()+string(r)) > width {
+				break
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
 	}
 	runes := []rune(s)
 	var b strings.Builder

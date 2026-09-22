@@ -18,10 +18,15 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
+	"github.com/javanhut/ollama_code/internal/calibration"
 	"github.com/javanhut/ollama_code/internal/companion"
+	"github.com/javanhut/ollama_code/internal/instructions"
+	"github.com/javanhut/ollama_code/internal/lsp"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/semantic"
 	"github.com/javanhut/ollama_code/internal/storage"
+	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -58,6 +63,8 @@ var (
 	selectionStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("62")).
 			Foreground(lipgloss.Color("230"))
+	searchHitStyle     = lipgloss.NewStyle().Background(lipgloss.Color("58")).Foreground(lipgloss.Color("230"))
+	searchCurrentStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("232")).Bold(true)
 
 	modalBg = surfaceColor
 
@@ -102,14 +109,24 @@ const (
 	statePermission
 	stateNotes
 	stateDiff
+	stateStats
+	stateRouteConfirm
+	stateQuestion
+	stateLoopGuard
+	stateJobs
 )
 
 // settingsField identifies the focused input in the connection settings modal.
 type settingsField int
 
 const (
-	settingsFocusURL settingsField = iota
+	settingsFocusTarget settingsField = iota // which endpoint is being edited
+	settingsFocusName
+	settingsFocusURL
 	settingsFocusKey
+	settingsFocusEnv
+	settingsFocusNative
+	settingsFocusTrust
 )
 
 type config struct {
@@ -118,29 +135,90 @@ type config struct {
 	Model    string   `json:"model,omitempty"`
 	Activity []string `json:"activity,omitempty"`
 	Verbose  bool     `json:"verbose,omitempty"`
+	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps   int                     `json:"max_steps,omitempty"`   // tool-call budget per user turn (default 25)
-	EmbedModel string                  `json:"embed_model,omitempty"` // model for auto-RAG embeddings
-	AutoRAG    *bool                   `json:"auto_rag,omitempty"`    // nil/true = enabled
-	Dream      *bool                   `json:"dream,omitempty"`       // nil/true = dream mode enabled
-	Face       *bool                   `json:"face,omitempty"`        // nil/true = mascot overlay shown
-	Welcome    *bool                   `json:"welcome,omitempty"`     // nil/true = show welcome panel on empty chat
-	Verify     *bool                   `json:"verify,omitempty"`      // nil/true = auto compile-check on file edits
-	VerifyCmd  string                  `json:"verify_cmd,omitempty"`  // override the auto-detected check
-	Profiles   map[string]ModelProfile `json:"profiles,omitempty"`    // per-model, keyed by model name
+	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 40)
+	PromptFamily  string                     `json:"prompt_family,omitempty"`  // force a prompt family section; "none"/"default" = base prompt only
+	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
+	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
+	Dream         *bool                      `json:"dream,omitempty"`          // nil/true = dream mode enabled
+	Face          *bool                      `json:"face,omitempty"`           // nil/true = mascot overlay shown
+	Welcome       *bool                      `json:"welcome,omitempty"`        // nil/true = show welcome panel on empty chat
+	Verify        *bool                      `json:"verify,omitempty"`         // nil/true = auto compile-check on file edits
+	VerifyCmd     string                     `json:"verify_cmd,omitempty"`     // override the auto-detected check
+	Format        *bool                      `json:"format,omitempty"`         // nil/true = run the file's formatter on write
+	LSP           *bool                      `json:"lsp,omitempty"`            // nil/true = use installed language servers for code intelligence
+	LSPServers    map[string]lsp.Server      `json:"lsp_servers,omitempty"`    // extra/override language servers, keyed by name
+	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
+	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
+	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
+	ContextDelta  bool                       `json:"context_delta,omitempty"`  // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
+	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
+	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
+	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by provider-qualified model identity
+	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
+	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
+	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
+
+	Instructions        []string `json:"instructions,omitempty"`         // extra instruction files, loaded after the global AGENTS.md
+	ProjectInstructions *bool    `json:"project_instructions,omitempty"` // nil/true = load AGENTS.md/OLLAMA.md/CLAUDE.md files
+	RepoSnapshot        *bool    `json:"repo_snapshot,omitempty"`        // nil/true = put VCS status, recent commits and a file tree in the system prompt
+}
+
+// providerConfig is one additional LLM endpoint beyond the default host. The
+// default is an OpenAI-compatible /v1 server (OpenRouter, LM Studio, vLLM,
+// Together, Groq); set NativeOllama for a second Ollama daemon instead.
+type providerConfig struct {
+	// BaseURL is an http(s) endpoint for the openai/ollama kinds, and the path to
+	// the CLI binary for the cursor kind (blank = look it up on PATH).
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"` // env var holding the key; preferred over APIKey
+	Kind      string `json:"kind,omitempty"`        // api.Provider*; blank = openai
+	// Trust passes --trust to the Cursor agent, marking the working directory
+	// trusted in Cursor without prompting. Off by default; without it a headless
+	// run aborts, which is the honest failure.
+	Trust bool `json:"trust,omitempty"`
+}
+
+// providerKinds are the wire formats a provider can speak, in the order the
+// modal's Wire toggle cycles them.
+var providerKinds = []string{api.ProviderOpenAI, api.ProviderOllama, api.ProviderCursor}
+
+// providerKindLabel describes a wire format in the modal.
+func providerKindLabel(kind string) string {
+	switch kind {
+	case api.ProviderOllama:
+		return "ollama (/api/chat)"
+	case api.ProviderCursor:
+		return "cursor (local Cursor agent CLI)"
+	default:
+		return "openai (/v1/chat/completions)"
+	}
 }
 
 // ModelProfile holds per-model settings discovered from /api/show (and cached)
 // plus optional sampling overrides, so num_ctx and tool support adapt to the
 // actual model instead of a hardcoded value.
 type ModelProfile struct {
-	NumCtx           int      `json:"num_ctx"`
-	SupportsTools    bool     `json:"supports_tools"`
-	SupportsThinking bool     `json:"supports_thinking,omitempty"`
-	ParamsB          float64  `json:"params_b,omitempty"` // parameter count in billions; 0 = unknown
-	Temperature      *float64 `json:"temperature,omitempty"`
-	TopP             *float64 `json:"top_p,omitempty"`
-	NumPredict       *int     `json:"num_predict,omitempty"`
+	NumCtx            int      `json:"num_ctx"`
+	SupportsTools     bool     `json:"supports_tools"`
+	SupportsThinking  bool     `json:"supports_thinking,omitempty"`
+	ParamsB           float64  `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
+	CapabilityTier    string   `json:"capability_tier,omitempty"` // small, capable, or strong; overrides ParamsB tiering
+	MaxVisibleTools   int      `json:"max_visible_tools,omitempty"`
+	ProfileMaxSteps   int      `json:"max_steps,omitempty"`
+	ParallelTools     *bool    `json:"parallel_tool_calls,omitempty"`
+	MaxParallelTools  int      `json:"max_parallel_tools,omitempty"`
+	Delegation        *bool    `json:"delegation,omitempty"`
+	RAGTokens         int      `json:"rag_tokens,omitempty"`
+	RAGTopK           int      `json:"rag_top_k,omitempty"`
+	ActionTemperature *float64 `json:"action_temperature,omitempty"`
+	ProseTemperature  *float64 `json:"prose_temperature,omitempty"`
+	ReviewPass        *bool    `json:"review_pass,omitempty"`
+	Temperature       *float64 `json:"temperature,omitempty"`
+	TopP              *float64 `json:"top_p,omitempty"`
+	NumPredict        *int     `json:"num_predict,omitempty"`
 }
 
 // smallModelParamsB is the tier cutoff: models under this many billion
@@ -149,15 +227,60 @@ type ModelProfile struct {
 const smallModelParamsB = 15
 
 func (p ModelProfile) smallModel() bool {
+	switch strings.ToLower(strings.TrimSpace(p.CapabilityTier)) {
+	case "small":
+		return true
+	case "capable", "strong":
+		return false
+	}
 	return p.ParamsB > 0 && p.ParamsB < smallModelParamsB
 }
 
+func (p ModelProfile) parallelToolCalls() bool {
+	if p.ParallelTools != nil {
+		return *p.ParallelTools
+	}
+	return !p.smallModel()
+}
+
+func (p ModelProfile) maxParallelToolCalls() int {
+	if !p.parallelToolCalls() {
+		return 1
+	}
+	if p.MaxParallelTools > 0 {
+		return p.MaxParallelTools
+	}
+	return 4
+}
+
+func (p ModelProfile) canDelegate() bool {
+	if p.Delegation != nil {
+		return *p.Delegation
+	}
+	return !p.smallModel()
+}
+
+func (p ModelProfile) reviewPass() bool {
+	if p.ReviewPass != nil {
+		return *p.ReviewPass
+	}
+	return strings.EqualFold(strings.TrimSpace(p.CapabilityTier), "strong")
+}
+
+// logActivity records s in the recent-activity list and persists it.
 func (m *Model) logActivity(s string) {
+	m.noteActivity(s)
+	saveConfig(m.cfg)
+}
+
+// noteActivity records s without writing config.json, for per-tool-call
+// entries: rewriting the config on every call was pure disk churn. The entry
+// is persisted by the next saveConfig. Must run on the update goroutine.
+func (m *Model) noteActivity(s string) {
 	m.cfg.Activity = append([]string{s}, m.cfg.Activity...)
 	if len(m.cfg.Activity) > 5 {
 		m.cfg.Activity = m.cfg.Activity[:5]
 	}
-	saveConfig(m.cfg)
 }
 
 // gen on the chat/tool messages is the turn generation they were produced
@@ -166,30 +289,52 @@ func (m *Model) logActivity(s string) {
 // not write into the new turn's state.
 
 var (
-	defaultToolCallTimeout   = 2 * time.Minute
-	localInspectToolTimeout  = 30 * time.Second
-	localMutatingToolTimeout = 90 * time.Second
-	networkToolTimeout       = 2 * time.Minute
-	longRunningToolTimeout   = 10 * time.Minute
-	shellToolTimeoutGrace    = 5 * time.Second
-	modelStreamIdleTimeout   = 3 * time.Minute
-	pullIdleTimeout          = 5 * time.Minute
+	modelStreamIdleTimeout = 3 * time.Minute
+	toolCallDrainTimeout   = 2 * time.Second
+	pullIdleTimeout        = 5 * time.Minute
 )
 
 type Model struct {
-	cfg           config
-	host          api.OllamaHost
-	tools         *tools.Registry
-	notes         *sessionNotes
-	todos         *todoList
-	mode          Mode
-	state         state
-	urlInput      textinput.Model
-	keyInput      textinput.Model
-	settingsFocus settingsField
-	models        []string
-	picker        int
-	modelName     string
+	cfg             config
+	host            api.OllamaHost
+	tools           *tools.Registry
+	mcpServers      []tools.MCPServer
+	trace           *tracepkg.Recorder
+	lastCalibration *calibration.Result
+	notes           *sessionNotes
+	todos           *todoList
+	// AGENTS.md-style rules (instructions.go). The block is rendered once per
+	// load so the cached system prefix stays byte-stable.
+	instructions      instructions.Set
+	instructionsBlock string
+	// repoSnapshot caches repoSnapshotBlock for the session.
+	repoSnapshot       string
+	repoSnapshotDone   bool
+	instructionTracker *instructions.Tracker
+	customCommands     []customCommand // markdown slash commands (commands.go)
+	// sessionPermissions are allow rules granted with "s" at a permission
+	// prompt; unlike cfg.Permissions they are never written to disk.
+	sessionPermissions []tools.PermissionRule
+	mode               Mode
+	state              state
+	urlInput           textinput.Model
+	keyInput           textinput.Model
+	nameInput          textinput.Model // provider name; the default host has none
+	envInput           textinput.Model // env var holding the provider's key
+	settingsFocus      settingsField
+	settingsTarget     int    // index into settingsTargets(); 0 = default host, last = new provider
+	deferredPrompt     state  // prompt that arrived while a modal was open; stateSettings = none
+	settingsKind       string // wire format of the provider being edited
+	settingsTrust      bool   // cursor providers only: pass --trust
+	models             []string
+	modelsFrom         string // provider the model list came from; "" = default host
+	modelListRequest   uint64 // invalidates stale/out-of-order /models responses
+	picker             int
+	pickerTarget       int    // index into pickerTargets(); which endpoint /models is listing
+	pickerPurpose      string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
+	pairLocalModel     string
+	pairCursor         string
+	modelName          string
 
 	// Model pulling (from the model picker). pullInput captures the name to
 	// pull; pullStream/progress fields drive the live download UI.
@@ -204,20 +349,64 @@ type Model struct {
 	pullSelect    string // after a successful pull, land the picker cursor here
 	profile       ModelProfile
 	pending       *pendingBatch
+	// question holds the pending ask_user call while its option picker is open.
+	// Options are the model's own labels, so an answer chosen here comes back as
+	// text the model already knows how to read.
+	question       tools.AskUserQuestion
+	questionCursor int
+	// questionChecked holds the toggled rows of a multi-select picker; nil for
+	// single-select questions.
+	questionChecked map[int]bool
+	// questionResult is the history index of the parked ask_user tool result.
+	// A picked answer rewrites that result (ANSWER: …) and resumes the turn, so
+	// the model sees exactly what a normal ask_user return would have produced.
+	// -1 means the question is not backed by a parked result (no picker).
+	questionResult int
+	// freshness is the stale-edit ledger: it remembers the hash of every file
+	// this session read or wrote, and tools-layer dispatch refuses a mutation
+	// whose target drifted since (see tools/freshness.go). Session-scoped, so
+	// it is NOT cleared by resetTurnGuards the way turnReads is.
+	freshness *tools.FreshnessLedger
+	// deferredAdvisory holds a harness message that arrived while a tool batch
+	// was in flight (an /undo typed mid-turn). It is appended once the batch's
+	// results are in history, so it never splices between a tool_calls message
+	// and the results that belong to it.
+	deferredAdvisory string
+	// denialFeedbackTool is set when the user rejects a permission prompt. The
+	// next message is treated as feedback about that denial, and the rejected
+	// tool stays unavailable for that turn so the model cannot immediately ask
+	// for the same action again.
+	denialFeedbackTool string
+	// clarificationOnly is set for greetings/help offers that announce a task
+	// without stating it. Only ask_user is exposed for that turn, preventing
+	// stale notes or memory from being mistaken for the current assignment.
+	clarificationOnly bool
 
-	history    []api.Message
-	transcript *strings.Builder
-	viewport   viewport.Model
-	input      textarea.Model
-	stream     *streamState
-	streaming  bool
-	streamBuf  *strings.Builder
-	thinkTail  string // rolling tail of the reasoning stream, shown as a ticker while thinking
-	statusMsg  string
-	statusErr  bool
-	lastError  string
-	toast      string
-	sel        selection
+	history       []api.Message
+	transcript    *strings.Builder
+	viewport      viewport.Model
+	input         textarea.Model
+	stream        *streamState
+	streaming     bool
+	streamBuf     *strings.Builder
+	streamMDSrc   string // last stable prefix rendered by streamMarkdown, its render, and the width it was rendered at
+	streamMD      string
+	streamMDWidth int
+	thinkTail     string // rolling tail of the reasoning stream, shown as a ticker while thinking
+	statusMsg     string
+	statusErr     bool
+	lastError     string
+	toast         string
+	sel           selection
+
+	// Session titles (see title.go). sessionName is the named session this
+	// conversation was loaded from or last saved as ("" = unsaved); the title
+	// rides the auto-save either way. titleGenTried latches the one-shot
+	// generation that fires after the first completed assistant reply.
+	sessionName   string
+	sessionTitle  string
+	titlePinned   bool
+	titleGenTried bool
 
 	md      *markdownRenderer // chat transcript renderer (own width + cache)
 	notesMd *markdownRenderer // notes-panel renderer (own width + cache)
@@ -227,6 +416,7 @@ type Model struct {
 
 	notesViewport viewport.Model
 	diffViewport  viewport.Model // full-screen scrollable diff viewer (/diff)
+	helpViewport  viewport.Model // scrollable help viewer (/help)
 	spinner       spinner.Model
 	gitBranch     string
 	queue         []string
@@ -236,30 +426,82 @@ type Model struct {
 	height    int
 	ready     bool
 
-	totalTokens    int
-	contextLimit   int
+	totalTokens  int
+	contextLimit int
+	// The provider's real prompt_eval_count for the last two requests. The
+	// pressure check takes the SMALLER of the two, so one outlier turn (a giant
+	// one-off RAG block, a provider hiccup) can't fire a compaction on its own.
+	// 0 means "not measured yet" — the char estimate carries the decision.
+	lastPromptEval int
+	prevPromptEval int
+
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)
-	compacting     bool   // guards against overlapping compaction passes
-	retrieving     bool   // RAG retrieval is gating the model call for this turn
+	// m.history is the append-only log of the conversation: a message that lands
+	// in it is never moved, rewritten, or dropped for the rest of the session.
+	// What the MODEL sees is derived from it — deriveModelMessages is the only
+	// projection, and these two boundaries are the only way to change it.
+	// Compaction and pruning used to mutate the slice, which meant every reader
+	// keyed to a position (turn timings, the overflow yardstick, the measured
+	// token counts) had to be told separately and one of them always wasn't.
+	//
+	// ponytail: the log is unbounded — a session that used to shed messages at
+	// every compaction now keeps them all, in memory and in the saved session
+	// file. Text, so megabytes at worst; if a session ever gets long enough to
+	// care, spill the pre-archive prefix to disk and leave the boundaries
+	// pointing at it. Same projection, one more backing store.
+	archivedThrough int  // messages before this are compacted away; archiveSummary stands in for them
+	prunedThrough   int  // tool results before this project as their envelope headline only
+	compacting      bool // guards against overlapping compaction passes
+	// contextSnapshot is the last rendered text of each STABLE context source,
+	// keyed by source name — what reconcileContext diffs the current sources
+	// against so an unchanged turn emits nothing. It MUST be cleared wherever
+	// history is replaced or archived past: `m.archivedThrough` is the grep that
+	// finds those sites, because a snapshot describing a history the model no
+	// longer has will silently suppress a baseline it can never get back.
+	contextSnapshot map[string]string
+	retrieving      bool // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
-	turnGen            int            // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
-	streamRetries      int            // transient stream errors retried this turn
-	stepCount          int            // tool-call rounds since the last user message
-	autoContinues      int            // times we've nudged the model to keep going on open todos this turn
-	maxSteps           int            // budget per turn (cfg.MaxSteps, default 25)
-	recentCalls        []string       // ring of recent call fingerprints (oscillation)
-	failedCalls        map[string]int // fingerprint -> consecutive failure count
-	oscillationWarned  bool           // corrective nudge emitted once per turn
-	suppressToolsOnce  bool           // next stream sends no tools (step budget hit)
-	lastStepRepeatKey  string         // semantic identity of the previous single-tool batch
-	sameToolStreak     int            // consecutive steps repeating that identity
-	sameToolWarned     bool           // early repeat warning emitted this user turn
-	sameToolStopWarned bool           // hard-stop explanation emitted this user turn
-	turnTouchedFiles   bool           // a file-mutating tool succeeded this turn
-	verifying          bool           // a compile check is running
-	verifyAttempts     int            // failed compile checks this turn
-	challengedThisTurn bool           // self-check challenge already issued this turn
+	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	turnFirstGen        int             // first generation of the turn in flight; /rate covers the whole span, not just the last round
+	streamRetries       int             // transient stream errors retried this turn
+	overflowErr         error           // the context-overflow error a forced compaction is running for; non-nil means a retry is owed when it lands
+	overflowTokens      int             // ditto, in estimated tokens
+	overflowRetried     bool            // one forced compaction per turn; overflow recovery can never loop
+	stepCount           int             // tool-call rounds since the last user message
+	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
+	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
+	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
+	seenOutcomes        map[string]bool // evidence already observed this turn
+	oscillationStreak   int             // consecutive round endings that still form A/B alternation
+	stagnantRounds      int             // consecutive rounds that produced no evidence this turn had not already seen
+	failedCalls         map[string]int  // fingerprint -> consecutive failure count
+	oscillationWarned   bool            // corrective nudge emitted once per turn
+	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
+	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
+	turnStoppedByGuard  bool            // a guard ended this turn, so its last reply is a blocker report, not work
+	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
+	sameToolStreak      int             // consecutive steps repeating that identity
+	sameToolWarned      bool            // early repeat warning emitted this user turn
+	stopWarnedTool      string          // tool the hard-stop already fired for this turn
+	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
+	loopEscalation      *loopEscalation // doom-loop stop parked on the user's choice in the escalation modal
+	loopGuardCursor     int             // highlighted choice in the loop-guard modal
+	loopContinues       map[string]int  // "continue anyway" grants per detector this user turn
+	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
+	turnChangedPaths    map[string]bool // exact files covered by targeted verification
+	fetchedContent      bool            // untrusted web content entered the conversation this turn
+	verifying           bool            // a compile check is running
+	verifyAttempts      int             // failed compile checks this turn
+	lastVerification    string          // exact command/evidence from the latest gate
+	challengedThisTurn  bool            // self-check challenge already issued this turn
+	reviewedThisTurn    bool            // optional adversarial review already issued this turn
+	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
+	rereadEvents        int             // re-reads of unchanged files this turn
+	rereadStopAnnounced bool            // hard-stop explanation for re-read loops emitted
+	lastPreamble        string          // normalized previous assistant preamble this turn
+	preambleStreak      int             // consecutive near-duplicate preambles
+	preambleWarned      bool            // preamble-echo warning emitted this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -271,7 +513,21 @@ type Model struct {
 	ragMu        sync.Mutex
 	ragChanged   map[string]bool // paths changed since last reindex (hook-populated)
 
-	ckpt checkpointStore // per-turn file snapshots for /undo
+	ckpt checkpointStore // per-turn workspace snapshots (git trees) for /undo
+
+	// Background sub-agents (spawn_subagent with async=true, the default).
+	// Jobs live in the mutex-guarded store; completions reach the update loop
+	// over subagentEvents (see subagent_bg.go).
+	subagents      *subagentStore
+	subagentEvents chan *subagentJob
+	// agentRunner, when set, replaces agent.Run for sub-agent tasks (tests).
+	agentRunner func(ctx context.Context, task string, opts agent.Options) (agent.Result, error)
+
+	// Background shell jobs (run_shell background=true): the tools watcher
+	// fires the notifier registered in NewModel, which pushes completions
+	// here for the update loop (see shell_bg.go). Headless runs never
+	// register the notifier and stay poll-only via shell_output.
+	shellJobEvents chan shellJobDoneMsg
 
 	// Dream mode: idle-triggered background reflection.
 	lastActivity     time.Time
@@ -289,50 +545,153 @@ type Model struct {
 	slashVisible     bool
 	slashSuggestions []string
 	slashSelected    int
+	jobsCursor       int // highlighted row in the /jobs modal
+
+	// @file mentions: mentionBlock is the current turn's expanded attachments,
+	// injected via buildDynamicContext like the RAG block; the rest drive the
+	// tab-completion menu.
+	mentionBlock       string
+	mentionVisible     bool
+	mentionSuggestions []string
+	mentionSelected    int
+	mentionFiles       []string // workspace file list behind the completion menu
 
 	userHistory     []string
 	historyIndex    int
 	companion       *companion.Client
 	companionSender func(tea.Msg)
 	lastRenderTime  time.Time
+	renderQueued    bool // a cadence-limited transcript paint is already scheduled
 	busySince       time.Time
 	faceFrame       int
 	faceLastKey     time.Time
+
+	// Per-turn record, keyed by the index of the user message that started the
+	// turn, so each answer can report what it cost and what it was thinking.
+	turnRecords map[int]turnRecord
+	turnAnchor  int
+	// /rate: the generation span of the last turn that COMPLETED, and the
+	// verdict already given to it (for bare /rate). ratedTo is 0 whenever there
+	// is nothing to rate. Deliberately not the in-flight turnFirstGen/turnGen
+	// pair: a queued follow-up starts the next turn inside endTurnTail itself,
+	// and the turn that just finished has to stay rateable across that. Only
+	// endTurnTail sets them; the places that end the turn's existence —
+	// interrupt, rewind, /clear, and loading another conversation — clear them.
+	ratedFrom      int
+	ratedTo        int
+	turnRating     string
+	turnStart      time.Time
+	turnToolStart  time.Time
+	turnToolTime   time.Duration
+	turnToolCalls  int
+	turnThinking   strings.Builder
+	streamThinking strings.Builder // reasoning for only the current model request (debug trace payload)
+
+	turnCache      map[uint64]string // rendered sealed turns, keyed by content hash
+	turnCacheStamp string            // render settings the cache was built under
+
+	search        search    // transcript find (ctrl+f)
+	sidebarHidden bool      // no room for the panel; decided in layout()
+	toastAt       time.Time // when the current toast text first appeared
+	toastSeen     string    // text toastAt refers to
+	diffSource    string    // raw diff behind the /diff viewer, so a resize can re-wrap it
+
+	// Cold-start routing offer: the user message held back pending the y/N, the
+	// signals that triggered it, and how many times the user has said no (after
+	// which we stop asking for the session).
+	routeAsk      string
+	routeReasons  []string
+	routeDeclines int
+
+	// Session notes as they stood when plan mode was entered, so leaving for
+	// write mode can tell a plan that was actually written from one left over
+	// from an earlier task.
+	planNotesMark string
+	// The model must show a recorded plan to the user and wait for a reply before
+	// requesting write mode. Editing the notes after that reply invalidates it.
+	planReviewRequested string
+	planReviewed        string
+
+	// Set when a turn is executing a plan produced by an offloaded planner:
+	// the paths that plan named, gated so each is read before it is edited.
+	planNeedsVerify bool
+	planPaths       map[string]bool
+}
+
+// turnRecord is what one user command produced: wall clock end to end, the
+// slice of it spent running tools (the rest is model time), and the reasoning
+// stream, kept so /show_thinking can surface it after the fact.
+type turnRecord struct {
+	total    time.Duration
+	tools    time.Duration
+	calls    int
+	thinking string
 }
 
 type liveEmbedder struct{ m *Model }
 
+// Embed always runs on the default Ollama host, never the routed one: an
+// OpenAI-compatible provider has no /api/embed, and the embed model is local
+// anyway. Built per call so a /settings host change is picked up immediately.
 func (e liveEmbedder) Embed(model string, inputs []string) ([][]float32, error) {
-	return e.m.host.Embed(model, inputs)
+	h := e.m.defaultHost()
+	return h.Embed(model, inputs)
 }
 
 func New() *Model {
 	cfg := loadConfig()
+	// Confinement is process-wide tools state, pinned once before any tool can
+	// run: fs tool paths jail to the workspace root (plus any allowlisted
+	// roots), and run_shell is wrapped in the OS sandbox unless opted out.
+	tools.SetWorkspaceRoot(workspaceRoot())
+	tools.SetJailAllowlist(cfg.JailAllowlist)
+	if cfg.ShellSandbox != nil {
+		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
+	}
+	if cfg.Format != nil {
+		tools.SetFormatEnabled(*cfg.Format)
+	}
+	// Language servers are started lazily on the first code intelligence
+	// question, so configuring the tier here costs nothing in a session that
+	// never asks one.
+	tools.ConfigureLSP(cfg.LSP == nil || *cfg.LSP, workspaceRoot(), cfg.LSPServers)
 	// ... (host setup ...)
 	host := api.OllamaHost{}
 	host.SetURI(cfg.Host)
 	host.SetAPIKey(resolveAPIKey(cfg))
 
 	archivePath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "archive.json")
-	memoryPath := filepath.Join(os.Getenv("HOME"), ".ollama_code", "user_memory.json")
 
 	kv, _ := storage.NewKVStore(archivePath)
-	mem, _ := memory.New(memoryPath)
+	// Memory is per workspace: it is injected into every prompt, so one global
+	// store put every project's facts into every other project's context.
+	memPath := memoryPath(workspaceRoot())
+	mem, _ := memory.New(memPath)
 
 	ti := textinput.New()
-	ti.Prompt = "URL  "
+	ti.Prompt = "URL   "
 	ti.Placeholder = DefaultHost
 	ti.SetValue(cfg.Host)
 	ti.Focus()
 	ti.SetWidth(60)
 
 	ki := textinput.New()
-	ki.Prompt = "Key  "
+	ki.Prompt = "Key   "
 	ki.Placeholder = "ollama.com api key (leave blank for local)"
 	ki.SetValue(cfg.APIKey)
 	ki.EchoMode = textinput.EchoPassword
 	ki.EchoCharacter = '•'
 	ki.SetWidth(60)
+
+	ni := textinput.New()
+	ni.Prompt = "Name  "
+	ni.Placeholder = "openrouter"
+	ni.SetWidth(60)
+
+	ei := textinput.New()
+	ei.Prompt = "Env   "
+	ei.Placeholder = "OPENROUTER_API_KEY — keeps the key out of config.json"
+	ei.SetWidth(60)
 
 	pi := textinput.New()
 	pi.Prompt = "Pull  "
@@ -370,63 +729,112 @@ func New() *Model {
 
 	notes := &sessionNotes{}
 	notes.load()
-	registry := tools.DefaultRegistry()
-	registry.Register(readNotesTool(notes))
-	registry.Register(updateNotesTool(notes))
-	registry.Register(appendNotesTool(notes))
 	todos := &todoList{}
-	registry.Register(todoWriteTool(todos))
-	registry.Register(rememberTool(mem))
-	registry.Register(recallTool(mem))
-	registry.Register(forgetTool(mem))
+	registry := baseRegistry(notes, todos, mem)
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(accentColor)
 
 	m := &Model{
-		cfg:          cfg,
-		host:         host,
-		tools:        registry,
-		notes:        notes,
-		todos:        todos,
-		mode:         ExploreMode,
-		state:        stateChat,
-		urlInput:     ti,
-		keyInput:     ki,
-		pullInput:    pi,
-		input:        ta,
-		modelName:    cfg.Model,
-		spinner:      s,
-		gitBranch:    getGitBranch(),
-		transcript:   &strings.Builder{},
-		streamBuf:    &strings.Builder{},
-		contextLimit: defaultContextLimit,
-		profile:      ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
-		maxSteps:     maxStepsFromConfig(cfg),
-		failedCalls:  make(map[string]int),
-		kvStore:      kv,
-		memory:       mem,
-		md:           newMarkdownRenderer(),
-		notesMd:      newMarkdownRenderer(),
-		faceMoodLen:  -1, // force first mood computation
-		expandTools:  false,
-		lastActivity: time.Now(),
-		faceLastKey:  time.Now(),
+		cfg:            cfg,
+		host:           host,
+		tools:          registry,
+		notes:          notes,
+		todos:          todos,
+		mode:           ExploreMode,
+		state:          stateChat,
+		urlInput:       ti,
+		keyInput:       ki,
+		nameInput:      ni,
+		envInput:       ei,
+		pullInput:      pi,
+		input:          ta,
+		modelName:      cfg.Model,
+		spinner:        s,
+		gitBranch:      getGitBranch(),
+		transcript:     &strings.Builder{},
+		streamBuf:      &strings.Builder{},
+		contextLimit:   defaultContextLimit,
+		profile:        ModelProfile{NumCtx: defaultContextLimit, SupportsTools: true},
+		maxSteps:       maxStepsFromConfig(cfg),
+		failedCalls:    make(map[string]int),
+		freshness:      tools.NewFreshnessLedger(),
+		kvStore:        kv,
+		memory:         mem,
+		md:             newMarkdownRenderer(),
+		notesMd:        newMarkdownRenderer(),
+		faceMoodLen:    -1, // force first mood computation
+		expandTools:    false,
+		subagents:      newSubagentStore(),
+		subagentEvents: make(chan *subagentJob, 64),
+		shellJobEvents: make(chan shellJobDoneMsg, 64),
+		lastActivity:   time.Now(),
+		faceLastKey:    time.Now(),
+	}
+	if cfg.Trace {
+		tracePath := strings.TrimSpace(cfg.TracePath)
+		if tracePath == "" {
+			tracePath = defaultTracePath()
+		}
+		if recorder, err := tracepkg.Open(tracePath); err == nil {
+			m.trace = recorder
+			// This trace is append-only across runs while turn generations
+			// restart at 1 in every process, so the boundary is not cosmetic:
+			// internal/trace.Export groups interactive turns BY generation
+			// number and scopes /rate verdicts to the session that emitted
+			// them. Same event enableDebug writes for the fresh debug trace.
+			cwd, _ := os.Getwd()
+			_ = recorder.Record(tracepkg.Event{Kind: "session_start", Metadata: map[string]any{
+				"surface": "tui", "working_directory": cwd, "format": "redacted-jsonl", "schema_version": 2,
+			}})
+		} else if m.toast == "" {
+			m.toast = "trace disabled: " + err.Error()
+		}
 	}
 
 	m.lastActivity = time.Now()
+	m.toast = legacyMemoryNotice(memPath)
+	m.loadInstructions()
+	m.customCommands = loadCustomCommands(customCommandDirs())
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())
+	// Push background-shell completions into the update loop (see shell_bg.go).
+	// The closure captures the channel, not the Model. Buffered (64) with a
+	// drop fallback so a wedged update loop never blocks a job's watcher.
+	shellEvents := m.shellJobEvents
+	tools.SetBackgroundShellNotifier(func(jobID, exitCode int, err error, tail string) {
+		msg := shellJobDoneMsg{id: jobID, exitCode: exitCode, tail: tail}
+		if err != nil {
+			msg.err = err.Error()
+		}
+		select {
+		case shellEvents <- msg:
+		default:
+		}
+	})
 	// Registered after m exists so the semantic tools read the live host and
 	// pick up connection changes made via /settings.
 	registry.Register(tools.CodeIndexTool(liveEmbedder{m}))
 	registry.Register(tools.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
+	var mcpWarnings []string
+	m.mcpServers, mcpWarnings = connectMCPServers(cfg.MCPServers, registry)
+	if len(mcpWarnings) > 0 {
+		m.toast = strings.Join(mcpWarnings, " · ")
+	}
+	// cfg.Model may carry a provider prefix ("cursor:opus-5"), so resolve it the
+	// same way a route spec is, rather than using it as a bare model name against
+	// the default host.
+	m.host, m.modelName = m.hostForSpec(cfg.Model)
+	m.applyRoute(m.mode) // then let the opening mode's binding win
 	if m.modelName != "" {
 		m.resolveProfile()
 	}
+	// Prompt history is global and survives restarts; up/down recall walks it.
+	m.userHistory = loadHistory()
+	m.historyIndex = len(m.userHistory)
 	m.input.Focus()
 	return m
 }
@@ -442,6 +850,15 @@ func getGitBranch() string {
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spinner.Tick, m.nextFaceTick()}
+	// Park one waiter on the background sub-agent event channel; the
+	// subagentDoneMsg handler re-arms it after each completion.
+	if cmd := m.awaitSubagentEvent(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	// Same for background shell job completions (shellJobDoneMsg).
+	if cmd := m.awaitShellJobEvent(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// If no model is configured, try to load the first one we can find.
 	if strings.TrimSpace(m.modelName) == "" {
 		cmds = append(cmds, m.autoLoadModels())
@@ -453,20 +870,43 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
+	// Resizing the terminal or growing/shrinking the input changes the viewport
+	// dimensions. Preserve bottom pinning so the newest streamed text does not
+	// jump off-screen; a user who deliberately scrolled up keeps their offset.
+	wasAtBottom := !m.ready || m.viewport.AtBottom()
 	m.urlInput.SetWidth(min(m.width-6, 80))
 	m.keyInput.SetWidth(min(m.width-6, 80))
+	m.nameInput.SetWidth(min(m.width-6, 80))
+	m.envInput.SetWidth(min(m.width-6, 80))
 	m.pullInput.SetWidth(min(m.width-6, 80))
+
+	// Size the textarea BEFORE measuring the band: inputView() renders the
+	// textarea, so measuring first would size the viewport from the previous
+	// frame's wrap and leave a stale row behind when the input shrinks.
+	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())))
+
 	headerH := lipgloss.Height(m.headerView())
-	inputH := max(lipgloss.Height(m.inputView()), 2)
+	// No floor: the band is one row when nothing is stacked above the input, and
+	// reserving two left an unused row at the bottom of every screen.
+	inputH := max(lipgloss.Height(m.inputView()), 1)
 	vpH := max(m.height-headerH-inputH, 1)
 
+	// Decide the sidebar before sizing the transcript: reserving its columns for
+	// a panel that won't render leaves the right third of the screen empty.
+	m.sidebarHidden = !m.sidebarFits(vpH)
 	vpW := max(m.width-m.sidebarSpace(), 10)
 	notesW := max(sidebarInner(m.sidebarWidth()), 1)
 	notesVH := m.sidebarNotesHeight(vpH)
 
 	// Diff viewer fills most of the screen (modal-width box, minus border/header).
-	diffVW := max(m.modalWidth()-2, 20)
+	// Its box is border (2) + Padding(0,1) (2), so the text width is w-4.
+	diffVW := max(m.modalWidth()-4, 20)
 	diffVH := max(m.height-6, 4)
+
+	// Help viewer: modal box minus border (2) + padding (4) horizontally, and
+	// minus chrome + header/blank lines vertically.
+	helpVW := max(m.modalWidth()-6, 20)
+	helpVH := max(m.height-8, 4)
 
 	if !m.ready {
 		m.viewport = viewport.New(
@@ -495,17 +935,39 @@ func (m *Model) layout() {
 			viewport.WithWidth(diffVW),
 			viewport.WithHeight(diffVH),
 		)
+		m.helpViewport = viewport.New(
+			viewport.WithWidth(helpVW),
+			viewport.WithHeight(helpVH),
+		)
 	} else {
 		m.viewport.SetWidth(vpW)
 		m.viewport.SetHeight(vpH)
 		m.notesViewport.SetWidth(notesW)
 		m.notesViewport.SetHeight(notesVH)
+		// Re-wrap on width change: these two viewports get their content once, at
+		// open time, so a resize used to leave them wrapped to the old width.
+		reflowDiff := diffVW != m.diffViewport.Width()
+		reflowHelp := helpVW != m.helpViewport.Width()
 		m.diffViewport.SetWidth(diffVW)
 		m.diffViewport.SetHeight(diffVH)
+		m.helpViewport.SetWidth(helpVW)
+		m.helpViewport.SetHeight(helpVH)
+		if reflowHelp {
+			m.helpViewport.SetContent(m.helpContent(helpVW))
+		}
+		if reflowDiff && m.diffSource != "" {
+			m.diffViewport.SetContent(colorizeDiff(m.diffSource, diffVW))
+		}
 	}
 	m.viewport.SoftWrap = true
 	m.notesViewport.SoftWrap = true
 	m.viewport.StyleLineFunc = func(line int) lipgloss.Style {
+		if hit, current := m.searchedLine(line); hit {
+			if current {
+				return searchCurrentStyle.Width(m.viewport.Width())
+			}
+			return searchHitStyle.Width(m.viewport.Width())
+		}
 		if !m.selectedTranscriptLine(line) {
 			return lipgloss.NewStyle()
 		}
@@ -517,8 +979,30 @@ func (m *Model) layout() {
 		notesText = "(empty)"
 	}
 	m.notesViewport.SetContent(m.renderNotesMarkdown(notesText, m.notesViewport.Width()))
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 
-	// Wrap the textarea at the room actually left of the prefix (same math as
-	// inputView) so the textarea — and only the textarea — wraps long input.
-	m.input.SetWidth(max(1, m.width-lipgloss.Width(m.inputPrefix())-2))
+}
+
+// atFirstVisualRow / atLastVisualRow report whether the cursor sits on the
+// topmost / bottommost rendered row of the input, accounting for soft wrap: a
+// single long hard line still occupies several rows, and up/down must walk
+// those rows before they mean anything else.
+func (m *Model) atFirstVisualRow() bool {
+	return m.input.Line() == 0 && m.input.LineInfo().RowOffset == 0
+}
+
+func (m *Model) atLastVisualRow() bool {
+	li := m.input.LineInfo()
+	return m.input.Line() == m.input.LineCount()-1 && li.RowOffset >= li.Height-1
+}
+
+// inputIsHistory reports whether the buffer is safe to overwrite with a history
+// entry — empty, or still exactly the entry we last recalled.
+func (m *Model) inputIsHistory() bool {
+	if m.input.Value() == "" {
+		return true
+	}
+	return m.historyIndex < len(m.userHistory) && m.input.Value() == m.userHistory[m.historyIndex]
 }

@@ -50,23 +50,10 @@ func CodeDefinitionTool() Tool {
 			}
 			targetLine := lines[a.Line-1]
 
-			// Extract likely symbol: a word that starts with letter/underscore
-			re := regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
-			symbols := re.FindAllString(targetLine, -1)
-			if len(symbols) == 0 {
-				return "", fmt.Errorf("no symbol found on line %d", a.Line)
-			}
-
 			// Use the last non-keyword symbol (most likely the interesting one)
-			keywords := map[string]bool{"func": true, "fn": true, "def": true, "class": true,
-				"struct": true, "type": true, "var": true, "const": true, "let": true,
-				"return": true, "if": true, "for": true, "import": true, "pub": true}
-			sym := symbols[len(symbols)-1]
-			for i := len(symbols) - 1; i >= 0; i-- {
-				if !keywords[symbols[i]] {
-					sym = symbols[i]
-					break
-				}
+			sym, col, found := symbolAt(targetLine, defKeywords)
+			if !found {
+				return "", fmt.Errorf("no symbol found on line %d", a.Line)
 			}
 
 			// Search for definition of this symbol
@@ -74,11 +61,21 @@ func CodeDefinitionTool() Tool {
 				`(^|[[:space:]])(func|fn|class|struct|trait|enum|impl|interface|type|var|const|def)[[:space:]]+.*%s([[:space:]]|$)`,
 				regexp.QuoteMeta(sym),
 			)
-			cmd := exec.CommandContext(ctx, "grep", "-rnE", "--color=never",
-				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
-				"--exclude-dir=vendor", "--exclude-dir=target", pat, ".")
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			// Three tiers, most precise first: a real language server, then the
+			// tree-sitter path (build tag treesitter), then grep. Each declines
+			// with ok=false rather than erroring, so the next one runs.
+			text := ""
+			if body, ok := lspDefinitionAt(ctx, a.Path, a.Line, col); ok {
+				text = body
+			} else if body, ok := tsFindDefinitions(ctx, sym, pat); ok {
+				text = body
+			} else {
+				cmd := exec.CommandContext(ctx, "grep", "-rnE", "--color=never",
+					"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
+					"--exclude-dir=vendor", "--exclude-dir=target", pat, ".")
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
+			}
 			if text == "" {
 				return fmt.Sprintf("definition of %q not found in project (found on line %d of %s)", sym, a.Line, a.Path), nil
 			}
@@ -125,31 +122,26 @@ func CodeReferencesTool() Tool {
 			}
 			targetLine := lines[a.Line-1]
 
-			re := regexp.MustCompile(`[a-zA-Z_][a-zA-Z0-9_]*`)
-			symbols := re.FindAllString(targetLine, -1)
-			if len(symbols) == 0 {
+			sym, col, found := symbolAt(targetLine, refKeywords)
+			if !found {
 				return "", fmt.Errorf("no symbol found on line %d", a.Line)
 			}
 
-			// Filter out keywords
-			keywords := map[string]bool{"func": true, "fn": true, "def": true, "class": true,
-				"struct": true, "type": true, "var": true, "const": true, "let": true,
-				"return": true, "if": true, "for": true, "import": true, "pub": true,
-				"package": true, "else": true, "match": true, "switch": true, "case": true}
-			sym := symbols[len(symbols)-1]
-			for i := len(symbols) - 1; i >= 0; i-- {
-				if !keywords[symbols[i]] {
-					sym = symbols[i]
-					break
-				}
+			// Three tiers, most precise first: a language server knows which
+			// same-named identifiers are actually this symbol, which is exactly
+			// what the word-boundary grep at the bottom cannot tell.
+			text := ""
+			if body, ok := lspReferencesAt(ctx, a.Path, a.Line, col); ok {
+				text = body
+			} else if body, ok := tsFindReferences(ctx, sym); ok {
+				text = body
+			} else {
+				cmd := exec.CommandContext(ctx, "grep", "-rnwE", "--color=never",
+					"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
+					"--exclude-dir=vendor", "--exclude-dir=target", sym, ".")
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
 			}
-
-			// Grep for all occurrences of this word (word-boundary match via -w)
-			cmd := exec.CommandContext(ctx, "grep", "-rnwE", "--color=never",
-				"--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build",
-				"--exclude-dir=vendor", "--exclude-dir=target", sym, ".")
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 50)
 			if text == "" {
 				return fmt.Sprintf("no references to %q found in project", sym), nil
 			}
@@ -192,6 +184,15 @@ func CodeHoverTool() Tool {
 			lines := strings.Split(string(data), "\n")
 			if a.Line > len(lines) {
 				return "", fmt.Errorf("line %d is past end of file (%d lines)", a.Line, len(lines))
+			}
+
+			// A language server describes the symbol exactly; the block scan
+			// below only guesses where a definition starts and ends by matching
+			// indentation and braces. Ask the precise source first.
+			if sym, col, found := symbolAt(lines[a.Line-1], defKeywords); found {
+				if text, ok := lspHoverAt(ctx, a.Path, a.Line, col); ok {
+					return fmt.Sprintf("%s (at %s:%d):\n%s", sym, a.Path, a.Line, text), nil
+				}
 			}
 
 			// Find the enclosing definition block
@@ -301,14 +302,21 @@ func FindSymbolTool() Tool {
 				`(^|[[:space:]])(func|fn|class|struct|trait|enum|impl|interface|type|var|const|def|let|static|async[[:space:]]+def|union|module|pub)[[:space:]]+.*%s|^[[:space:]]*%s[[:space:]]*:=|^[[:space:]]*%s[[:space:]]*=`,
 				sym, sym, sym,
 			)
-			argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", "--exclude-dir=vendor", "--exclude-dir=target", pattern}
-			if a.FileTypes != "" {
-				argv = append(argv, "--include="+a.FileTypes)
+			// Tree-sitter precision path (build tag treesitter); ok=false in the
+			// default build, which keeps the grep behavior below unchanged.
+			text := ""
+			if body, ok := tsFindSymbolLines(ctx, a.Symbol, a.FileTypes, pattern); ok {
+				text = body
+			} else {
+				argv := []string{"-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=build", "--exclude-dir=vendor", "--exclude-dir=target", pattern}
+				if a.FileTypes != "" {
+					argv = append(argv, "--include="+a.FileTypes)
+				}
+				argv = append(argv, ".")
+				cmd := exec.CommandContext(ctx, "grep", argv...)
+				out, _ := cmd.CombinedOutput()
+				text = filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 100)
 			}
-			argv = append(argv, ".")
-			cmd := exec.CommandContext(ctx, "grep", argv...)
-			out, _ := cmd.CombinedOutput()
-			text := filterCodeMatches(strings.TrimSpace(stripANSI(string(out))), 100)
 			if text == "" {
 				return fmt.Sprintf("symbol %q not found in project", a.Symbol), nil
 			}

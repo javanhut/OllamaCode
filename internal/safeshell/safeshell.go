@@ -70,6 +70,9 @@ func IsExploreReadOnlyShell(command string) (bool, string) {
 	if HasOutputRedirect(command) {
 		return false, "output redirection (>, >>) is not allowed in explore mode"
 	}
+	if strings.Contains(command, "<(") {
+		return false, "process substitution <(...) is not allowed in explore mode"
+	}
 	segments := SplitShellSegments(command)
 	for _, seg := range segments {
 		if seg == "" {
@@ -89,11 +92,17 @@ func IsExploreReadOnlyShell(command string) (bool, string) {
 		if !exploreShellAllowedBins[bin] {
 			return false, fmt.Sprintf("command %q is not in the explore-mode read-only allowlist", bin)
 		}
+		if ok, reason := exploreArgsReadOnly(bin, fields[1:]); !ok {
+			return false, reason
+		}
 		switch bin {
 		case "git":
 			sub := FirstNonFlagArg(fields[1:])
 			if sub != "" && !exploreShellAllowedGitSubs[sub] {
 				return false, fmt.Sprintf("git subcommand %q is not in the explore-mode read-only allowlist", sub)
+			}
+			if ok, reason := gitSubReadOnly(sub, fields[1:]); !ok {
+				return false, reason
 			}
 		case "go":
 			sub := FirstNonFlagArg(fields[1:])
@@ -111,6 +120,118 @@ func IsExploreReadOnlyShell(command string) (bool, string) {
 				if subsub != "" && subsub != "list" {
 					return false, fmt.Sprintf("ivaldi timeline %q is not read-only; only 'list' is allowed in explore mode", subsub)
 				}
+			}
+		}
+	}
+	return true, ""
+}
+
+// exploreForbiddenFlags are arguments that turn an allowlisted reader into a
+// writer or a command runner. A flag matches exactly, or as a prefix of an
+// attached value (-ofile, --output=file).
+var exploreForbiddenFlags = map[string][]string{
+	"find":     {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"},
+	"fd":       {"-x", "--exec", "-X", "--exec-batch"},
+	"rg":       {"--pre"},
+	"sort":     {"-o", "--output"},
+	"tree":     {"-o"},
+	"date":     {"-s", "--set"},
+	"file":     {"-C", "--compile"},
+	"go":       {"-toolexec", "-vettool", "-exec", "-w", "-u"},
+	"git":      {"--config-env", "--exec-path", "--output", "--ext-diff", "-O", "--open-files-in-pager", "--textconv"},
+	"hostname": {"-F", "--file", "-b", "--boot"},
+}
+
+// exploreArgsReadOnly rejects arguments that make an allowlisted binary write
+// or run something. The allowlist alone only sees the first word, so without
+// this `find . -delete` or `env rm -rf x` pass as read-only.
+func exploreArgsReadOnly(bin string, args []string) (bool, string) {
+	for _, a := range args {
+		if bin == "go" && strings.HasPrefix(a, "--") {
+			a = a[1:] // the go tool accepts -flag and --flag alike
+		}
+		for _, f := range exploreForbiddenFlags[bin] {
+			if a == f || strings.HasPrefix(a, f+"=") ||
+				(len(f) == 2 && f[0] == '-' && f[1] != '-' && strings.HasPrefix(a, f) && len(a) > 2 && bin != "git" && bin != "go") {
+				return false, fmt.Sprintf("%s %s can modify files or run other commands, so it is not allowed in explore mode", bin, f)
+			}
+		}
+	}
+	switch bin {
+	case "env":
+		// env with a command after its assignments runs that command.
+		for _, a := range args {
+			if !strings.HasPrefix(a, "-") && !strings.Contains(a, "=") {
+				return false, "env runs its remaining arguments as a command, so only bare `env` is allowed in explore mode"
+			}
+		}
+	case "command":
+		// `command -v x` looks x up; `command x` runs it.
+		if len(args) == 0 || (args[0] != "-v" && args[0] != "-V") {
+			return false, "only `command -v` / `command -V` are allowed in explore mode"
+		}
+	case "hostname":
+		if FirstNonFlagArg(args) != "" {
+			return false, "hostname with an argument sets the hostname, so it is not allowed in explore mode"
+		}
+	}
+	return true, ""
+}
+
+// gitSubReadOnly narrows the allowlisted git subcommands that also have a
+// writing form: branch/tag create and delete, remote add/remove, reflog
+// expire/delete.
+func gitSubReadOnly(sub string, args []string) (bool, string) {
+	// Positional args after the subcommand.
+	var rest []string
+	seen := false
+	for _, a := range args {
+		if !seen {
+			if a == sub {
+				seen = true
+			}
+			continue
+		}
+		rest = append(rest, a)
+	}
+	positional := FirstNonFlagArg(rest)
+	hasFlag := func(flags ...string) bool {
+		for _, a := range rest {
+			for _, f := range flags {
+				if a == f || strings.HasPrefix(a, f+"=") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch sub {
+	case "branch":
+		if hasFlag("-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description", "-f", "--force") {
+			return false, "git branch with that flag changes branches, so it is not allowed in explore mode"
+		}
+		if positional != "" && !hasFlag("-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at") {
+			return false, "git branch <name> creates a branch; use `git branch --list` in explore mode"
+		}
+	case "tag":
+		if hasFlag("-d", "--delete", "-a", "--annotate", "-s", "--sign", "-f", "--force", "-m", "--message", "-F", "--file", "-u", "--local-user") {
+			return false, "git tag with that flag changes tags, so it is not allowed in explore mode"
+		}
+		if positional != "" && !hasFlag("-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "-n") {
+			return false, "git tag <name> creates a tag; use `git tag --list` in explore mode"
+		}
+	case "remote":
+		switch positional {
+		case "", "show", "get-url":
+		default:
+			return false, fmt.Sprintf("git remote %s changes repo config, so it is not allowed in explore mode", positional)
+		}
+	case "reflog":
+		switch positional {
+		case "", "show", "exists":
+		default:
+			if !strings.Contains(positional, "@") && positional != "HEAD" {
+				return false, fmt.Sprintf("git reflog %s is not read-only, so it is not allowed in explore mode", positional)
 			}
 		}
 	}
@@ -265,7 +386,7 @@ func HasOutputRedirect(s string) bool {
 	return false
 }
 
-// SplitShellSegments breaks a command on |, ||, &&, and ; while leaving the
+// SplitShellSegments breaks a command on |, ||, &, &&, ; and newlines while leaving the
 // contents of single- and double-quoted strings intact. This is a deliberate
 // approximation — it doesn't handle every shell edge case, just enough to
 // identify the leading binary of each pipeline segment.
@@ -302,10 +423,14 @@ func SplitShellSegments(command string) []string {
 			if i+1 < len(command) && command[i+1] == '&' {
 				i++
 				flush()
-			} else {
+			} else if i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
+				// fd duplication such as 2>&1, not a separator.
 				cur.WriteByte(c)
+			} else {
+				// A lone & backgrounds the left side and starts a new command.
+				flush()
 			}
-		case !inSingle && !inDouble && c == ';':
+		case !inSingle && !inDouble && (c == ';' || c == '\n'):
 			flush()
 		default:
 			cur.WriteByte(c)

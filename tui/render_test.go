@@ -85,3 +85,40 @@ func TestDiffLineKind(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamingTextUsesStablePlainRendering(t *testing.T) {
+	m := &Model{mode: ExploreMode, md: newMarkdownRenderer()}
+	m.viewport.SetWidth(80)
+	turn := assistantTurn{
+		streaming: true,
+		segments:  []turnSegment{{live: true, text: "**done** paragraph\n\n# unfinished heading\n```go\nfunc main()"}},
+	}
+	var b strings.Builder
+	m.writeAssistantTurn(&b, &turn, false)
+	got := stripANSI(b.String())
+	// The tail is still being written — reformatting it re-flows the layout on
+	// every frame, so it stays raw until its block closes.
+	if !strings.Contains(got, "# unfinished heading") || !strings.Contains(got, "```go") {
+		t.Fatalf("streaming tail was reformatted before completion:\n%s", got)
+	}
+	// Everything above it is complete Markdown and renders as such.
+	if strings.Contains(got, "**done**") {
+		t.Fatalf("completed block was not rendered as Markdown:\n%s", got)
+	}
+}
+
+func TestSplitStableMarkdown(t *testing.T) {
+	cases := map[string][2]string{
+		"para one\n\npara t":                       {"para one\n\n", "para t"},
+		"intro\n\n```go\nfunc main() {\n\nx := 1":  {"intro\n\n", "```go\nfunc main() {\n\nx := 1"},
+		"intro\n\n```go\nx\n```\n\ntail":           {"intro\n\n```go\nx\n```\n\n", "tail"},
+		"# unfinished heading\n```go\nfunc main()": {"", "# unfinished heading\n```go\nfunc main()"},
+		"": {"", ""},
+	}
+	for in, want := range cases {
+		stable, tail := splitStableMarkdown(in)
+		if stable != want[0] || tail != want[1] {
+			t.Errorf("splitStableMarkdown(%q) = (%q, %q), want (%q, %q)", in, stable, tail, want[0], want[1])
+		}
+	}
+}

@@ -28,6 +28,11 @@ func TestSidebarViewFitsItsBox(t *testing.T) {
 	if got, want := lipgloss.Width(view), m.sidebarSpace()-len(sidebarGap); got != want {
 		t.Errorf("width = %d, want %d", got, want)
 	}
+	for i, line := range strings.Split(view, "\n") {
+		if got, want := lipgloss.Width(line), sidebarCols; got != want {
+			t.Errorf("row %d width = %d, want %d: %q", i, got, want, stripANSI(line))
+		}
+	}
 	for _, want := range []string{"WRITE", "Status", "ASLEEP", "4k / 32k ctx", "Tasks (1/2)", "Dreams (1)"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("sidebar missing %q:\n%s", want, view)

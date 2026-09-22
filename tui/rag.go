@@ -18,6 +18,8 @@ const defaultEmbedModel = "nomic-embed-text"
 const (
 	ragTopK         = 8
 	ragMaxBlockToks = 6000 // hard cap on injected context tokens
+	smallRAGTopK    = 4
+	smallRAGTokens  = 2200
 )
 
 type ragLoadedMsg struct {
@@ -41,6 +43,20 @@ func (m *Model) embedModel() string {
 		return m.cfg.EmbedModel
 	}
 	return defaultEmbedModel
+}
+
+func (m *Model) ragLimits() (topK, tokens int) {
+	topK, tokens = ragTopK, ragMaxBlockToks
+	if m.profile.smallModel() {
+		topK, tokens = smallRAGTopK, smallRAGTokens
+	}
+	if m.profile.RAGTopK > 0 {
+		topK = m.profile.RAGTopK
+	}
+	if m.profile.RAGTokens > 0 {
+		tokens = m.profile.RAGTokens
+	}
+	return topK, tokens
 }
 
 // ensureRagIndexCmd lazily loads or builds the semantic index in the background.
@@ -73,7 +89,8 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 	idx := m.ragIndex
 	host := m.host
 	model := m.embedModel()
-	budget := min(m.contextLimit/8, ragMaxBlockToks)
+	topK, maxTokens := m.ragLimits()
+	budget := min(m.contextLimit/8, maxTokens)
 	return func() tea.Msg {
 		results, err := idx.Search(query, func(q string) ([]float32, error) {
 			embs, err := host.Embed(model, []string{q})
@@ -84,7 +101,7 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 				return nil, fmt.Errorf("empty embedding response")
 			}
 			return embs[0], nil
-		}, ragTopK)
+		}, topK)
 		if err != nil {
 			return ragRetrievedMsg{query: query, block: ""}
 		}

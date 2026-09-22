@@ -4,13 +4,59 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
 )
+
+func TestChatChunkQueuesMissingRenderFrame(t *testing.T) {
+	m := statusTestModel()
+	m.turnGen = 2
+	m.streaming = true
+	m.lastRenderTime = time.Now()
+
+	_, cmd := m.Update(chatChunkMsg{gen: 2, content: "new text"})
+	if cmd == nil {
+		t.Fatal("chunk inside cadence window did not schedule a render")
+	}
+	if !m.renderQueued {
+		t.Fatal("scheduled render was not marked as queued")
+	}
+	if got := m.streamBuf.String(); got != "new text" {
+		t.Fatalf("stream buffer = %q, want new text", got)
+	}
+
+	m.Update(streamRenderMsg{gen: 2})
+	if m.renderQueued {
+		t.Fatal("render message did not clear the queued marker")
+	}
+	if !strings.Contains(stripANSI(m.transcript.String()), "new text") {
+		t.Fatal("scheduled frame did not paint buffered response text")
+	}
+}
+
+func TestWaitForStreamKeepsThinkingAndContentFromSameFrame(t *testing.T) {
+	responses := make(chan api.ChatResponse, 1)
+	responses <- api.ChatResponse{Message: api.Message{
+		Thinking: "reasoning",
+		Content:  "answer",
+	}}
+	m := &Model{stream: &streamState{gen: 3, resp: responses}}
+
+	msg, ok := m.waitForStream()().(chatChunkMsg)
+	if !ok {
+		t.Fatalf("stream frame returned %T, want chatChunkMsg", msg)
+	}
+	if msg.thinking != "reasoning" || msg.content != "answer" {
+		t.Fatalf("stream frame lost a field: %#v", msg)
+	}
+}
 
 // statusTestModel is interruptTestModel plus the bits layout()/Update() touch
 // (markdown notes renderer, focused textarea, real viewport via layout).
@@ -86,7 +132,7 @@ func TestChatErrSchedulesBackoffRetry(t *testing.T) {
 	if m.turnGen != 7 {
 		t.Fatal("retry fired startStream immediately — expected a backoff tick first")
 	}
-	if !strings.HasPrefix(m.toast, "stream error") || !strings.Contains(m.toast, "retrying (1/2) in 2s") {
+	if !strings.HasPrefix(m.toast, "stream error") || !strings.Contains(m.toast, "retrying (1/2) in 1s") {
 		t.Fatalf("unexpected retry toast %q", m.toast)
 	}
 }
@@ -213,7 +259,7 @@ func TestTranscriptVerifyingLine(t *testing.T) {
 
 func TestLayoutSizesTextareaToPrefix(t *testing.T) {
 	m := statusTestModel() // width 80, laid out
-	bandW := 80 - lipgloss.Width(m.inputPrefix()) - 2
+	bandW := 80 - lipgloss.Width(m.inputPrefix())
 	m.input.SetValue(strings.Repeat("x", 300))
 	for i, line := range strings.Split(m.input.View(), "\n") {
 		if w := lipgloss.Width(line); w > bandW {
@@ -224,5 +270,109 @@ func TestLayoutSizesTextareaToPrefix(t *testing.T) {
 		if w := lipgloss.Width(line); w > 80 {
 			t.Fatalf("inputView line %d width = %d, exceeds terminal width 80", i, w)
 		}
+	}
+}
+
+// The prefix used to grow from "message" to "queued while streaming", which
+// re-wrapped whatever was already typed the moment a stream started.
+func TestInputPrefixWidthStableWhileStreaming(t *testing.T) {
+	m := statusTestModel()
+	idle := lipgloss.Width(m.inputPrefix())
+	m.streaming = true
+	if busy := lipgloss.Width(m.inputPrefix()); busy != idle {
+		t.Fatalf("prefix width changed while streaming: %d -> %d", idle, busy)
+	}
+}
+
+// Every row of a grown input must start past the label gutter, not at column 0.
+func TestInputBandRowsAlignUnderPrefix(t *testing.T) {
+	m := statusTestModel()
+	m.input.SetValue(strings.Repeat("x", 300))
+	m.layout()
+	band := m.inputPrefixColumn(lipgloss.Height(m.input.View()))
+	rows := strings.Split(band, "\n")
+	if len(rows) < 2 {
+		t.Fatalf("expected the input to wrap to multiple rows, got %d", len(rows))
+	}
+	want := lipgloss.Width(m.inputPrefix())
+	for i, r := range rows {
+		if got := lipgloss.Width(r); got != want {
+			t.Fatalf("gutter row %d width = %d, want %d", i, got, want)
+		}
+	}
+}
+
+// Arrowing around inside a message must not swap it for a history entry.
+func TestArrowKeysDoNotClobberTypedInput(t *testing.T) {
+	m := statusTestModel()
+	m.userHistory = []string{"older message"}
+	m.historyIndex = len(m.userHistory)
+	m.input.SetValue("line one\nline two")
+	m.input.CursorEnd()
+
+	for name, code := range map[string]rune{"up": tea.KeyUp, "down": tea.KeyDown} {
+		before := m.input.Value()
+		mm, _ := m.Update(tea.KeyPressMsg{Code: code})
+		got := mm.(*Model).input.Value()
+		if got != before {
+			t.Fatalf("%q rewrote the buffer: %q -> %q", name, before, got)
+		}
+	}
+}
+
+// ...but on the first row with an untouched buffer, up still recalls history.
+func TestUpRecallsHistoryFromFirstRow(t *testing.T) {
+	m := statusTestModel()
+	m.userHistory = []string{"older message"}
+	m.historyIndex = len(m.userHistory)
+
+	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := mm.(*Model).input.Value(); got != "older message" {
+		t.Fatalf("up did not recall history, got %q", got)
+	}
+}
+
+// A busy status must stay on one row at every width: the sidebar line used to
+// budget two columns for a three-column spinner prefix and wrap mid-label, and
+// the narrow strip reserved a 10-column toast floor that pushed it past the
+// terminal edge. The elapsed counter must survive truncation of a long tool name.
+func TestStatusLineFitsWidth(t *testing.T) {
+	m := &Model{mode: WriteMode, height: 40, contextLimit: 32000}
+	m.todos = &todoList{}
+	m.streamBuf = &strings.Builder{}
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	m.spinner = s
+	m.busySince = time.Now().Add(-75 * time.Second)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{{Function: tools.ToolCallFunction{Name: "semantic_search_with_a_very_long_name"}}},
+		results: make([]api.Message, 1), started: make([]bool, 1),
+	}
+	m.toast = "allowed for this session: allow run_shell cmd:go test *"
+
+	for _, w := range []int{8, 20, 30, 59} {
+		m.width = w
+		line := m.narrowStatusLine()
+		if got := lipgloss.Width(line); got > w || lipgloss.Height(line) != 1 {
+			t.Errorf("width %d: narrow status is %d cols × %d rows: %q", w, got, lipgloss.Height(line), stripANSI(line))
+		}
+		if w >= 20 && !strings.Contains(stripANSI(line), "75s") {
+			t.Errorf("width %d: elapsed counter lost: %q", w, stripANSI(line))
+		}
+	}
+
+	m.width = 120
+	line := m.statusLine(sidebarInner(sidebarCols))
+	if got := lipgloss.Width(line); got > sidebarInner(sidebarCols) {
+		t.Errorf("sidebar status is %d cols, inner is %d: %q", got, sidebarInner(sidebarCols), stripANSI(line))
+	}
+	if plain := stripANSI(line); strings.Contains(plain, "  ") || !strings.HasSuffix(plain, "75s") {
+		t.Errorf("sidebar status spacing/counter wrong: %q", plain)
+	}
+}
+
+func TestTruncatePlainNarrowIsRuneSafe(t *testing.T) {
+	if got := truncatePlain("·×·×", 2); got != "·×" {
+		t.Fatalf("truncatePlain = %q", got)
 	}
 }

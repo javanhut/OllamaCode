@@ -6,8 +6,6 @@ ollama-companion
 # Session Data
 .ollama_notes.md
 PLAN.md
-# Go
-go.sum
 
 # OS generated files
 .DS_Store
@@ -19,3 +17,4 @@ ehthumbs.db
 Thumbs.db
 .*antigravity*/
 .lazy/
+ocode

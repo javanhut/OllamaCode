@@ -10,20 +10,32 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         submodules: true # If your project uses submodules, uncomment this.
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v7
       with:
         go-version: '1.26' # Use the desired Go version
 
     - name: Install Gio Linux dependencies
       run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libx11-dev libx11-xcb-dev libxcursor-dev libvulkan-dev
 
-    - name: Check formatting (go fmt)
-      run: go fmt ./...
+    - name: Check formatting (gofmt)
+      run: |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "These files need gofmt:"
+          echo "$unformatted"
+          exit 1
+        fi
 
     - name: Run unit tests (go test)
       run: go test -v ./...
+
+    - name: Eval fixture regression gate (hermetic)
+      # No Ollama host exists in CI: -selftest runs every fixture through the
+      # real agent loop and tools against an in-process scripted model, and
+      # exits non-zero if any fixture's behavior check or tool contract fails.
+      run: go run ./cmd/eval -selftest -samples 2

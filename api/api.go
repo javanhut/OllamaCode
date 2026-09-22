@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/javanhut/ollama_code/tools"
 )
@@ -20,16 +22,23 @@ type Message struct {
 	Thinking  string           `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
 	ToolName  string           `json:"tool_name,omitempty"`
 	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
+	// Advisory marks a harness-authored turn message riding the "user" role —
+	// the loop guards' [LOOP BROKEN] style nudges. Every backwards scan for
+	// "the last thing the human asked for" has to step over these, and the flag
+	// survives the session file and the trace payload, which a content
+	// heuristic in one package could not.
+	Advisory bool `json:"advisory,omitempty"`
 }
 
 type ChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []Message       `json:"messages"`
-	Stream   bool            `json:"stream"` // Set to true for streaming
-	Tools    []tools.Tool    `json:"tools,omitempty"`
-	Options  map[string]any  `json:"options,omitempty"`
-	Format   json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
-	Think    *bool           `json:"think,omitempty"`  // enable reasoning on thinking-capable models
+	Model     string          `json:"model"`
+	Messages  []Message       `json:"messages"`
+	Stream    bool            `json:"stream"` // Set to true for streaming
+	KeepAlive string          `json:"keep_alive,omitempty"`
+	Tools     []tools.Tool    `json:"tools,omitempty"`
+	Options   map[string]any  `json:"options,omitempty"`
+	Format    json.RawMessage `json:"format,omitempty"` // JSON-schema for constrained decoding
+	Think     *bool           `json:"think,omitempty"`  // enable reasoning on thinking-capable models
 }
 
 type ChatResponse struct {
@@ -43,9 +52,11 @@ type ChatResponse struct {
 }
 
 type GenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
+	Model     string         `json:"model"`
+	Prompt    string         `json:"prompt"`
+	Stream    bool           `json:"stream"`
+	KeepAlive string         `json:"keep_alive,omitempty"`
+	Options   map[string]any `json:"options,omitempty"`
 }
 
 type GenerateResponse struct {
@@ -54,10 +65,22 @@ type GenerateResponse struct {
 	Done     bool   `json:"done"`
 }
 
+type ModelSummary struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest,omitempty"`
+}
+
 type ModelListResponse struct {
-	Models []struct {
-		Name string `json:"name"`
-	} `json:"models"`
+	Models []ModelSummary `json:"models"`
+}
+
+func (r ModelListResponse) DigestFor(name string) string {
+	for _, model := range r.Models {
+		if model.Name == name {
+			return model.Digest
+		}
+	}
+	return ""
 }
 
 type VersionResponse struct {
@@ -195,10 +218,67 @@ var ollamaCalls map[string]Endpoint = map[string]Endpoint{
 	},
 }
 
-type OllamaHost struct {
-	uri    string
-	apiKey string
+// Local coding turns alternate between inference and tools. Keeping the model
+// resident avoids paying its load cost again after a longer shell command,
+// index update, or permission prompt. This is long enough for normal turns but
+// still lets Ollama reclaim memory after the session goes idle.
+const (
+	defaultKeepAlive     = "30m"
+	responseStreamBuffer = 64
+)
+
+// A shared transport preserves HTTP connections across chat, embedding, model
+// discovery, and tool rounds. The default transport only keeps two idle
+// connections per host, which is easy to exceed while background RAG work and
+// the foreground model are active together.
+var ollamaHTTPClient = &http.Client{Transport: func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 32
+	t.MaxIdleConnsPerHost = 16
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}()}
+
+func statusError(code int, body []byte, header http.Header) error {
+	se := &StatusError{Code: code, Body: strings.TrimSpace(string(body))}
+	se.retryAfter, se.hasRetryAfter = parseRetryAfter(header)
+	return se
 }
+
+// Provider selects the wire format a host speaks. The zero value is Ollama's
+// native /api/* endpoints; ProviderOpenAI routes chat through the
+// /v1/chat/completions translation in openai.go.
+const (
+	ProviderOllama = "ollama"
+	ProviderOpenAI = "openai"
+	// ProviderCursor is not an endpoint at all — see cursor.go.
+)
+
+// OllamaHost is one LLM endpoint. Despite the name it fronts both wire formats
+// — a rename would churn every call site for no behavioral gain — so a session
+// can hold a local Ollama daemon and an OpenAI-compatible provider at once.
+type OllamaHost struct {
+	uri      string
+	apiKey   string
+	provider string
+	// trustWorkspace opts into passing --trust to the Cursor agent. Off by
+	// default: it marks the working directory as trusted in Cursor without
+	// asking, which is the user's call to make, not a default to inherit.
+	trustWorkspace bool
+}
+
+// SetTrustWorkspace opts a Cursor provider into --trust, without which a
+// headless run aborts on the workspace-trust prompt. Ignored by other providers.
+func (o *OllamaHost) SetTrustWorkspace(t bool) { o.trustWorkspace = t }
+
+// SetProvider selects the wire format. Anything other than ProviderOpenAI means
+// native Ollama.
+func (o *OllamaHost) SetProvider(p string) {
+	o.provider = strings.ToLower(strings.TrimSpace(p))
+}
+
+// IsOpenAI reports whether this host speaks the OpenAI-compatible API.
+func (o OllamaHost) IsOpenAI() bool { return o.provider == ProviderOpenAI }
 
 func generatePath(call string, host OllamaHost) string {
 	callPath := ollamaCalls[call].Path
@@ -236,7 +316,7 @@ func (o OllamaHost) get(urlPath string) (*http.Response, error) {
 		return nil, err
 	}
 	o.applyAuth(req)
-	return http.DefaultClient.Do(req)
+	return ollamaHTTPClient.Do(req)
 }
 
 // post performs an authenticated POST so local and cloud hosts share one path.
@@ -247,7 +327,7 @@ func (o OllamaHost) post(urlPath, contentType string, body io.Reader) (*http.Res
 	}
 	req.Header.Set("Content-Type", contentType)
 	o.applyAuth(req)
-	return http.DefaultClient.Do(req)
+	return ollamaHTTPClient.Do(req)
 }
 
 func (o OllamaHost) GetOllamaVersion() (string, error) {
@@ -267,6 +347,11 @@ func (o OllamaHost) GetOllamaVersion() (string, error) {
 }
 
 func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
+	if o.IsCursor() || o.IsOpenAI() {
+		// No /v1 equivalent: capabilities and context length are not
+		// discoverable. Callers fall back to defaults.
+		return nil, fmt.Errorf("model introspection is not available on this provider")
+	}
 	urlPath := generatePath("showModelDetails", o)
 	jsonData, err := json.Marshal(ShowModelRequest{Model: model})
 	if err != nil {
@@ -288,6 +373,12 @@ func (o OllamaHost) ShowModel(model string) (*ShowModelResponse, error) {
 }
 
 func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
+	if o.IsCursor() {
+		return o.modelsCursor()
+	}
+	if o.IsOpenAI() {
+		return o.modelsOpenAI()
+	}
 	urlPath := generatePath("getModels", o)
 	resp, err := o.get(urlPath)
 	if err != nil {
@@ -304,7 +395,29 @@ func (o OllamaHost) GetModelList() (*ModelListResponse, error) {
 }
 
 func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, error) {
+	if o.IsCursor() {
+		res, err := o.chatOnceCursor(context.Background(), ChatRequest{Model: req.Model, Messages: []Message{{Role: "user", Content: req.Prompt}}})
+		if err != nil {
+			return nil, err
+		}
+		return &GenerateResponse{Model: req.Model, Response: res.Message.Content, Done: true}, nil
+	}
+	if o.IsOpenAI() {
+		return o.generateOpenAI(req)
+	}
 	req.Stream = false
+	if req.KeepAlive == "" {
+		req.KeepAlive = defaultKeepAlive
+	}
+
+	// Same learned ceiling as chat: a num_ctx above what this host could load
+	// would reload the model only to fail allocating it.
+	if limit := ContextCeiling(o.uri, req.Model); limit > 0 {
+		if n, ok := req.Options["num_ctx"].(int); ok && n > limit {
+			req.Options = maps.Clone(req.Options)
+			req.Options["num_ctx"] = limit
+		}
+	}
 
 	urlPath := generatePath("generateResponse", o)
 	jsonData, err := json.Marshal(req)
@@ -317,6 +430,12 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}
 	defer resp.Body.Close()
+	// An error body decodes cleanly into an empty Response, which a caller
+	// would take for a real (blank) answer.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, statusError(resp.StatusCode, body, resp.Header)
+	}
 
 	var genResp GenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
@@ -326,49 +445,76 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 	return &genResp, nil
 }
 
-func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
-	req.Stream = true
+// chatPost sends a chat request and returns the live response body. A host that
+// dies allocating memory (KV cache too large for VRAM) is retried with num_ctx
+// halved, down to minContextFloor, so an oversized window degrades into a
+// smaller one instead of killing the turn. The retry is safe here because the
+// allocation happens at model load, before a single token has been streamed.
+func (o OllamaHost) chatPost(ctx context.Context, urlPath, userAgent string, req ChatRequest) (*http.Response, error) {
+	fitNumCtx(&req, o.uri)
+	for {
+		jsonData, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal chat request: %v", err)
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create http request: %v", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if userAgent != "" {
+			httpReq.Header.Set("User-Agent", userAgent)
+		}
+		o.applyAuth(httpReq)
 
-	respChan := make(chan ChatResponse)
+		resp, err := ollamaHTTPClient.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("http request failed: %v", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		failure := statusError(resp.StatusCode, body, resp.Header)
+		if _, ok := shrinkForMemory(&req, o.uri, failure); !ok {
+			return nil, failure
+		}
+	}
+}
+
+func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan ChatResponse, <-chan error) {
+	if o.IsCursor() {
+		return o.chatCursor(ctx, req)
+	}
+	if o.IsOpenAI() {
+		return o.chatOpenAI(ctx, req)
+	}
+	req.Stream = true
+	if req.KeepAlive == "" {
+		req.KeepAlive = defaultKeepAlive
+	}
+
+	// Decouple socket reads from terminal paints. A short burst of tokens should
+	// not stall the HTTP decoder while the UI is laying out a frame.
+	respChan := make(chan ChatResponse, responseStreamBuffer)
 	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(respChan)
 		defer close(errChan)
 
-		urlPath := generatePath("chatResponse", o)
-		jsonData, err := json.Marshal(req)
-		if err != nil {
-			errChan <- fmt.Errorf("failed to marshal chat request: %v", err)
-			return
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
-		if err != nil {
-			errChan <- fmt.Errorf("failed to create http request: %v", err)
-			return
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("User-Agent", "OllamaCode/1.0 (Chat)")
-		o.applyAuth(httpReq)
-
-		client := &http.Client{}
-		resp, err := client.Do(httpReq)
+		resp, err := o.chatPost(ctx, generatePath("chatResponse", o), "OllamaCode/1.0 (Chat)", req)
 		if err != nil {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				errChan <- fmt.Errorf("http request failed: %v", err)
+				errChan <- err
 				return
 			}
 		}
 		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			errChan <- fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-			return
-		}
 
 		sawDone := false
 		decoder := json.NewDecoder(resp.Body)
@@ -391,7 +537,11 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 					return
 				}
 
-				respChan <- chunk
+				select {
+				case respChan <- chunk:
+				case <-ctx.Done():
+					return
+				}
 				sawDone = chunk.Done
 
 				if chunk.Done {
@@ -408,26 +558,21 @@ func (o OllamaHost) ContinuousChat(ctx context.Context, req ChatRequest) (<-chan
 // constrained-decoding escalation (req.Format set to a JSON schema) where we
 // need one complete, schema-valid object rather than a token stream.
 func (o OllamaHost) ChatOnce(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	if o.IsCursor() {
+		return o.chatOnceCursor(ctx, req)
+	}
+	if o.IsOpenAI() {
+		return o.chatOnceOpenAI(ctx, req)
+	}
 	req.Stream = false
-	urlPath := generatePath("chatResponse", o)
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("failed to marshal chat request: %v", err)
+	if req.KeepAlive == "" {
+		req.KeepAlive = defaultKeepAlive
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", urlPath, bytes.NewBuffer(jsonData))
+	resp, err := o.chatPost(ctx, generatePath("chatResponse", o), "", req)
 	if err != nil {
-		return ChatResponse{}, fmt.Errorf("failed to create http request: %v", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	o.applyAuth(httpReq)
-	resp, err := (&http.Client{}).Do(httpReq)
-	if err != nil {
-		return ChatResponse{}, fmt.Errorf("http request failed: %v", err)
+		return ChatResponse{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
 	var out ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return ChatResponse{}, fmt.Errorf("failed to decode response: %v", err)
@@ -462,6 +607,10 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 		defer close(progCh)
 		defer close(errCh)
 
+		if o.IsCursor() || o.IsOpenAI() {
+			errCh <- fmt.Errorf("pulling is not available on this provider; models there are served remotely")
+			return
+		}
 		urlPath := generatePath("pullModel", o)
 		jsonData, err := json.Marshal(pullRequest{Model: model, Stream: true})
 		if err != nil {
@@ -476,7 +625,7 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 		httpReq.Header.Set("Content-Type", "application/json")
 		o.applyAuth(httpReq)
 
-		resp, err := (&http.Client{}).Do(httpReq)
+		resp, err := ollamaHTTPClient.Do(httpReq)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -521,6 +670,9 @@ func (o OllamaHost) PullModel(ctx context.Context, model string) (<-chan PullPro
 }
 
 func (o OllamaHost) Embed(model string, inputs []string) ([][]float32, error) {
+	if o.IsCursor() || o.IsOpenAI() {
+		return nil, fmt.Errorf("embeddings are not available on this provider; point the embed model at a local Ollama daemon")
+	}
 	urlPath := generatePath("getInputEmbedings", o)
 	req := EmbedRequest{Model: model, Input: inputs}
 	jsonData, err := json.Marshal(req)

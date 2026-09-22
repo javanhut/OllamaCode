@@ -36,6 +36,11 @@ func TestRegistry(t *testing.T) {
 }
 
 func TestRunShellToolReturnsOutput(t *testing.T) {
+	// Opt out of the sandbox so a machine without one (CI) doesn't prepend the
+	// one-time missing-sandbox warning; this test is about the output only.
+	SetShellSandboxEnabled(false)
+	t.Cleanup(func() { SetShellSandboxEnabled(true) })
+
 	r := NewRegistry()
 	r.Register(RunShellTool())
 
@@ -103,6 +108,9 @@ func TestWriteAndReadFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	ctx := context.Background()
 	r := NewRegistry()
@@ -147,6 +155,9 @@ func TestReadFileNumbersAndTruncates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	path := filepath.Join(tmpDir, "f.txt")
 	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
@@ -181,6 +192,9 @@ func TestEditFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	ctx := context.Background()
 	r := NewRegistry()
@@ -225,6 +239,9 @@ func TestEditFile_LineRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	ctx := context.Background()
 	r := NewRegistry()
@@ -270,6 +287,9 @@ func TestGrep(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	ctx := context.Background()
 	r := NewRegistry()
@@ -303,6 +323,9 @@ func TestWriteFileEmitsDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
+	// The fs tools are jailed to the workspace root; make the temp dir the
+	// working root so absolute paths under it pass the jail.
+	t.Chdir(tmpDir)
 
 	ctx := context.Background()
 	tool := WriteFileTool()

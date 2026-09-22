@@ -2,39 +2,130 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
-// JSONRPCRequest represents a standard JSON-RPC 2.0 request.
+const defaultMCPProtocolVersion = "2025-11-25"
+
+// ExternalServerSpec describes one configured MCP server. Exactly one of
+// Command (stdio subprocess) or URL (Streamable HTTP endpoint) must be set;
+// everything else applies to the selected transport as documented per field.
+type ExternalServerSpec struct {
+	Name             string
+	Command          string
+	Args             []string
+	WorkDir          string
+	EnvAllow         []string
+	URL              string
+	Headers          map[string]string
+	HeadersEnv       map[string]string
+	MaxResponseBytes int
+	CallTimeout      time.Duration
+}
+
+// NewMCPServerFromSpec validates the transport selection and constructs the
+// matching MCP server: a stdio subprocess for Command, a Streamable HTTP
+// client for URL. Guardrails (timeouts, response caps, namespacing) are
+// transport-independent and apply to both.
+func NewMCPServerFromSpec(spec ExternalServerSpec) (MCPServer, error) {
+	hasCommand := strings.TrimSpace(spec.Command) != ""
+	hasURL := strings.TrimSpace(spec.URL) != ""
+	switch {
+	case hasCommand && hasURL:
+		return nil, fmt.Errorf("MCP server %q sets both command and url; exactly one transport is allowed", spec.Name)
+	case !hasCommand && !hasURL:
+		return nil, fmt.Errorf("MCP server %q requires either a command (stdio) or a url (HTTP)", spec.Name)
+	}
+	if hasURL {
+		headers, err := ResolveExternalHeaders(spec.Headers, spec.HeadersEnv)
+		if err != nil {
+			return nil, fmt.Errorf("MCP server %q: %w", spec.Name, err)
+		}
+		return NewHTTPExternalServer(HTTPExternalServerOptions{
+			Name: spec.Name, URL: strings.TrimSpace(spec.URL), Headers: headers,
+			MaxResponseBytes: spec.MaxResponseBytes, CallTimeout: spec.CallTimeout,
+		})
+	}
+	return NewExternalServerWithOptions(ExternalServerOptions{
+		Name: spec.Name, Command: spec.Command, Args: spec.Args, WorkDir: spec.WorkDir,
+		EnvAllow: spec.EnvAllow, MaxResponseBytes: spec.MaxResponseBytes, CallTimeout: spec.CallTimeout,
+	})
+}
+
+// ResolveExternalHeaders merges static headers with env-var indirections.
+// headersEnv maps a header name to the environment variable holding its value
+// (mirroring provider api_key_env) so secrets stay out of the config file; a
+// set env value wins over the static value for the same header. An unset
+// variable with no static fallback is a configuration error rather than a
+// silently missing credential.
+func ResolveExternalHeaders(headers, headersEnv map[string]string) (map[string]string, error) {
+	merged := cloneStrings(headers)
+	for header, envVar := range headersEnv {
+		name := strings.TrimSpace(envVar)
+		if strings.TrimSpace(header) == "" || name == "" {
+			return nil, fmt.Errorf("headers_env requires a header name and an environment variable name")
+		}
+		value, ok := os.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			if _, fallback := merged[header]; fallback {
+				continue
+			}
+			return nil, fmt.Errorf("environment variable %q for header %q is not set", name, header)
+		}
+		merged[header] = value
+	}
+	return merged, nil
+}
+
+type MCPServer interface {
+	Initialize(context.Context, string) error
+	ListTools(context.Context, ToolPolicy) ([]Tool, error)
+	SetToolsChangedHandler(func())
+	Namespace() string
+	Done() <-chan struct{}
+	Close() error
+}
+
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
-	ID      any             `json:"id,omitempty"`
+	ID      int             `json:"id,omitempty"`
 }
 
-// JSONRPCResponse represents a standard JSON-RPC 2.0 response.
 type JSONRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *JSONRPCError   `json:"error,omitempty"`
-	ID      any             `json:"id"`
+	ID      json.RawMessage `json:"id"`
 }
 
-// JSONRPCError represents a standard JSON-RPC 2.0 error.
 type JSONRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
 }
 
-// ExternalServer manages a connection to an external MCP server via stdio.
+type externalResult struct {
+	response *JSONRPCResponse
+	err      error
+}
+
+// ExternalServer owns one stateful MCP stdio subprocess. Requests are
+// serialized onto stdin while responses may arrive out of order and are routed
+// by their JSON-RPC id.
 type ExternalServer struct {
 	name   string
 	cmd    *exec.Cmd
@@ -42,13 +133,46 @@ type ExternalServer struct {
 	stdout io.ReadCloser
 	stderr io.ReadCloser
 
-	mu      sync.Mutex
-	pending map[any]chan *JSONRPCResponse
-	nextID  int
+	writeMu          sync.Mutex
+	mu               sync.Mutex
+	pending          map[string]chan externalResult
+	nextID           int
+	done             chan struct{}
+	errTail          strings.Builder
+	closeOnce        sync.Once
+	changeMu         sync.Mutex
+	onToolsChanged   func()
+	maxResponseBytes int
+	callTimeout      time.Duration
 }
 
-func NewExternalServer(name string, command string, args ...string) (*ExternalServer, error) {
+type ExternalServerOptions struct {
+	Name               string
+	Command            string
+	Args               []string
+	WorkDir            string
+	EnvAllow           []string
+	InheritEnvironment bool
+	MaxResponseBytes   int
+	CallTimeout        time.Duration
+}
+
+func NewExternalServer(name, command string, args ...string) (*ExternalServer, error) {
+	return NewExternalServerWithOptions(ExternalServerOptions{
+		Name: name, Command: command, Args: args, InheritEnvironment: true,
+	})
+}
+
+func NewExternalServerWithOptions(opts ExternalServerOptions) (*ExternalServer, error) {
+	name, command, args := opts.Name, opts.Command, opts.Args
+	if strings.TrimSpace(command) == "" {
+		return nil, fmt.Errorf("MCP server %q has no command", name)
+	}
 	cmd := exec.Command(command, args...)
+	cmd.Dir = strings.TrimSpace(opts.WorkDir)
+	if !opts.InheritEnvironment {
+		cmd.Env = allowedEnvironment(opts.EnvAllow)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -61,137 +185,368 @@ func NewExternalServer(name string, command string, args ...string) (*ExternalSe
 	if err != nil {
 		return nil, err
 	}
-
 	s := &ExternalServer{
-		name:    name,
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		pending: make(map[any]chan *JSONRPCResponse),
+		name: name, cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
+		pending: map[string]chan externalResult{}, done: make(chan struct{}),
+		maxResponseBytes: opts.MaxResponseBytes, callTimeout: opts.CallTimeout,
 	}
-
+	if s.maxResponseBytes <= 0 {
+		s.maxResponseBytes = 4 * 1024 * 1024
+	}
+	if s.callTimeout <= 0 {
+		s.callTimeout = 2 * time.Minute
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-
 	go s.listen()
+	go s.captureStderr()
 	return s, nil
+}
+
+func allowedEnvironment(names []string) []string {
+	wanted := map[string]bool{"PATH": true}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			wanted[name] = true
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	for name := range wanted {
+		if value, ok := os.LookupEnv(name); ok {
+			out = append(out, name+"="+value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *ExternalServer) listen() {
 	scanner := bufio.NewScanner(s.stdout)
+	scanner.Buffer(make([]byte, 64*1024), s.maxResponseBytes)
 	for scanner.Scan() {
+		var envelope struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			continue
+		}
+		if len(envelope.ID) == 0 {
+			if envelope.Method == "notifications/tools/list_changed" {
+				s.dispatchToolsChanged()
+			}
+			continue
+		}
 		var resp JSONRPCResponse
 		if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
 			continue
 		}
-
+		key := string(bytes.TrimSpace(resp.ID))
 		s.mu.Lock()
-		ch, ok := s.pending[resp.ID]
-		if ok {
-			delete(s.pending, resp.ID)
-			ch <- &resp
+		ch := s.pending[key]
+		delete(s.pending, key)
+		s.mu.Unlock()
+		if ch != nil {
+			ch <- externalResult{response: &resp}
 		}
+	}
+	err := scanner.Err()
+	if err == nil {
+		err = io.EOF
+	}
+	s.failPending(fmt.Errorf("MCP server %q stopped: %w%s", s.name, err, s.stderrSuffix()))
+	close(s.done)
+}
+
+func (s *ExternalServer) SetToolsChangedHandler(handler func()) {
+	s.mu.Lock()
+	s.onToolsChanged = handler
+	s.mu.Unlock()
+}
+
+// Done closes when the subprocess exits. Callers use it to withdraw stale tool
+// definitions immediately; reconnecting is intentionally bounded to the next
+// application start rather than spinning on a crashing or compromised server.
+func (s *ExternalServer) Done() <-chan struct{} { return s.done }
+
+func (s *ExternalServer) dispatchToolsChanged() {
+	s.mu.Lock()
+	handler := s.onToolsChanged
+	s.mu.Unlock()
+	if handler == nil {
+		return
+	}
+	go func() { s.changeMu.Lock(); defer s.changeMu.Unlock(); handler() }()
+}
+
+func (s *ExternalServer) captureStderr() {
+	scanner := bufio.NewScanner(s.stderr)
+	for scanner.Scan() {
+		s.mu.Lock()
+		if s.errTail.Len() > 16*1024 {
+			existing := s.errTail.String()
+			s.errTail.Reset()
+			s.errTail.WriteString(existing[len(existing)-8*1024:])
+		}
+		s.errTail.WriteString("\n" + scanner.Text())
 		s.mu.Unlock()
 	}
 }
 
-func (s *ExternalServer) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (s *ExternalServer) stderrSuffix() string {
 	s.mu.Lock()
-	id := s.nextID
+	defer s.mu.Unlock()
+	if s.errTail.Len() == 0 {
+		return ""
+	}
+	return ":" + s.errTail.String()
+}
+
+func (s *ExternalServer) failPending(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, ch := range s.pending {
+		delete(s.pending, key)
+		ch <- externalResult{err: err}
+	}
+}
+
+func (s *ExternalServer) send(value any) error {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err = fmt.Fprintln(s.stdin, string(b))
+	return err
+}
+
+func (s *ExternalServer) notify(method string, params any) error {
+	p, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	return s.send(JSONRPCRequest{JSONRPC: "2.0", Method: method, Params: p})
+}
+
+func (s *ExternalServer) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if s.callTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.callTimeout)
+		defer cancel()
+	}
+	s.mu.Lock()
 	s.nextID++
-	ch := make(chan *JSONRPCResponse, 1)
-	s.pending[id] = ch
+	id := s.nextID
+	key := fmt.Sprint(id)
+	ch := make(chan externalResult, 1)
+	s.pending[key] = ch
 	s.mu.Unlock()
 
 	p, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
 	}
-
-	req := JSONRPCRequest{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  p,
-		ID:      id,
-	}
-
-	b, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := fmt.Fprintln(s.stdin, string(b)); err != nil {
+	if err := s.send(JSONRPCRequest{JSONRPC: "2.0", Method: method, Params: p, ID: id}); err != nil {
+		s.mu.Lock()
+		delete(s.pending, key)
+		s.mu.Unlock()
 		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
+		s.mu.Lock()
+		delete(s.pending, key)
+		s.mu.Unlock()
+		_ = s.notify("notifications/cancelled", map[string]any{"requestId": id, "reason": ctx.Err().Error()})
 		return nil, ctx.Err()
-	case resp := <-ch:
-		if resp.Error != nil {
-			return nil, fmt.Errorf("rpc error (%d): %s", resp.Error.Code, resp.Error.Message)
+	case result := <-ch:
+		if result.err != nil {
+			return nil, result.err
 		}
-		return resp.Result, nil
+		if result.response.Error != nil {
+			return nil, fmt.Errorf("MCP rpc error (%d): %s", result.response.Error.Code, result.response.Error.Message)
+		}
+		if len(result.response.Result) > s.maxResponseBytes {
+			return nil, fmt.Errorf("MCP response exceeded %d bytes", s.maxResponseBytes)
+		}
+		return result.response.Result, nil
 	}
+}
+
+// Initialize performs the required stateful MCP capability handshake.
+func (s *ExternalServer) Initialize(ctx context.Context, protocolVersion string) error {
+	if protocolVersion == "" {
+		protocolVersion = defaultMCPProtocolVersion
+	}
+	result, err := s.Call(ctx, "initialize", map[string]any{
+		"protocolVersion": protocolVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]string{"name": "OllamaCode", "version": "1"},
+	})
+	if err != nil {
+		return err
+	}
+	var initialized struct {
+		ProtocolVersion string                     `json:"protocolVersion"`
+		Capabilities    map[string]json.RawMessage `json:"capabilities"`
+	}
+	if err := json.Unmarshal(result, &initialized); err != nil {
+		return fmt.Errorf("invalid MCP initialize response: %w", err)
+	}
+	if initialized.ProtocolVersion == "" {
+		return fmt.Errorf("MCP server %q returned no protocol version", s.name)
+	}
+	if _, ok := initialized.Capabilities["tools"]; !ok {
+		return fmt.Errorf("MCP server %q does not advertise tools", s.name)
+	}
+	return s.notify("notifications/initialized", map[string]any{})
 }
 
 func (s *ExternalServer) Close() error {
-	s.stdin.Close()
-	return s.cmd.Wait()
+	var err error
+	s.closeOnce.Do(func() {
+		_ = s.stdin.Close()
+		select {
+		case <-s.done:
+		case <-time.After(2 * time.Second):
+			_ = s.cmd.Process.Kill()
+			<-s.done
+		}
+		err = s.cmd.Wait()
+	})
+	return err
 }
 
-// ListTools retrieves the list of tools provided by the external server.
-func (s *ExternalServer) ListTools(ctx context.Context) ([]Tool, error) {
-	resp, err := s.Call(ctx, "listTools", nil)
-	if err != nil {
-		return nil, err
-	}
+type mcpTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
+}
 
-	var result struct {
-		Tools []Tool `json:"tools"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, err
-	}
+var nonToolName = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
-	// Wrap each tool with a handler that calls back to the external server
-	for i := range result.Tools {
-		name := result.Tools[i].Function.Name
-		result.Tools[i].Handler = func(ctx context.Context, args json.RawMessage) (string, error) {
-			callResp, err := s.Call(ctx, "callTool", map[string]any{
-				"name":      name,
-				"arguments": args,
-			})
+func externalNamespace(server string) string {
+	clean := strings.Trim(nonToolName.ReplaceAllString(server, "_"), "_")
+	if len(clean) > 32 {
+		sum := sha256.Sum256([]byte(clean))
+		clean = clean[:23] + fmt.Sprintf("_%x", sum[:4])
+	}
+	if clean == "" {
+		clean = "server"
+	}
+	return "mcp_" + clean + "_"
+}
+
+func externalToolName(server, remote string) string {
+	name := externalNamespace(server) + nonToolName.ReplaceAllString(remote, "_")
+	name = strings.Trim(name, "_")
+	if len(name) <= 64 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	return name[:55] + fmt.Sprintf("_%x", sum[:4])
+}
+
+func (s *ExternalServer) Namespace() string { return externalNamespace(s.name) }
+
+// ListTools retrieves every page of tools and adapts their MCP input schemas
+// to OllamaCode's internal function definitions.
+func (s *ExternalServer) ListTools(ctx context.Context, policy ToolPolicy) ([]Tool, error) {
+	var out []Tool
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		resp, err := s.Call(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Tools      []mcpTool `json:"tools"`
+			NextCursor string    `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(resp, &result); err != nil {
+			return nil, err
+		}
+		for _, remote := range result.Tools {
+			fn, err := functionFromMCPSchema(externalToolName(s.name, remote.Name), remote.Description, remote.InputSchema)
 			if err != nil {
-				return "", err
+				return nil, fmt.Errorf("MCP tool %s/%s: %w", s.name, remote.Name, err)
 			}
+			out = append(out, Tool{Type: "function", Function: fn, Policy: policy,
+				Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+					return s.callTool(ctx, remote.Name, args)
+				}})
+		}
+		if result.NextCursor == "" {
+			return out, nil
+		}
+		cursor = result.NextCursor
+	}
+}
 
-			var callResult struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-				IsError bool `json:"isError"`
-			}
-			if err := json.Unmarshal(callResp, &callResult); err != nil {
-				return "", err
-			}
-
-			var out []string
-			for _, c := range callResult.Content {
-				if c.Type == "text" {
-					out = append(out, c.Text)
-				}
-			}
-			full := strings.Join(out, "\n")
-			if callResult.IsError {
-				return "", fmt.Errorf("%s", full)
-			}
-			return full, nil
+func (s *ExternalServer) callTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	var arguments map[string]any
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &arguments); err != nil {
+			return "", err
 		}
 	}
+	resp, err := s.Call(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
+	if err != nil {
+		return "", err
+	}
+	return decodeMCPToolResult(resp)
+}
 
-	return result.Tools, nil
+func decodeMCPToolResult(resp json.RawMessage) (string, error) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent"`
+		IsError           bool            `json:"isError"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, content := range result.Content {
+		if content.Type == "text" && content.Text != "" {
+			parts = append(parts, content.Text)
+		}
+	}
+	if len(result.StructuredContent) > 0 {
+		parts = append(parts, string(result.StructuredContent))
+	}
+	text := strings.Join(parts, "\n")
+	if result.IsError {
+		return "", fmt.Errorf("%s", text)
+	}
+	return text, nil
+}
+
+func functionFromMCPSchema(name, description string, raw json.RawMessage) (Function, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{"type":"object","properties":{}}`)
+	}
+	var schema Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return Function{}, fmt.Errorf("invalid inputSchema: %w", err)
+	}
+	if schema.Type == "" {
+		schema.Type = "object"
+	}
+	if schema.Properties == nil {
+		schema.Properties = map[string]Property{}
+	}
+	return Function{Name: name, Description: description, Parameters: schema}, nil
 }

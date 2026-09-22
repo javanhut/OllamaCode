@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -116,8 +117,8 @@ func colorizeDiff(diff string, width int) string {
 // lastNonEmptyLine returns the last line of s with content, for one-line tickers.
 func lastNonEmptyLine(s string) string {
 	lines := strings.Split(s, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if ln := strings.TrimSpace(lines[i]); ln != "" {
+	for _, line := range slices.Backward(lines) {
+		if ln := strings.TrimSpace(line); ln != "" {
 			return ln
 		}
 	}
@@ -198,8 +199,19 @@ func fencedDump(content string, maxLines, width int) string {
 
 func renderCollapsedTool(call tools.ToolCall, content string, verbose bool, width int) string {
 	status := "completed"
-	if strings.HasPrefix(content, "error:") {
+	if !tools.ToolResultOK(content) {
 		status = "failed"
+	}
+	if result, ok := tools.DecodeToolResult(content); ok && verbose {
+		var details []string
+		details = append(details, result.Evidence...)
+		if result.Hint != "" {
+			details = append(details, result.Hint)
+		}
+		content = strings.Join(details, "\n")
+		if content == "" {
+			content = result.Summary
+		}
 	}
 
 	header := fmt.Sprintf("**›** `%s` (%s)", call.Function.Name, status)
@@ -221,20 +233,6 @@ func renderToolCall(call tools.ToolCall, verbose bool, width int) string {
 	}
 	args = ansi.Truncate(strings.ReplaceAll(args, "\n", " "), width, "...")
 	return name + "\n" + codeFence(args) + "\n" + args + "\n" + codeFence(args)
-}
-
-func renderToolResult(name, content string, verbose bool, width int) string {
-	status := "completed"
-	if strings.HasPrefix(content, "error:") {
-		status = "failed"
-	}
-
-	header := fmt.Sprintf("**←** `%s` (%s)", name, status)
-	if !verbose {
-		return header
-	}
-
-	return header + "\n" + fencedDump(content, 12, width)
 }
 
 // laylaMarkdownStyle returns a glamour style based on the dark theme but with
@@ -349,10 +347,12 @@ func (m *Model) renderMarkdown(s string, useCache bool) string {
 	if width <= 4 {
 		width = 80
 	}
+	// styleCitations runs on the rendered output: printable text is unchanged
+	// (still greppable/copyable `path:line`), only the ANSI styling differs.
 	if out, ok := m.md.render(s, width-2, useCache); ok {
-		return out
+		return styleCitations(out)
 	}
-	return s
+	return styleCitations(s)
 }
 
 func (m *Model) renderNotesMarkdown(s string, width int) string {
@@ -368,7 +368,4 @@ func (m *Model) renderNotesMarkdown(s string, width int) string {
 // LaTeX math notation patterns. We rewrite $…$ / $$…$$ as inline code so
 // the user sees a styled span instead of literal dollar signs (glamour has no
 // math renderer). Currency like "$5" doesn't match because it has no closer.
-var (
-	mathDisplayRe = regexp.MustCompile(`\$\$([^\n$]+?)\$\$`)
-	mathInlineRe  = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)
-)
+var mathInlineRe = regexp.MustCompile(`\$([^\s$](?:[^$\n]*?[^\s$])?)\$`)

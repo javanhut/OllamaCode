@@ -15,6 +15,14 @@ func configPath() string {
 	return filepath.Join(dir, "ollama_code", "config.json")
 }
 
+func defaultTracePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "ollama_code-trace.jsonl")
+	}
+	return filepath.Join(dir, "ollama_code", "trace.jsonl")
+}
+
 // resolveAPIKey returns the Ollama API key to authenticate requests with. The
 // OLLAMA_API_KEY environment variable (matching the ollama CLI convention)
 // takes precedence over the saved config so it can be supplied without writing
@@ -52,5 +60,49 @@ func saveConfig(c config) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	// 0600: the config can hold api_key and provider keys. Atomic so a crash
+	// mid-save can't truncate every setting.
+	_ = writeFileAtomic(path, data, 0o600)
+}
+
+func tokenRatiosPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "ollama_code", "token_ratios.json")
+}
+
+// loadTokenRatios reads the calibrated chars-per-token ratios, keyed by
+// provider|model. A missing or corrupt file yields an empty map — the
+// estimators then stay on their default heuristic.
+func loadTokenRatios() map[string]float64 {
+	ratios := map[string]float64{}
+	path := tokenRatiosPath()
+	if path == "" {
+		return ratios
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &ratios)
+	}
+	return ratios
+}
+
+// saveTokenRatio persists the ratio measured by /model calibrate for one
+// provider|model, keeping the ratios recorded for other models.
+func saveTokenRatio(key string, ratio float64) {
+	path := tokenRatiosPath()
+	if path == "" {
+		return
+	}
+	ratios := loadTokenRatios()
+	ratios[key] = ratio
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	data, err := json.MarshalIndent(ratios, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o600)
 }

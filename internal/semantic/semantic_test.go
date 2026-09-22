@@ -84,3 +84,19 @@ func TestReindexFile_MissingFileRemoves(t *testing.T) {
 		t.Fatalf("missing file should leave no chunks, got %d", len(idx.Chunks))
 	}
 }
+
+func TestSearchHybridBoostsExactIdentifiers(t *testing.T) {
+	idx := &Index{Chunks: []Chunk{
+		{Path: "generic.go", Text: "func Other() {}", Embedding: []float32{1, 0}},
+		{Path: "router.go", Text: "func ResolveProfile() {}", Embedding: []float32{1, 0}},
+	}}
+	results, err := idx.Search("ResolveProfile", func(string) ([]float32, error) {
+		return []float32{1, 0}, nil
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || results[0].Path != "router.go" {
+		t.Fatalf("exact identifier should break semantic tie: %+v", results)
+	}
+}

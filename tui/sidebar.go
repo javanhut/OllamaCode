@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -13,13 +14,23 @@ const sidebarCols = 32
 // sidebarGap is the blank column pair between the transcript and the sidebar.
 const sidebarGap = "  "
 
-// sidebarWidth returns the sidebar's total width, or 0 when the terminal is too
-// narrow to spare the columns.
+// sidebarWidth returns the sidebar's total width, or 0 when the terminal can't
+// spare the columns. layout() clears sidebarHidden once it knows the viewport
+// height — without that the transcript kept the sidebar's 34 columns reserved on
+// short terminals where the panel doesn't render at all. The zero value is
+// "visible", so a Model built without layout() behaves as before.
 func (m *Model) sidebarWidth() int {
-	if m.width < 60 {
+	if m.width < 60 || m.sidebarHidden {
 		return 0
 	}
 	return sidebarCols
+}
+
+// sidebarFits reports whether the panel is worth drawing at this viewport
+// height. Both layout() (to reserve columns) and sidebarView() (to draw) go
+// through it, so they can never disagree.
+func (m *Model) sidebarFits(vpH int) bool {
+	return m.width >= 60 && vpH >= 6
 }
 
 // sidebarSpace is how many columns the sidebar takes away from the transcript,
@@ -38,32 +49,90 @@ func sidebarInner(w int) int { return w - 4 }
 // still working (so the caller can prefix a spinner). The text is plain so it
 // can be truncated without cutting an escape sequence in half.
 func (m *Model) statusText() (string, bool) {
+	label, elapsed, busy := m.statusParts()
+	return label + elapsed, busy
+}
+
+// statusParts is statusText with the elapsed counter kept separate, so a
+// renderer short on columns can trim the label (usually a long tool name) and
+// still show the counter — the one part that proves a slow turn isn't frozen.
+func (m *Model) statusParts() (label, elapsed string, busy bool) {
 	switch {
 	case m.pending != nil:
-		if label := m.currentToolLabel(); label != "" {
-			return fmt.Sprintf("TOOLS %d/%d · %s%s", m.pending.done, len(m.pending.calls), label, m.elapsedSuffix()), true
+		if tool := m.currentToolLabel(); tool != "" {
+			return fmt.Sprintf("TOOLS %d/%d · %s", m.pending.done, len(m.pending.calls), tool), m.elapsedSuffix(), true
 		}
-		return fmt.Sprintf("TOOLS %d/%d%s", m.pending.done, len(m.pending.calls), m.elapsedSuffix()), true
+		return fmt.Sprintf("TOOLS %d/%d", m.pending.done, len(m.pending.calls)), m.elapsedSuffix(), true
 	case m.retrieving:
-		return "SEARCHING CODE" + m.elapsedSuffix(), true
+		return "SEARCHING CODE", m.elapsedSuffix(), true
 	case m.compacting:
-		return "COMPACTING" + m.elapsedSuffix(), true
+		return "COMPACTING", m.elapsedSuffix(), true
 	case m.streaming && m.streamBuf.Len() == 0:
-		return "THINKING" + m.elapsedSuffix(), true
+		return "THINKING", m.elapsedSuffix(), true
 	case m.streaming:
-		return "STREAMING" + m.elapsedSuffix(), true
+		return "STREAMING", m.elapsedSuffix(), true
 	case m.verifying:
-		return "VERIFYING" + m.elapsedSuffix(), true
+		return "VERIFYING", m.elapsedSuffix(), true
 	case m.dreaming:
-		return "DREAMING", true
+		return "DREAMING", "", true
 	case m.asleep:
-		return "ASLEEP", false
+		return "ASLEEP", "", false
+	case m.runningSubagentJobs() > 0:
+		return fmt.Sprintf("SUB-AGENTS ×%d", m.runningSubagentJobs()), "", true
 	}
-	return "READY", false
+	return "READY", "", false
+}
+
+// statusLine renders the status as ONE styled line no wider than width:
+// spinner (when busy), label, elapsed counter. The spinner's own width is
+// measured rather than assumed — the Dot frames already carry a trailing
+// space, and budgeting for it wrong is what used to push the line onto a
+// second row. When columns run short the label is trimmed first, then the
+// counter, never the spinner.
+func (m *Model) statusLine(width int) string {
+	label, elapsed, busy := m.statusParts()
+	prefix := ""
+	if busy {
+		prefix = strings.TrimRight(m.spinner.View(), " ") + " "
+		if lipgloss.Width(prefix) >= width {
+			prefix = ""
+		}
+	}
+	room := width - lipgloss.Width(prefix)
+	if lipgloss.Width(label)+lipgloss.Width(elapsed) > room {
+		if keep := room - lipgloss.Width(elapsed); keep >= 6 {
+			label = truncatePlain(label, keep)
+		} else {
+			label, elapsed = truncatePlain(label+elapsed, room), ""
+		}
+	}
+	style := mutedStyle
+	if busy {
+		style = bodyStyle.Bold(true)
+	}
+	return prefix + style.Render(label+elapsed)
+}
+
+// toastTTL is how long a toast stays on screen. They used to persist until the
+// next message was sent, so "loaded model X" sat in the panel all session.
+const toastTTL = 5 * time.Second
+
+// activeToast returns the toast if it's still fresh. It stamps the clock the
+// first time it sees a given text, so every m.toast assignment in the codebase
+// keeps working without knowing about expiry.
+func (m *Model) activeToast() string {
+	if m.toast != m.toastSeen {
+		m.toastSeen = m.toast
+		m.toastAt = time.Now()
+	}
+	if m.toast == "" || time.Since(m.toastAt) > toastTTL {
+		return ""
+	}
+	return m.toast
 }
 
 func (m *Model) sidebarHeading(s string) string {
-	return headingStyle.Copy().Foreground(m.mode.color()).Render(s)
+	return headingStyle.Foreground(m.mode.color()).Render(s)
 }
 
 // sidebarSections returns the panel's stacked blocks — everything except the
@@ -72,24 +141,21 @@ func (m *Model) sidebarSections(inner int) []string {
 	var out []string
 
 	mode := lipgloss.NewStyle().Foreground(m.mode.color()).Bold(true).Render(strings.ToUpper(m.mode.String()))
-	out = append(out, m.sidebarHeading("Mode")+"\n"+mode+"\n"+mutedStyle.Copy().Width(inner).Render(m.mode.hint()))
+	out = append(out, m.sidebarHeading("Mode")+"\n"+mode+"\n"+mutedStyle.Width(inner).Render(m.mode.hint()))
 
-	text, busy := m.statusText()
-	line := bodyStyle.Copy().Bold(true).Render(truncatePlain(text, inner-2))
-	if busy {
-		line = m.spinner.View() + " " + line
-	}
-	status := m.sidebarHeading("Status") + "\n" + line
-	if m.totalTokens > 0 {
-		tokens := fmt.Sprintf("%dk / %dk ctx", m.totalTokens/1000, m.contextLimit/1000)
-		if m.totalTokens > m.contextLimit*8/10 {
-			status += "\n" + errorStyle.Render(tokens)
+	status := m.sidebarHeading("Status") + "\n" + m.statusLine(inner)
+	// Live estimate while streaming, last completed count when idle.
+	m.ensureMeasuredRatio()
+	if tokens := m.displayTokens(); tokens > 0 {
+		text := fmt.Sprintf("%dk / %dk ctx", tokens/1000, m.contextLimit/1000)
+		if tokens > m.contextLimit*8/10 {
+			status += "\n" + errorStyle.Render(text)
 		} else {
-			status += "\n" + mutedStyle.Render(tokens)
+			status += "\n" + mutedStyle.Render(text)
 		}
 	}
-	if m.toast != "" {
-		status += "\n" + hintStyle.Copy().Width(inner).Render(m.toast)
+	if toast := m.activeToast(); toast != "" {
+		status += "\n" + hintStyle.Width(inner).Render(toast)
 	}
 	out = append(out, status)
 
@@ -123,14 +189,30 @@ func (m *Model) dreamSidebar(inner int) string {
 	return b.String()
 }
 
+// sidebarKeys renders the pinned key legend as an aligned two-column list. It
+// used to be two prose lines, and "shift+tab mode · ctrl+t tools" is one column
+// wider than the panel — the terminal wrapped it and left "tools" orphaned.
 func (m *Model) sidebarKeys() string {
-	return mutedStyle.Render("tab mode · ctrl+t tools") + "\n" + mutedStyle.Render("/help · enter send")
+	rows := [][2]string{
+		{"shift+tab", "mode"},
+		{"ctrl+t", "tools"},
+		{"enter", "send"},
+		{"/help", "commands"},
+	}
+	var b strings.Builder
+	for i, r := range rows {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(hintStyle.Render(padCell(r[0], 10)) + mutedStyle.Render(r[1]))
+	}
+	return b.String()
 }
 
 // sidebarView renders the always-on right panel to exactly `height` rows.
 func (m *Model) sidebarView(height int) string {
 	w := m.sidebarWidth()
-	if w == 0 || height < 6 {
+	if w == 0 || !m.sidebarFits(height) {
 		return ""
 	}
 	inner := sidebarInner(w)
@@ -138,15 +220,14 @@ func (m *Model) sidebarView(height int) string {
 	if m.showNotes {
 		body += "\n\n" + m.sidebarHeading("Notes") + "\n" + m.notesViewport.View()
 	}
-	keys := m.sidebarKeys()
+	// A rule above the pinned legend makes the empty space between the sections
+	// and the bottom of the panel read as layout instead of a gap.
+	keys := borderStyle.Render(strings.Repeat("─", inner)) + "\n" + m.sidebarKeys()
 
-	// ponytail: the notes viewport is sized in layout(), so a task list that grows
-	// mid-turn can push past the box — MaxHeight clips instead of breaking the
-	// row. Re-layout on todo change if the clipping ever bites.
-	//
-	// Width/Height count the border, so the rows we can fill are height-2.
-	// gap blank lines push the key hints to the bottom of the box.
-	gap := max(1, height-2-lipgloss.Height(body)-lipgloss.Height(keys))
+	// Width/Height count the border, so the rows we can fill are height-2. Fit
+	// the content to that budget ourselves: overflowing it used to leave the box
+	// unclosed at the bottom, because MaxHeight clipped the border row away.
+	rows := fitSidebar(strings.Split(body, "\n"), strings.Split(keys, "\n"), height-2)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -155,7 +236,28 @@ func (m *Model) sidebarView(height int) string {
 		Width(w).
 		Height(height).
 		MaxHeight(height).
-		Render(body + strings.Repeat("\n", gap+1) + keys)
+		Render(strings.Join(rows, "\n"))
+}
+
+// fitSidebar lays body and keys into exactly budget rows: keys pinned to the
+// bottom with blank rows between, body clipped when it doesn't fit, and the
+// keys themselves dropped when even that isn't enough.
+func fitSidebar(body, keys []string, budget int) []string {
+	if budget <= 0 {
+		return nil
+	}
+	if len(body)+1+len(keys) > budget {
+		if budget > len(keys)+1 {
+			body = body[:budget-len(keys)-1]
+		} else {
+			return body[:min(len(body), budget)]
+		}
+	}
+	out := body
+	for len(out)+len(keys) < budget {
+		out = append(out, "")
+	}
+	return append(out, keys...)
 }
 
 // sidebarNotesHeight is the room left for the notes viewport once the fixed

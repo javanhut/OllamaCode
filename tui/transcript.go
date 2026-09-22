@@ -1,22 +1,37 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"slices"
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/tools"
 )
 
 func (m *Model) refreshTranscript() {
+	// Every path that re-renders — stream frames, spinner ticks, tool results —
+	// must keep a bottom-pinned view pinned. A single refresh that grows the
+	// transcript without repinning leaves AtBottom() false, and every later
+	// frame then reads that as "the user scrolled up" and stops following.
+	atBottom := !m.ready || m.viewport.AtBottom()
 	var b strings.Builder
-	if len(m.history) == 0 && !m.streaming && m.lastError == "" && m.welcomeOn() {
-		b.WriteString(m.welcomePanel())
+	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
+		// With the welcome panel off, an empty session rendered as a blank void.
+		if m.welcomeOn() {
+			b.WriteString(m.welcomePanel())
+		} else {
+			b.WriteString(m.emptyState())
+		}
 	} else {
 		// Non-empty history (or welcome suppressed → the loop below is a no-op).
 		// Group consecutive assistant + tool messages into a single Layla
 		// turn so the user sees one block per response, not one per tool call.
 		i := 0
+		userIdx := -1 // the command each turn is answering, for its timing footer
 		var openTurn *assistantTurn
 		flushTurn := func() {
 			if openTurn != nil {
@@ -26,9 +41,18 @@ func (m *Model) refreshTranscript() {
 		}
 		for i < len(m.history) {
 			msg := m.history[i]
-			switch msg.Role {
+			// An advisory is addressed TO the model — it is not the user's turn,
+			// so it renders like the system message it replaced and must not
+			// re-anchor userIdx (that would break turn grouping and the timing
+			// footer).
+			role := msg.Role
+			if !isUserTurn(msg) && role == "user" {
+				role = "advisory"
+			}
+			switch role {
 			case "user":
 				flushTurn()
+				userIdx = i
 				b.WriteString(userStyle.Render("You"))
 				b.WriteString("\n")
 				// Strip escapes/CR/control chars so pasted content can't
@@ -38,11 +62,29 @@ func (m *Model) refreshTranscript() {
 				i++
 			case "assistant", "tool":
 				turn, next := m.collectAssistantTurn(i)
+				turn.userIdx = userIdx
+				// A turn with something after it can never change again, so render
+				// it once and reuse the string. Without this every frame re-ran the
+				// tool grouping and re-colorized every diff in the whole session —
+				// on a 60ms streaming cadence.
+				if next < len(m.history) {
+					b.WriteString(m.cachedTurn(&turn, i, next))
+					i = next
+					continue
+				}
 				openTurn = &turn
 				i = next
 			default:
 				flushTurn()
-				if msg.Content != "" {
+				// A context update is addressed to the model and is the very block
+				// this split exists to stop re-sending — rendering it whole would put
+				// the mode rules back on the user's screen every time they change. A
+				// one-liner rather than nothing: an advisory already breaks
+				// assistant-turn grouping, and a silent break reads as a paint bug.
+				if strings.HasPrefix(msg.Content, contextUpdateMarker) {
+					b.WriteString(mutedStyle.Render("· context updated"))
+					b.WriteString("\n\n")
+				} else if msg.Content != "" {
 					b.WriteString(m.renderMarkdown(msg.Content, true))
 					b.WriteString("\n\n")
 				}
@@ -53,18 +95,21 @@ func (m *Model) refreshTranscript() {
 		switch {
 		case m.streaming:
 			if openTurn == nil {
-				openTurn = &assistantTurn{}
+				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
-			if m.streamBuf.Len() > 0 {
-				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String()})
+			// A reply that opened as transport (JSON, <tool_call>) is withheld
+			// until completion decides what it is: live-painting it spelled the
+			// envelope into the transcript character by character.
+			if m.streamBuf.Len() > 0 && (m.stream == nil || !m.stream.hideContent) {
+				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String(), live: true})
 			}
 		case m.retrieving || m.compacting || m.verifying:
 			// Turn-start gates (RAG retrieval, compaction) and the verify gate
 			// run with m.streaming false; open a turn anyway so the phase
 			// spinner renders instead of the transcript looking frozen.
 			if openTurn == nil {
-				openTurn = &assistantTurn{}
+				openTurn = &assistantTurn{userIdx: userIdx}
 			}
 			openTurn.streaming = true
 		}
@@ -82,6 +127,9 @@ func (m *Model) refreshTranscript() {
 		m.transcript.Reset()
 		m.transcript.WriteString(content)
 		m.viewport.SetContent(content)
+		if atBottom {
+			m.viewport.GotoBottom()
+		}
 	}
 
 	if m.sel.active {
@@ -89,11 +137,53 @@ func (m *Model) refreshTranscript() {
 	}
 }
 
+// turnCacheLimit keeps the cache from growing without bound in a long session.
+// Entries are cheap (one rendered turn each); this just puts a ceiling on it.
+const turnCacheLimit = 256
+
+// cachedTurn renders a sealed turn, reusing the previous render when nothing
+// that affects it has changed. The key is a hash of the turn's own messages, so
+// anything that rewrites history — compaction, /clear, /load, undo — misses
+// naturally instead of needing every mutation site to invalidate by hand.
+func (m *Model) cachedTurn(t *assistantTurn, start, next int) string {
+	stamp := fmt.Sprintf("%d|%t|%t|%t|%s|%s",
+		m.viewport.Width(), m.expandTools, m.cfg.Verbose, m.cfg.Thinking, m.mode, m.activeModelName())
+	if stamp != m.turnCacheStamp || len(m.turnCache) > turnCacheLimit {
+		m.turnCache = make(map[uint64]string)
+		m.turnCacheStamp = stamp
+	}
+
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%d|", t.userIdx)
+	if r, ok := m.turnRecords[t.userIdx]; ok {
+		fmt.Fprintf(h, "%d|%d|%d|%d|", r.total, r.tools, r.calls, len(r.thinking))
+	}
+	for _, msg := range m.history[start:next] {
+		h.Write([]byte(msg.Role))
+		h.Write([]byte(msg.ToolName))
+		h.Write([]byte(msg.Content))
+		for _, c := range msg.ToolCalls {
+			h.Write([]byte(c.Function.Name))
+			h.Write(c.Function.Arguments)
+		}
+	}
+	key := h.Sum64()
+	if out, ok := m.turnCache[key]; ok {
+		return out
+	}
+	var tb strings.Builder
+	m.writeAssistantTurn(&tb, t, false)
+	out := tb.String()
+	m.turnCache[key] = out
+	return out
+}
+
 // turnSegment is one ordered piece of an assistant turn: either a block of
 // assistant text or a single visible tool call, in the order they happened.
 type turnSegment struct {
 	text string         // non-empty => text segment
 	tool *toolCallEntry // non-nil => tool-call segment
+	live bool           // text is the answer still being streamed, not a finished message
 }
 
 // assistantTurn is one rendered Layla block: all assistant content between
@@ -102,6 +192,7 @@ type turnSegment struct {
 type assistantTurn struct {
 	segments  []turnSegment
 	streaming bool
+	userIdx   int // history index of the user message this turn answers; -1 if none
 }
 
 type toolCallEntry struct {
@@ -147,6 +238,14 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 					entry.hasResult = true
 				}
 				t.segments = append(t.segments, turnSegment{tool: &entry})
+				// ask_user's result is the assistant's actual question, not merely
+				// diagnostic tool output. Keep the call collapsible, but always render
+				// the question itself so the user knows what the paused turn awaits.
+				if call.Function.Name == "ask_user" {
+					if question := visibleAskUserQuestion(call); question != "" {
+						t.segments = append(t.segments, turnSegment{text: question})
+					}
+				}
 			}
 		}
 		i++
@@ -154,13 +253,40 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 	return t, i
 }
 
+func visibleAskUserQuestion(call tools.ToolCall) string {
+	var args struct {
+		Question string `json:"question"`
+		Options  string `json:"options"`
+	}
+	if json.Unmarshal(call.Function.Arguments, &args) != nil {
+		return ""
+	}
+	question := strings.TrimSpace(args.Question)
+	if question == "" {
+		return ""
+	}
+	if options := strings.TrimSpace(args.Options); options != "" {
+		question += "\n\nOptions: " + strings.Join(strings.Split(options, "|"), " · ")
+	}
+	return question
+}
+
 // writeAssistantTurn renders a turn as a single Layla block: header, then the
 // turn's segments in chronological order — text where it was produced, tool
 // calls where they fired. Tool calls are collapsed by default, expanded when
 // the user has toggled `ctrl+t`; consecutive calls group into one summary.
 func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool) {
-	b.WriteString(assistantStyle.Copy().Foreground(m.mode.color()).Render(m.activeModelName()))
+	b.WriteString(assistantStyle.Foreground(m.mode.color()).Render(m.activeModelName()))
 	b.WriteString("\n")
+
+	// Keep reasoning isolated above the answer. /show_thinking used to replay it
+	// only after completion, which made the toggle appear broken during the part
+	// of the turn when reasoning was most useful.
+	if t.streaming {
+		b.WriteString(m.liveThinkingBlock(m.viewport.Width()))
+	} else {
+		b.WriteString(m.thinkingBlock(t.userIdx, m.viewport.Width()))
+	}
 
 	hasText := false
 	for _, seg := range t.segments {
@@ -179,13 +305,18 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 			phase = " Compacting context..."
 		case m.verifying:
 			phase = " Verifying..."
+		case m.prefilling():
+			// A long prompt is minutes of silence while the model reads it. Left as
+			// "Thinking...", that reads as a hang; the size and the ticking clock
+			// say the request is alive and roughly how long it has to go.
+			phase = fmt.Sprintf(" Reading %dk tokens of context...%s", m.stream.promptTokens/1000, m.elapsedSuffix())
 		}
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(phase))
 		b.WriteString("\n")
 		// Live reasoning ticker: the last line of the model's thinking stream,
 		// so long reasoning reads as progress instead of a frozen spinner.
-		if line := lastNonEmptyLine(m.thinkTail); line != "" {
+		if line := lastNonEmptyLine(m.thinkTail); line != "" && !m.cfg.Thinking {
 			b.WriteString(mutedStyle.Render("  " + truncatePlain(line, max(m.viewport.Width()-4, 20))))
 			b.WriteString("\n")
 		}
@@ -195,9 +326,11 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	for i := 0; i < len(t.segments); i++ {
 		seg := t.segments[i]
 		if seg.tool == nil {
-			// Partial stream text changes every tick, so skip the render cache
-			// while streaming instead of caching strings that will never recur.
-			b.WriteString(m.renderMarkdown(seg.text, !t.streaming))
+			if seg.live {
+				b.WriteString(m.liveMarkdown(seg.text))
+			} else {
+				b.WriteString(m.renderMarkdown(seg.text, true))
+			}
 			b.WriteString("\n")
 			continue
 		}
@@ -270,14 +403,22 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		b.WriteString(mutedStyle.Render(" verifying…" + m.elapsedSuffix()))
 		b.WriteString("\n")
 	}
+	// What this command cost, once it's done. Live turns already show a ticking
+	// elapsed counter in the phase line above.
+	if !t.streaming {
+		if footer := m.timingFooter(t.userIdx); footer != "" {
+			b.WriteString(footer)
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("\n")
 }
 
 func (m *Model) lastTurnDiffs() string {
 	var diffs []string
-	for i := len(m.history) - 1; i >= 0; i-- {
-		msg := m.history[i]
-		if msg.Role == "user" {
+	for _, msg := range slices.Backward(m.history) {
+
+		if isUserTurn(msg) {
 			break
 		}
 		if msg.Role == "tool" {
@@ -293,9 +434,9 @@ func (m *Model) lastTurnDiffs() string {
 }
 
 func (m *Model) lastUserMessage() string {
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Role == "user" {
-			s := m.history[i].Content
+	for _, v := range slices.Backward(m.history) {
+		if isUserTurn(v) {
+			s := v.Content
 			if len(s) > 48 {
 				s = s[:48] + "…"
 			}
@@ -306,10 +447,79 @@ func (m *Model) lastUserMessage() string {
 }
 
 func lastAssistantMessage(history []api.Message) string {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "assistant" && strings.TrimSpace(history[i].Content) != "" {
-			return history[i].Content
+	for _, h := range slices.Backward(history) {
+		if h.Role == "assistant" && strings.TrimSpace(h.Content) != "" {
+			return h.Content
 		}
 	}
 	return ""
 }
+
+// splitStableMarkdown splits streamed answer text at the last blank line that
+// sits outside a code fence: everything before it is finished blocks that can
+// be rendered as Markdown now, everything after may still change shape as more
+// tokens land.
+func splitStableMarkdown(s string) (stable, tail string) {
+	inFence, cut, pos := false, 0, 0
+	for _, line := range strings.SplitAfter(s, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~"):
+			inFence = !inFence
+		case t == "" && !inFence:
+			cut = pos + len(line)
+		}
+		pos += len(line)
+	}
+	return s[:cut], s[cut:]
+}
+
+// streamMarkdown renders the stable prefix of a streaming answer, memoizing the
+// last result. The prefix only grows at block boundaries, so without this every
+// paint frame would re-run Glamour over the same unchanged string.
+func (m *Model) streamMarkdown(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	// Width is part of the key: a resize mid-stream rebuilds the renderer, and a
+	// memo from the old width would keep the finished blocks wrapped wrong until
+	// the next one lands.
+	if s != m.streamMDSrc || m.viewport.Width() != m.streamMDWidth {
+		m.streamMDSrc, m.streamMDWidth = s, m.viewport.Width()
+		m.streamMD = m.renderMarkdown(s, false)
+	}
+	return m.streamMD
+}
+
+// liveMarkdown renders the answer that is still streaming: the blocks that have
+// closed go through Glamour, the tail that is still arriving stays plain. The
+// tail is laid out in Glamour's own document geometry — blank line above,
+// 2-space margin, and its text width (it gets width-2 and keeps a 2-space
+// margin each side) — so nothing shifts when the block closes and re-renders.
+// The model's trailing blank lines go too: kept, they stack with the newlines
+// around a tool-call group into a multi-line hole mid-turn.
+func (m *Model) liveMarkdown(s string) string {
+	stable, tail := splitStableMarkdown(s)
+	out := m.streamMarkdown(stable)
+	tail = strings.TrimRight(stripControl(tail), "\n")
+	if tail == "" {
+		return out
+	}
+	sep := "\n  "
+	if out != "" {
+		sep = "\n\n  "
+	}
+	wrapped := ansi.Wordwrap(tail, max(m.viewport.Width()-6, 20), "")
+	return out + sep + strings.Join(strings.Split(wrapped, "\n"), "\n  ")
+}
+
+// prefilling reports that the turn is waiting on the first token of a prompt
+// big enough for the wait to be measured in minutes.
+func (m *Model) prefilling() bool {
+	return m.stream != nil && m.stream.promptTokens >= prefillNoticeTokens &&
+		m.streamBuf.Len() == 0 && m.thinkTail == ""
+}
+
+// prefillNoticeTokens is where a prompt gets its own status line: below it the
+// wait is short enough that "Thinking..." is honest.
+const prefillNoticeTokens = 16000

@@ -31,6 +31,11 @@ func appendNotesTool(notes *sessionNotes) tools.Tool {
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
 			}
+			// Reporting success for a call that wrote nothing reads as progress:
+			// a model that lands here repeats it, and every repeat "succeeds".
+			if strings.TrimSpace(a.Content) == "" {
+				return "", fmt.Errorf("content is empty — nothing to append")
+			}
 			notes.appendLine(a.Content)
 			return fmt.Sprintf("appended %d chars to notes", len(a.Content)), nil
 		},

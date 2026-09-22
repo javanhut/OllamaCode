@@ -61,7 +61,8 @@ func inferFaceMood(history []api.Message) faceMood {
 	seen := 0
 	for i := len(history) - 1; i >= 0 && seen < 6; i-- {
 		msg := history[i]
-		if msg.Role != "user" && msg.Role != "assistant" {
+		// A loop-guard advisory is the harness talking, not the user's mood.
+		if !isUserTurn(msg) && msg.Role != "assistant" {
 			continue
 		}
 		text := strings.ToLower(msg.Content)

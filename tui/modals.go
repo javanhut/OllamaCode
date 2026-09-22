@@ -6,9 +6,14 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/jobs"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func (m *Model) overlayModal(base, modal string) string {
@@ -57,6 +62,11 @@ func (m *Model) modalWidth() int {
 	return w
 }
 
+// modalInner is the text width inside a modalStyle box: the box width minus its
+// border (2) and horizontal padding (4). Getting this wrong by even a column
+// wraps every header, so the title and its "esc" hint land on separate lines.
+func (m *Model) modalInner() int { return m.modalWidth() - 6 }
+
 func (m *Model) modalHeader(title, hint string, innerW int) string {
 	t := modalTitleStyle.Render(title)
 	h := modalHintStyle.Render(hint)
@@ -66,50 +76,161 @@ func (m *Model) modalHeader(title, hint string, innerW int) string {
 
 func (m *Model) settingsModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
-	m.urlInput.SetWidth(innerW - 6)
-	m.keyInput.SetWidth(innerW - 6)
-	var b strings.Builder
-	b.WriteString(m.modalHeader("Connection", "esc", innerW))
-	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("URL"))
-	b.WriteString("\n")
-	b.WriteString(m.urlInput.View())
-	b.WriteString("\n\n")
-	b.WriteString(modalMutedStyle.Render("API key"))
-	b.WriteString("\n")
-	b.WriteString(m.keyInput.View())
-	b.WriteString("\n")
-	if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("using OLLAMA_API_KEY from environment", innerW)))
-	} else {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("blank for local · set for ollama.com cloud models", innerW)))
+	innerW := m.modalInner()
+	for _, in := range []*textinput.Model{&m.urlInput, &m.keyInput, &m.nameInput, &m.envInput} {
+		in.SetWidth(innerW - 6)
 	}
+
+	targets := m.settingsTargets()
+	target := m.settingsTargetName()
+	label := "default host"
+	switch {
+	case m.settingsIsNew():
+		label = "+ new provider"
+	case target != "":
+		label = target
+	}
+
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Endpoints", "esc", innerW))
+	b.WriteString("\n\n")
+
+	for _, f := range m.settingsFields() {
+		switch f {
+		case settingsFocusTarget:
+			row := modalMutedStyle.Render("Endpoint  ") +
+				modalBodyStyle.Render("‹ "+truncatePlain(label, max(innerW-22, 8))+" ›") +
+				modalMutedStyle.Render(fmt.Sprintf("  %d/%d", m.settingsTarget+1, len(targets)))
+			if m.settingsFocus == settingsFocusTarget {
+				row = modalMutedStyle.Render("Endpoint  ") +
+					modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-22, 8))+" › ") +
+					modalMutedStyle.Render(fmt.Sprintf("←→  %d/%d", m.settingsTarget+1, len(targets)))
+			}
+			b.WriteString(row + "\n\n")
+		case settingsFocusName:
+			b.WriteString(m.nameInput.View() + "\n")
+		case settingsFocusURL:
+			b.WriteString(m.urlInput.View() + "\n")
+		case settingsFocusKey:
+			b.WriteString(m.keyInput.View() + "\n")
+		case settingsFocusEnv:
+			b.WriteString(m.envInput.View() + "\n")
+		case settingsFocusNative:
+			wire := providerKindLabel(m.settingsKind)
+			row := modalMutedStyle.Render("Wire  ") + modalBodyStyle.Render("‹ "+wire+" ›")
+			if m.settingsFocus == settingsFocusNative {
+				row = modalMutedStyle.Render("Wire  ") + modalAccentStyle.Render("‹ "+wire+" › ") +
+					modalMutedStyle.Render("space")
+			}
+			b.WriteString(row + "\n")
+
+		case settingsFocusTrust:
+			state := "off — headless runs abort on Cursor's trust prompt"
+			if m.settingsTrust {
+				state = "on — passes --trust"
+			}
+			row := modalMutedStyle.Render("Trust ") + modalBodyStyle.Render("‹ "+state+" ›")
+			if m.settingsFocus == settingsFocusTrust {
+				row = modalMutedStyle.Render("Trust ") + modalAccentStyle.Render("‹ "+state+" › ") +
+					modalMutedStyle.Render("space")
+			}
+			b.WriteString(row + "\n")
+		}
+	}
+
+	b.WriteString(modalMutedStyle.Render(truncatePlain(m.settingsFieldHint(target), innerW)))
 	b.WriteString("\n\n")
 	if m.statusMsg != "" {
+		style := modalMutedStyle
 		if m.statusErr {
-			b.WriteString(modalErrorStyle.Render(truncatePlain(m.statusMsg, innerW)))
-		} else {
-			b.WriteString(modalMutedStyle.Render(truncatePlain(m.statusMsg, innerW)))
+			style = modalErrorStyle
 		}
+		b.WriteString(style.Render(truncatePlain(m.statusMsg, innerW)))
 		b.WriteString("\n\n")
 	}
-	hint := modalMutedStyle.Render("tab ") + modalBodyStyle.Render("switch") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("connect") +
-		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("cancel")
+
+	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("field") +
+		modalMutedStyle.Render("   ←→ ") + modalBodyStyle.Render("change") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("save & test")
+	if target != "" {
+		hint += modalMutedStyle.Render("   ctrl+d ") + modalBodyStyle.Render("delete")
+	}
 	b.WriteString(hint)
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// settingsFieldHint explains the fields for the selected wire format. A cursor
+// provider has no URL and needs no key when the CLI is already signed in, so the
+// generic key advice would be actively misleading there.
+func (m *Model) settingsFieldHint(target string) string {
+	if m.settingsKind == api.ProviderCursor {
+		if !m.settingsTrust {
+			return "Trust off: runs here will fail until you accept Cursor's trust prompt yourself"
+		}
+		if strings.TrimSpace(os.Getenv("CURSOR_API_KEY")) != "" {
+			return "URL is the agent binary path (blank = find it on PATH) · CURSOR_API_KEY is set"
+		}
+		return "URL is the agent binary path (blank = find it on PATH) · key optional if you already logged in"
+	}
+	return m.settingsKeyHint(target)
+}
+
+// settingsKeyHint explains what the key field actually controls for the selected
+// endpoint. An environment variable silently outranks the stored key, so a user
+// typing into a field that is being overridden has to be told.
+func (m *Model) settingsKeyHint(target string) string {
+	if target == "" {
+		if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
+			return "OLLAMA_API_KEY is set — it overrides this field"
+		}
+		return "blank for local · set for ollama.com cloud models"
+	}
+	p := m.cfg.Providers[target]
+	switch {
+	case p.APIKeyEnv == "":
+		return "key is stored in config.json — naming an env var above keeps it out"
+	case strings.TrimSpace(os.Getenv(p.APIKeyEnv)) != "":
+		return "$" + p.APIKeyEnv + " is set — it overrides this field"
+	default:
+		return "$" + p.APIKeyEnv + " is unset — this field is the fallback"
+	}
+}
+
 func (m *Model) pickerModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	var b strings.Builder
-	b.WriteString(m.modalHeader("Select model", "esc", innerW))
+	title := "Select model"
+	if m.pickerPurpose == "cursor_pair" {
+		title = "Pair Cursor planning model"
+	}
+	b.WriteString(m.modalHeader(title, "esc", innerW))
 	b.WriteString("\n\n")
 
-	host := strings.TrimPrefix(strings.TrimPrefix(m.cfg.Host, "http://"), "https://")
-	b.WriteString(modalMutedStyle.Render(truncatePlain(fmt.Sprintf("on %s", host), innerW)))
+	// The endpoint row only earns its space once there is somewhere else to go.
+	targets := m.pickerTargets()
+	if m.pickerPurpose == "" && len(targets) > 1 {
+		label := "default host"
+		if m.modelsFrom != "" {
+			label = m.modelsFrom
+		}
+		b.WriteString(modalMutedStyle.Render("Endpoint  ") +
+			modalAccentStyle.Render("‹ "+truncatePlain(label, max(innerW-24, 8))+" › ") +
+			modalMutedStyle.Render(fmt.Sprintf("←→  %d/%d", m.pickerTarget+1, len(targets))))
+		b.WriteString("\n")
+	}
+
+	endpoint, _ := m.pickerHost()
+	host := strings.TrimPrefix(strings.TrimPrefix(endpoint.URL(), "http://"), "https://")
+	if m.pickerPurpose == "cursor_pair" {
+		host = fmt.Sprintf("%s for explore/write + %s for plan", m.pairLocalModel, m.pairCursor)
+	} else {
+		if host == "" {
+			host = "the cursor agent on PATH"
+		}
+		host = "on " + host
+	}
+	b.WriteString(modalMutedStyle.Render(truncatePlain(host, innerW)))
 	b.WriteString("\n\n")
 
 	// Pull-in-progress view takes over the modal body.
@@ -129,6 +250,17 @@ func (m *Model) pickerModal() string {
 		return modalStyle.Width(w).Render(b.String())
 	}
 
+	// Browsing to an endpoint that is down must say so — otherwise the list just
+	// comes back empty with no reason given.
+	if m.statusMsg != "" {
+		style := modalMutedStyle
+		if m.statusErr {
+			style = modalErrorStyle
+		}
+		b.WriteString(style.Render(truncatePlain(m.statusMsg, innerW)))
+		b.WriteString("\n\n")
+	}
+
 	if m.pullErr != "" {
 		b.WriteString(modalErrorStyle.Render(truncatePlain("pull failed: "+m.pullErr, innerW)))
 		b.WriteString("\n")
@@ -140,7 +272,11 @@ func (m *Model) pickerModal() string {
 	}
 
 	if len(m.models) == 0 {
-		b.WriteString(modalMutedStyle.Render(truncatePlain("no models installed — press p to pull one", innerW)))
+		empty := "no models installed — press p to pull one"
+		if m.modelsFrom != "" {
+			empty = "no models listed by " + m.modelsFrom
+		}
+		b.WriteString(modalMutedStyle.Render(truncatePlain(empty, innerW)))
 		b.WriteString("\n")
 	} else {
 		b.WriteString(modalAccentStyle.Render("Available"))
@@ -148,8 +284,14 @@ func (m *Model) pickerModal() string {
 		view := pickerWindow(len(m.models), m.picker, 8)
 		for i := view.start; i < view.end; i++ {
 			name := m.models[i]
+			// The stored default is a route spec, so a provider's models only
+			// match once the prefix is put back on.
+			spec := name
+			if m.modelsFrom != "" {
+				spec = m.modelsFrom + ":" + name
+			}
 			marker := "  "
-			if name == m.cfg.Model {
+			if spec == m.cfg.Model {
 				marker = modalAccentStyle.Render(" •")
 			}
 			row := truncatePlain(name, innerW-4)
@@ -188,11 +330,114 @@ func (m *Model) pickerModal() string {
 	}
 
 	b.WriteString("\n")
+	enterAction := "chat"
+	if m.pickerPurpose == "cursor_pair" {
+		enterAction = "save pair"
+	}
 	hint := modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
-		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render("chat") +
-		modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull") +
+		modalMutedStyle.Render("   enter ") + modalBodyStyle.Render(enterAction) +
 		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh")
+	if m.pickerPurpose != "cursor_pair" && m.modelsFrom == "" {
+		if cursor := m.cursorPlanProvider(); cursor != "" {
+			hint += modalMutedStyle.Render("   c ") + modalBodyStyle.Render("pair Cursor plan")
+		}
+		hint += modalMutedStyle.Render("   p ") + modalBodyStyle.Render("pull")
+	}
 	b.WriteString(hint)
+	return modalStyle.Width(w).Render(b.String())
+}
+
+// jobRow is one row in the /jobs modal: a background shell job
+// (run_shell background=true) or a background sub-agent job.
+// jobRegistry is the job source for the /jobs modal. It is a variable so tests
+// can point the modal at a fresh registry: the process registry is global and
+// keeps finished jobs forever, so one test starting a background shell would
+// otherwise show up in every later test's rows.
+var jobRegistry = jobs.Default
+
+type jobRow struct {
+	shell  bool // true = shell job; false = sub-agent job
+	id     int
+	done   bool
+	status string // "running (…)" / "exited N" / "done (…)"
+	text   string // command line or task summary
+}
+
+// jobRows snapshots both job registries. Both keep finished jobs on purpose,
+// so the modal doubles as a "what ran" list, not just a kill switch.
+func (m *Model) jobRows() []jobRow {
+	var rows []jobRow
+	// Shell jobs live in the unified registry (internal/jobs); their label is
+	// already the one-line form of the command, so a heredoc or multi-line
+	// script cannot wreck the list layout.
+	for _, j := range jobRegistry().List() {
+		if j.Kind() != jobs.KindShell {
+			continue
+		}
+		rows = append(rows, jobRow{
+			shell:  true,
+			id:     j.ID(),
+			done:   j.State() != jobs.StatusRunning,
+			status: j.StatusLine(),
+			text:   j.Label(),
+		})
+	}
+	if m.subagents != nil {
+		for _, j := range m.subagents.all() {
+			done, _, _ := j.snapshot()
+			tasks := "1 task"
+			if len(j.tasks) != 1 {
+				tasks = fmt.Sprintf("%d tasks", len(j.tasks))
+			}
+			rows = append(rows, jobRow{id: j.id, done: done, status: j.statusLine(), text: tasks + ": " + strings.Join(j.tasks, " | ")})
+		}
+	}
+	return rows
+}
+
+// jobsModal lists background shell and sub-agent jobs, mirroring the model
+// picker's scrollable-list chrome.
+func (m *Model) jobsModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Background jobs", "esc", innerW))
+	b.WriteString("\n\n")
+
+	rows := m.jobRows()
+	if len(rows) == 0 {
+		b.WriteString(modalMutedStyle.Render(truncatePlain("no background jobs — run_shell background jobs and sub-agents show up here", innerW)))
+		b.WriteString("\n")
+	} else {
+		if m.jobsCursor >= len(rows) {
+			m.jobsCursor = len(rows) - 1
+		}
+		view := pickerWindow(len(rows), m.jobsCursor, 8)
+		for i := view.start; i < view.end; i++ {
+			r := rows[i]
+			kind := "agent"
+			if r.shell {
+				kind = "shell"
+			}
+			row := truncatePlain(fmt.Sprintf("#%-3d %-5s %-24s %s", r.id, kind, r.status, r.text), innerW-4)
+			if i == m.jobsCursor {
+				b.WriteString("  " + modalSelectStyle.Render(padCell(" "+row+" ", innerW-2)))
+			} else {
+				b.WriteString("   " + modalBodyStyle.Render(padCell(row, innerW-3)))
+			}
+			b.WriteString("\n")
+		}
+		if view.start > 0 || view.end < len(rows) {
+			b.WriteString(modalMutedStyle.Render(fmt.Sprintf("   %d / %d", m.jobsCursor+1, len(rows))))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("↑↓ ") + modalBodyStyle.Render("select") +
+		modalMutedStyle.Render("   x/d ") + modalBodyStyle.Render("kill") +
+		modalMutedStyle.Render("   r ") + modalBodyStyle.Render("refresh") +
+		modalMutedStyle.Render("   esc ") + modalBodyStyle.Render("close"))
 	return modalStyle.Width(w).Render(b.String())
 }
 
@@ -251,29 +496,37 @@ func renderProgressBar(completed, total int64, width int) string {
 
 func (m *Model) helpModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
-	rows := []struct{ key, desc string }{
+	innerW := m.modalInner()
+	header := m.modalHeader("Help", "esc", innerW)
+	scroll := ""
+	if !(m.helpViewport.AtTop() && m.helpViewport.AtBottom()) {
+		scroll = fmt.Sprintf(" · %d%%", int(m.helpViewport.ScrollPercent()*100))
+	}
+	hint := modalMutedStyle.Render("↑/↓ · pgup/pgdn scroll · esc close" + scroll)
+	return modalStyle.Width(w).Render(header + "\n" + hint + "\n\n" + m.helpViewport.View())
+}
+
+// helpContent renders the help rows into the given width. Kept separate from
+// helpModal so the /help entry point can load it into the scroll viewport.
+type helpRow struct{ key, desc string }
+
+func (m *Model) helpContent(innerW int) string {
+	rows := []helpRow{
 		{"", "Modes"},
 		{"explore", "read-only — model can only inspect"},
 		{"plan", "read + update session notes"},
 		{"write", "all tools; writes need your approval"},
 		{"auto", "autonomous — unlimited changes in workspace"},
-		{"tab", "cycle modes"},
+		{"shift+tab", "cycle modes"},
 		{"", ""},
 		{"", "Slash commands"},
-		{"/help", "show this screen"},
-		{"/settings", "change Ollama URL"},
-		{"/model", "pick a model"},
-		{"/notes", "view session notes"},
-		{"/clear", "reset the conversation"},
-		{"/copy", "copy last response to system clipboard"},
-		{"/companion", "toggle GUI popup (speech in <-> input, replies -> TTS)"},
-		{"/save", "save current conversation to named session"},
-		{"/load", "load a saved session"},
-		{"/sessions", "list saved sessions"},
-		{"/auto", "switch to autonomous mode"},
-		{"/mode", "switch mode (explore, plan, write, auto)"},
-		{"/quit", "exit"},
+	}
+	// Generated from the completion menu's list so the two can't drift — the help
+	// screen used to hardcode half of them.
+	for _, c := range slashCommands {
+		rows = append(rows, helpRow{c.name, c.desc})
+	}
+	rows = append(rows, []helpRow{
 		{"", ""},
 		{"", "Keys"},
 		{"enter", "send message"},
@@ -282,6 +535,8 @@ func (m *Model) helpModal() string {
 		{"ctrl+↑/↓", "scroll one line (alt)"},
 		{"pgup/pgdn", "page up/down"},
 		{"ctrl+u/d", "half page up/down"},
+		{"ctrl+g", "jump to the newest output"},
+		{"ctrl+f", "find in the transcript (n/N to step)"},
 		{"ctrl+c", "quit"},
 		{"ctrl+t", "expand/collapse tool calls in transcript"},
 		{"ctrl+s/esc", "stop a streaming response"},
@@ -295,11 +550,9 @@ func (m *Model) helpModal() string {
 		{"click+drag", "select lines (auto-scrolls at edges)"},
 		{"release", "copy selection to clipboard"},
 		{"wheel", "scroll viewport"},
-	}
+	}...)
 
 	var b strings.Builder
-	b.WriteString(m.modalHeader("Help", "esc", innerW))
-	b.WriteString("\n\n")
 	keyW := 14
 	for _, r := range rows {
 		if r.key == "" && r.desc == "" {
@@ -316,15 +569,12 @@ func (m *Model) helpModal() string {
 		b.WriteString(modalBodyStyle.Render(truncatePlain(r.desc, innerW-keyW)))
 		b.WriteString("\n")
 	}
-	hint := modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close")
-	b.WriteString("\n")
-	b.WriteString(hint)
-	return modalStyle.Width(w).Render(b.String())
+	return b.String()
 }
 
 func (m *Model) notesModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 	var b strings.Builder
 	b.WriteString(m.modalHeader("Session notes", "esc", innerW))
 	b.WriteString("\n\n")
@@ -344,6 +594,55 @@ func (m *Model) notesModal() string {
 	return modalStyle.Width(w).Render(b.String())
 }
 
+// statsModal reports what the session has cost so far, built from the per-turn
+// records the transcript footers already use.
+func (m *Model) statsModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	var b strings.Builder
+	b.WriteString(m.modalHeader("Session stats", "esc", innerW))
+	b.WriteString("\n\n")
+
+	row := func(k, v string) {
+		b.WriteString(modalMutedStyle.Render(padCell(k, 16)) + modalBodyStyle.Render(v))
+		b.WriteString("\n")
+	}
+
+	var total, tools, slowest time.Duration
+	var calls, turns int
+	for _, r := range m.turnRecords {
+		turns++
+		total += r.total
+		tools += r.tools
+		calls += r.calls
+		slowest = max(slowest, r.total)
+	}
+	if turns == 0 {
+		b.WriteString(modalMutedStyle.Render("No completed turns yet."))
+		b.WriteString("\n\n")
+		b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
+		return modalStyle.Width(w).Render(b.String())
+	}
+
+	row("turns", fmt.Sprintf("%d", turns))
+	row("total time", shortDuration(total))
+	row("thinking", shortDuration(total-tools))
+	row("tools", fmt.Sprintf("%s · %d call%s", shortDuration(tools), calls, plural(calls)))
+	row("slowest turn", shortDuration(slowest))
+	row("average turn", shortDuration(total/time.Duration(turns)))
+	b.WriteString("\n")
+	if m.contextLimit > 0 {
+		m.ensureMeasuredRatio()
+		row("context", fmt.Sprintf("%dk / %dk tokens", m.displayTokens()/1000, m.contextLimit/1000))
+	}
+	row("model", m.modelName)
+	row("mode", strings.ToUpper(m.mode.String()))
+
+	b.WriteString("\n")
+	b.WriteString(modalMutedStyle.Render("esc ") + modalBodyStyle.Render("close"))
+	return modalStyle.Width(w).Render(b.String())
+}
+
 // diffModal renders the full-screen, scrollable diff viewer (/diff). It uses a
 // bordered box with no filled background so the diff colors from colorizeDiff
 // read the same as they do in the transcript.
@@ -354,7 +653,7 @@ func (m *Model) diffModal() string {
 		BorderForeground(c).
 		Padding(0, 1).
 		Width(m.modalWidth())
-	title := headingStyle.Copy().Foreground(c).Render("Diff — last turn")
+	title := headingStyle.Foreground(c).Render("Diff — last turn")
 	hint := mutedStyle.Render("  ↑/↓ scroll · esc close")
 	return style.Render(title + hint + "\n\n" + m.diffViewport.View())
 }
@@ -373,14 +672,128 @@ func styleDiffLine(line string, w int) string {
 	}
 }
 
+// routeConfirmModal offers the plan-mode model for a request that scored as
+// planning work. Declining is the default: it costs nothing and stays local.
+func (m *Model) routeConfirmModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+	target := m.modelForMode(PlanMode)
+
+	var lines []string
+	lines = append(lines,
+		m.modalHeader("This looks like planning work", "n=stay local", innerW),
+		"",
+		modalBodyStyle.Render("Run it in plan mode on")+" "+modalAccentStyle.Render(target)+modalBodyStyle.Render("?"),
+		modalMutedStyle.Render("staying local keeps "+m.modelName+" in "+m.mode.String()+" mode"),
+	)
+	if len(m.routeReasons) > 0 {
+		lines = append(lines, "",
+			modalMutedStyle.Render("matched: "+truncatePlain(strings.Join(m.routeReasons, ", "), innerW-9)))
+	}
+	lines = append(lines, "",
+		modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("switch to plan   ")+
+			modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("stay local"))
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
+}
+
+// questionModal renders an ask_user call as a pick-one list. The options are
+// the model's own labels, so whichever one is chosen comes back as text it
+// already knows how to read — which is the whole point of the picker over a
+// free-text reply it has to parse. A recommended option is marked, and a
+// multi-select question gets checkboxes (space toggles, enter confirms).
+func (m *Model) questionModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+
+	lines := []string{m.modalHeader("The model is asking", "esc=type instead", innerW), ""}
+	for line := range strings.SplitSeq(ansi.Wrap(m.question.Question, innerW, ""), "\n") {
+		lines = append(lines, modalBodyStyle.Render(line))
+	}
+	lines = append(lines, "")
+	for i, opt := range m.question.Options {
+		prefix, suffix := "", ""
+		if m.question.MultiSelect {
+			prefix = "[ ] "
+			if m.questionChecked[i] {
+				prefix = "[x] "
+			}
+		}
+		if m.question.Recommended != "" && opt == m.question.Recommended {
+			suffix = " (recommended)"
+		}
+		label := prefix + fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4-len(prefix)-len(suffix))) + suffix
+		if i == m.questionCursor {
+			lines = append(lines, modalSelectStyle.Render(" "+label+" "))
+			continue
+		}
+		lines = append(lines, modalBodyStyle.Render("  "+label))
+	}
+	custom := fmt.Sprintf("%d. Type a different answer…", len(m.question.Options)+1)
+	if m.questionCursor == len(m.question.Options) {
+		lines = append(lines, modalSelectStyle.Render(" "+custom+" "))
+	} else {
+		lines = append(lines, modalBodyStyle.Render("  "+custom))
+	}
+	if m.question.MultiSelect {
+		lines = append(lines, "",
+			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+				modalMutedStyle.Render("space ")+modalBodyStyle.Render("toggle   ")+
+				modalMutedStyle.Render("enter ")+modalBodyStyle.Render("confirm   ")+
+				modalMutedStyle.Render("type/esc ")+modalBodyStyle.Render("own answer"))
+	} else {
+		lines = append(lines, "",
+			modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+				modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
+				modalMutedStyle.Render("type/esc ")+modalBodyStyle.Render("own answer"))
+	}
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
+}
+
+// loopGuardModal asks the human to call a detected doom loop: end the turn,
+// let the agent keep going, or take the looping tool away. The turn is parked
+// behind it — no stream runs until a choice lands.
+func (m *Model) loopGuardModal() string {
+	w := m.modalWidth()
+	innerW := m.modalInner()
+
+	lines := []string{m.modalHeader("Agent appears stuck", "esc=stop turn", innerW), ""}
+	reason := ""
+	options := []string{"Stop turn", "Continue anyway"}
+	if m.loopEscalation != nil {
+		reason = m.loopEscalation.reason()
+		options = loopEscalationOptions(m.loopEscalation)
+	}
+	for line := range strings.SplitSeq(ansi.Wrap(reason, innerW, ""), "\n") {
+		lines = append(lines, modalBodyStyle.Render(line))
+	}
+	lines = append(lines, "")
+	for i, opt := range options {
+		label := fmt.Sprintf("%d. %s", i+1, truncatePlain(opt, innerW-4))
+		if i == m.loopGuardCursor {
+			lines = append(lines, modalSelectStyle.Render(" "+label+" "))
+			continue
+		}
+		lines = append(lines, modalBodyStyle.Render("  "+label))
+	}
+	lines = append(lines, "",
+		modalMutedStyle.Render("↑/↓ ")+modalBodyStyle.Render("move   ")+
+			modalMutedStyle.Render("1-9 ")+modalBodyStyle.Render("pick   ")+
+			modalMutedStyle.Render("enter ")+modalBodyStyle.Render("choose   ")+
+			modalMutedStyle.Render("esc ")+modalBodyStyle.Render("stop turn"))
+
+	return modalStyle.Width(w).Render(strings.Join(lines, "\n"))
+}
+
 func (m *Model) permissionModal() string {
 	w := m.modalWidth()
-	innerW := w - 4
+	innerW := m.modalInner()
 
-	// We want the total lines of the modal content to fit within m.height - 4 (to account for borders & padding)
-	maxLines := max(m.height-4,
-		// absolute minimum safety boundary
-		8)
+	// Content must fit within m.height-4 (border 2 + vertical padding 2). This
+	// used to floor at 8 lines, which on a short terminal deliberately overflowed
+	// the screen — on the one modal you have to read before approving anything.
+	maxLines := max(m.height-4, 1)
 
 	var headerSection []string
 	headerSection = append(headerSection, m.modalHeader("Tool wants to run", "n=deny", innerW))
@@ -400,6 +813,13 @@ func (m *Model) permissionModal() string {
 	footerSection = append(footerSection, modalMutedStyle.Render("y/enter ")+modalBodyStyle.Render("allow once   ")+
 		modalMutedStyle.Render("a ")+modalBodyStyle.Render("allow all in this turn   ")+
 		modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
+	// Name the exact rule shift+A would write. "Always allow" is a permanent
+	// widening of the safety boundary, so it should never be a mystery key.
+	footerSection = append(footerSection, modalMutedStyle.Render("s ")+
+		modalBodyStyle.Render("allow for this session ")+
+		modalAccentStyle.Render(tools.PermissionRuleFor(call).String())+
+		modalMutedStyle.Render("   A ")+
+		modalBodyStyle.Render("always (saves it to config)"))
 
 	// How many lines are left for arguments and preview?
 	usedLines := len(headerSection) + len(footerSection) + 2

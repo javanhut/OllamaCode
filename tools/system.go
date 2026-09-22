@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func RunShellTool() Tool {
@@ -15,7 +15,7 @@ func RunShellTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "run_shell",
-			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
+			Description: "Run a shell command via `sh -c`. Do NOT use it to search or read files: use grep, find_files, read_file and list_directory instead, which respect .gitignore and cap their output. Use it for builds, tests, and anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -30,11 +30,10 @@ func RunShellTool() Tool {
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var a struct {
-				Command    string  `json:"command"`
-				WorkingDir string  `json:"working_dir"`
-				TimeoutSec float64 `json:"timeout_sec"`
-				Stdin      string  `json:"stdin"`
-				Background bool    `json:"background"`
+				Command    string `json:"command"`
+				WorkingDir string `json:"working_dir"`
+				Stdin      string `json:"stdin"`
+				Background bool   `json:"background"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -42,24 +41,76 @@ func RunShellTool() Tool {
 			if strings.TrimSpace(a.Command) == "" {
 				return "", fmt.Errorf("command is required")
 			}
+			// The command string itself is not confinable, but the directory it
+			// starts in is — don't let working_dir teleport the shell elsewhere.
+			if a.WorkingDir != "" {
+				if err := jailCheck(a.WorkingDir); err != nil {
+					return "", err
+				}
+			}
 			if a.Background {
 				job, err := startBackgroundShell(a.Command, a.WorkingDir, a.Stdin)
 				if err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
-					job.id, job.pid, shortCommand(a.Command), job.id, job.id), nil
+				return withSandboxNotice(fmt.Sprintf("started background job %d (pid %d): %s\nRead its output with shell_output({\"job\": %d}); stop it with shell_output({\"job\": %d, \"kill\": true}).",
+					job.id, job.pid, shortCommand(a.Command), job.id, job.id)), nil
 			}
-			timeout := 30 * time.Second
-			if a.TimeoutSec > 0 {
-				timeout = time.Duration(a.TimeoutSec * float64(time.Second))
-			}
-			if timeout > 300*time.Second {
-				timeout = 300 * time.Second
-			}
-			return runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, timeout)
+			// One copy of the default/cap arithmetic, shared with the deadline
+			// every caller arms on the outside (tools.ToolCallTimeout).
+			res, err := runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, shellCallTimeout(args))
+			return withSandboxNotice(res), err
 		},
 	}
+}
+
+// AskUserQuestion is a parsed ask_user call. The TUI renders the options as a
+// selectable list and the handler renders them into the model-facing text, so
+// both read the arguments through ParseAskUser rather than each doing their own
+// decoding — a picker offering different options than the model believes it
+// asked about is worse than no picker.
+type AskUserQuestion struct {
+	Question    string
+	Options     []string
+	MultiSelect bool
+	Recommended string
+}
+
+// ParseAskUser decodes an ask_user call's arguments. `options` is an array, but
+// a pipe-separated string is accepted too: that was the old schema, and a small
+// model handed an array schema will still sometimes send the string. Salvaging
+// it here costs four lines and saves a wasted turn. The salvaged form stays
+// single-select — it has no way to carry multi_select or recommended.
+func ParseAskUser(args json.RawMessage) AskUserQuestion {
+	var a struct {
+		Question    string          `json:"question"`
+		Options     json.RawMessage `json:"options"`
+		MultiSelect bool            `json:"multi_select"`
+		Recommended string          `json:"recommended"`
+	}
+	_ = json.Unmarshal(args, &a)
+	out := AskUserQuestion{Question: strings.TrimSpace(a.Question), MultiSelect: a.MultiSelect}
+
+	var list []string
+	if err := json.Unmarshal(a.Options, &list); err != nil {
+		var joined string
+		if err := json.Unmarshal(a.Options, &joined); err == nil {
+			list = strings.Split(joined, "|")
+		}
+	}
+	for _, opt := range list {
+		if opt = strings.TrimSpace(opt); opt != "" {
+			out.Options = append(out.Options, opt)
+		}
+	}
+	// A recommended label that names no option would mark a row that does not
+	// exist; drop it rather than render a phantom recommendation.
+	if rec := strings.TrimSpace(a.Recommended); rec != "" {
+		if slices.Contains(out.Options, rec) {
+			out.Recommended = rec
+		}
+	}
+	return out
 }
 
 func AskUserTool() Tool {
@@ -67,25 +118,27 @@ func AskUserTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "ask_user",
-			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Include clear options in the question to make it easy for the user to answer. After calling this, STOP and wait — the user's next message will contain their answer.",
+			Description: "Ask the user a question when you need clarification before proceeding. Use this for: confirming destructive operations, choosing between multiple approaches, getting missing context, or when you're stuck. Supply options whenever the answer is a choice — they are shown as quick suggestions, but the user can always type a different answer. Either response is delivered as this tool's result (ANSWER: <text>); treat free-form detail as authoritative instead of forcing it back into an option. Set multi_select=true when several suggested options may apply at once. Set recommended to the option you would pick — it is listed first and marked. After calling this, STOP and wait — the answer arrives as the tool result.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
 					"question": {Type: "string", Description: "The question to ask the user. Be specific and include context so they can give a quick answer."},
-					"options":  {Type: "string", Description: "Optional: list of suggested answers separated by '|' (e.g. 'yes|no|show me an example')."},
+					"options": {
+						Type:        "array",
+						Description: "Suggested answers, e.g. [\"yes\", \"no\", \"show me an example\"]. Keep each one short and distinct — the user picks one by number. Omit for an open question.",
+						Items:       &Property{Type: "string"},
+					},
+					"multi_select": {Type: "boolean", Description: "Let the user pick several options instead of exactly one. Default false. The tool result joins the chosen labels with \", \"."},
+					"recommended":  {Type: "string", Description: "The option you recommend, copied exactly from options. Shown first and marked as recommended. Ignored if it does not match one of options."},
 				},
 				Required: []string{"question"},
 			},
 		},
 		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
-			var a struct {
-				Question string `json:"question"`
-				Options  string `json:"options"`
-			}
-			json.Unmarshal(args, &a)
+			a := ParseAskUser(args)
 			msg := "QUESTION: " + a.Question
-			if a.Options != "" {
-				msg += "\nOptions: [" + a.Options + "]"
+			if len(a.Options) > 0 {
+				msg += "\nOptions: [" + strings.Join(a.Options, " | ") + "]"
 			}
 			msg += "\n\n(Stop here and wait for the user to answer before continuing.)"
 			return msg, nil

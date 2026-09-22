@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Tool is an Ollama/OpenAI-compatible function definition paired with a local
 // handler. The Type/Function fields are what the model sees; Handler runs the
 // call locally when the model emits a matching tool_call.
 type Tool struct {
-	Type     string   `json:"type"`
-	Function Function `json:"function"`
-	Handler  Handler  `json:"-"`
+	Type     string     `json:"type"`
+	Function Function   `json:"function"`
+	Handler  Handler    `json:"-"`
+	Policy   ToolPolicy `json:"-"`
 }
 
 type Function struct {
@@ -24,18 +26,20 @@ type Function struct {
 }
 
 type Schema struct {
-	Type       string              `json:"type"`
-	Properties map[string]Property `json:"properties"`
-	Required   []string            `json:"required,omitempty"`
+	Type                 string              `json:"type"`
+	Properties           map[string]Property `json:"properties"`
+	Required             []string            `json:"required,omitempty"`
+	AdditionalProperties *bool               `json:"additionalProperties,omitempty"`
 }
 
 type Property struct {
-	Type        string              `json:"type"`
-	Description string              `json:"description,omitempty"`
-	Enum        []string            `json:"enum,omitempty"`
-	Items       *Property           `json:"items,omitempty"`      // element schema for type "array"
-	Properties  map[string]Property `json:"properties,omitempty"` // field schemas for type "object"
-	Required    []string            `json:"required,omitempty"`   // required fields for type "object"
+	Type                 string              `json:"type"`
+	Description          string              `json:"description,omitempty"`
+	Enum                 []string            `json:"enum,omitempty"`
+	Items                *Property           `json:"items,omitempty"`      // element schema for type "array"
+	Properties           map[string]Property `json:"properties,omitempty"` // field schemas for type "object"
+	Required             []string            `json:"required,omitempty"`   // required fields for type "object"
+	AdditionalProperties *bool               `json:"additionalProperties,omitempty"`
 }
 
 // Handler executes a tool call. args is the raw JSON object the model sent;
@@ -60,6 +64,7 @@ type ToolCallFunction struct {
 
 // Registry holds the tools available for a session.
 type Registry struct {
+	mu            sync.RWMutex
 	tools         map[string]Tool
 	onFileChanged func([]string)
 }
@@ -71,11 +76,15 @@ func NewRegistry() *Registry {
 // SetFileChangeHook registers a callback invoked with the affected path(s) after
 // a file-mutating tool succeeds. Used to keep the semantic index fresh. The
 // callback may run on a tool goroutine, so it must be concurrency-safe.
-func (r *Registry) SetFileChangeHook(fn func([]string)) { r.onFileChanged = fn }
+func (r *Registry) SetFileChangeHook(fn func([]string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onFileChanged = fn
+}
 
 // fileMutators are the tools whose success should invalidate the semantic index.
 var fileMutators = map[string]bool{
-	"write_file": true, "edit_file": true, "append_file": true,
+	"write_file": true, "edit_file": true, "multi_edit": true, "append_file": true,
 	"delete_file": true, "move_file": true, "copy_file": true, "touch": true,
 }
 
@@ -104,15 +113,80 @@ func mutatedPaths(name string, raw json.RawMessage) []string {
 }
 
 func (r *Registry) Register(t Tool) {
+	t = prepareTool(t)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Function.Name] = t
+}
+
+func prepareTool(t Tool) Tool {
 	if t.Type == "" {
 		t.Type = "function"
 	}
-	r.tools[t.Function.Name] = t
+	if t.Policy.Modes == 0 {
+		t.Policy = PolicyForName(t.Function.Name)
+	}
+	t.Function.Parameters = tightenSchema(t.Function.Parameters)
+	return t
+}
+
+// ReplacePrefix atomically replaces a dynamic namespace. It is used for MCP
+// tools/list_changed notifications so readers observe either the old complete
+// set or the new complete set, never a partially updated registry.
+func (r *Registry) ReplacePrefix(prefix string, definitions []Tool) error {
+	prepared := make([]Tool, len(definitions))
+	for i, definition := range definitions {
+		prepared[i] = prepareTool(definition)
+		if !strings.HasPrefix(prepared[i].Function.Name, prefix) {
+			return fmt.Errorf("tool %q is outside namespace %q", prepared[i].Function.Name, prefix)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name := range r.tools {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.tools, name)
+		}
+	}
+	for _, definition := range prepared {
+		r.tools[definition.Function.Name] = definition
+	}
+	return nil
+}
+
+func tightenSchema(schema Schema) Schema {
+	if schema.AdditionalProperties == nil {
+		allow := false
+		schema.AdditionalProperties = &allow
+	}
+	for name, prop := range schema.Properties {
+		schema.Properties[name] = tightenProperty(prop)
+	}
+	return schema
+}
+
+func tightenProperty(prop Property) Property {
+	if prop.Items != nil {
+		item := tightenProperty(*prop.Items)
+		prop.Items = &item
+	}
+	if prop.Type == "object" {
+		if prop.AdditionalProperties == nil {
+			allow := false
+			prop.AdditionalProperties = &allow
+		}
+		for name, child := range prop.Properties {
+			prop.Properties[name] = tightenProperty(child)
+		}
+	}
+	return prop
 }
 
 // Definitions returns the tool list to send in a ChatRequest, sorted by name
 // for stable output.
 func (r *Registry) Definitions() []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		out = append(out, t)
@@ -124,7 +198,10 @@ func (r *Registry) Definitions() []Tool {
 // Invoke dispatches a tool call. Returns the handler's reply string or an
 // error message suitable for sending back as the tool's response.
 func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
+	r.mu.RLock()
 	t, ok := r.tools[call.Function.Name]
+	hook := r.onFileChanged
+	r.mu.RUnlock()
 	if !ok {
 		if cand, d := r.Nearest(call.Function.Name); cand != "" && (d <= 3 || d <= len(call.Function.Name)/3) {
 			return "", fmt.Errorf("unknown tool %q. Did you mean %q? Available tools: %s",
@@ -136,13 +213,40 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 	if t.Handler == nil {
 		return "", fmt.Errorf("tool %q has no handler", call.Function.Name)
 	}
-	if err := ValidateArgs(t.Function, call.Function.Arguments); err != nil {
+	normalized, err := NormalizeArgs(t.Function, call.Function.Arguments)
+	if err != nil {
 		return "", err
 	}
-	out, err := t.Handler(ctx, call.Function.Arguments)
-	if err == nil && r.onFileChanged != nil {
-		if paths := mutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
-			r.onFileChanged(paths)
+	call.Function.Arguments = normalized
+	// Stale-edit guard, enforced here — the one choke point every caller (TUI,
+	// headless, sub-agent, eval) goes through — so the protection does not
+	// depend on which UI dispatched the call. No ledger on the context means
+	// the caller opted out.
+	ledger := FreshnessLedgerFrom(ctx)
+	if ledger != nil {
+		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
+			if err := ledger.CheckMutation(call.Function.Name, paths); err != nil {
+				return "", err
+			}
+		}
+	}
+	out, err := t.Handler(ctx, normalized)
+	if err == nil {
+		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
+			if hook != nil {
+				hook(paths)
+			}
+			if ledger != nil {
+				ledger.RecordMutation(paths)
+			}
+		} else if ledger != nil && observingTools[call.Function.Name] {
+			if path := observedPath(normalized); path != "" {
+				if call.Function.Name == "read_file" {
+					ledger.ObserveRead(path)
+				} else {
+					ledger.Observe(path)
+				}
+			}
 		}
 	}
 	return out, err
@@ -156,6 +260,7 @@ func DefaultRegistry() *Registry {
 	r.Register(WriteFileTool())
 	r.Register(AppendFileTool())
 	r.Register(EditFileTool())
+	r.Register(MultiEditTool())
 	r.Register(DeleteFileTool())
 	r.Register(MoveFileTool())
 	r.Register(CopyFileTool())
@@ -168,6 +273,17 @@ func DefaultRegistry() *Registry {
 	r.Register(GrepTool())
 	r.Register(RunShellTool())
 	r.Register(ShellOutputTool())
+	r.Register(JobListTool())
+	r.Register(JobOutputTool())
+	r.Register(JobKillTool())
+	// Registered on every platform: on one without a pty the handler returns a
+	// clear "not supported" error, which tells the model more than an absent
+	// tool does.
+	r.Register(TerminalOpenTool())
+	r.Register(TerminalSendTool())
+	r.Register(TerminalReadTool())
+	r.Register(TerminalListTool())
+	r.Register(TerminalCloseTool())
 	r.Register(WebFetchTool())
 	r.Register(WebSearchTool())
 	r.Register(GetProjectTreeTool())

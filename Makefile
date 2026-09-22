@@ -41,6 +41,15 @@ build: setup
 	# GOOS=linux GOARCH=amd64 go build -v -o $(PROJECT_NAME)_linux .
 	@echo "Build complete. Binary named $(PROJECT_NAME) created."
 
+# Tree-sitter precision build: same binary, but the code-intelligence tools
+# (find_symbol, code_definition, code_references) parse supported languages
+# instead of only regexing. Requires CGO (a C toolchain); the default build
+# stays CGO-free.
+build-ts: setup
+	@echo "--- Building $(PROJECT_NAME) Binary (tree-sitter enabled) ---"
+	go build -v -tags treesitter -ldflags "$(LDFLAGS)" -o $(PROJECT_NAME) .
+	@echo "Build complete. Binary named $(PROJECT_NAME) created."
+
 # Target to install the built binary into PATH.
 install: build
 	@echo "--- Installing $(PROJECT_NAME) ---"
@@ -107,6 +116,24 @@ uninstall-companion:
 	fi
 	@echo "Uninstall complete."
 
+# Formatting and static checks. Fails on unformatted files instead of quietly
+# rewriting them, so the gate is usable from CI.
+lint:
+	@echo "--- Checking formatting ---"
+	@unformatted=$$(gofmt -l . | grep -v '^vendor/' || true); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
+	fi
+	@echo "--- go vet ---"
+	go vet ./...
+
+# Run the test suite.
+test:
+	go test ./...
+
+# Everything CI should run.
+check: lint test
+
 # Target to clean generated files and directories
 clean:
 	@echo "--- Cleaning up built files and directories ---"
@@ -114,4 +141,4 @@ clean:
 	@echo "Cleanup complete."
 
 # --- Phony Markers ---
-.PHONY: all setup build install uninstall run dev clean build-companion run-companion dev-companion install-companion uninstall-companion
+.PHONY: all setup build build-ts install uninstall run dev lint test check clean build-companion run-companion dev-companion install-companion uninstall-companion

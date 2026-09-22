@@ -103,9 +103,8 @@ func TestInterceptVCSBypass(t *testing.T) {
 }
 
 // TestIsExploreReadOnlyShellAdversarial documents how the parser handles
-// bypass attempts. Every expectation here is CURRENT behavior — cases marked
-// hole=true are ones where a mutating command is currently judged read-only;
-// they are documented, not fixed, because this change is a pure move.
+// bypass attempts. A non-empty hole marks a known limitation that is still
+// accepted.
 func TestIsExploreReadOnlyShellAdversarial(t *testing.T) {
 	cases := []struct {
 		name string
@@ -137,19 +136,19 @@ func TestIsExploreReadOnlyShellAdversarial(t *testing.T) {
 		// Allowlisted-binary abuse.
 		{"git commit blocked by subcommand allowlist", "git commit -m oops", false, ""},
 		{"git push blocked by subcommand allowlist", "git push", false, ""},
-		{"git tag is allowlisted but can mutate", "git tag v2.0", true, "HOLE: `git tag v2.0` creates a tag; `tag` is in the read-only subcommand allowlist and flags are not inspected"},
-		{"git tag -d deletes a tag", "git tag -d v1.0", true, "HOLE: `git tag -d v1.0` deletes a tag; `tag` is allowlisted and the -d flag is not inspected"},
-		{"git branch -D deletes a branch", "git branch -D feature", true, "HOLE: `git branch -D feature` force-deletes a branch; `branch` is allowlisted and the -D flag is not inspected"},
-		{"git branch creates a branch", "git branch new-feature", true, "HOLE: `git branch new-feature` creates a branch; `branch` is allowlisted"},
-		{"git remote can mutate", "git remote remove origin", true, "HOLE: `git remote remove origin` mutates repo config; `remote` is allowlisted and its sub-actions are not inspected"},
-		{"find -exec runs arbitrary commands", "find . -exec rm {} +", true, "HOLE: `find` is allowlisted and its arguments are not inspected, so -exec/-ok execute arbitrary commands"},
-		{"find -delete removes files", "find . -name '*.tmp' -delete", true, "HOLE: `find -delete` deletes files; find's arguments are not inspected"},
+		{"git tag is allowlisted but can mutate", "git tag v2.0", false, ""},
+		{"git tag -d deletes a tag", "git tag -d v1.0", false, ""},
+		{"git branch -D deletes a branch", "git branch -D feature", false, ""},
+		{"git branch creates a branch", "git branch new-feature", false, ""},
+		{"git remote can mutate", "git remote remove origin", false, ""},
+		{"find -exec runs arbitrary commands", "find . -exec rm {} +", false, ""},
+		{"find -delete removes files", "find . -name '*.tmp' -delete", false, ""},
 		{"xargs itself is not allowlisted", "xargs rm", false, ""},
 		{"pipe into xargs rm", "ls | xargs rm", false, ""},
 		{"sed -i blocked (sed not allowlisted)", "sed -i 's/a/b/' file", false, ""},
 		{"awk system() blocked (awk not allowlisted)", "awk 'BEGIN{system(\"rm x\")}'", false, ""},
-		{"env executes its arguments", "env rm -rf /tmp/foo", true, "HOLE: `env` is allowlisted and runs its remaining arguments as a command, so `env rm ...` bypasses the per-segment bin check"},
-		{"command builtin executes its arguments", "command rm foo", true, "HOLE: `command` is allowlisted and runs its remaining arguments as a command"},
+		{"env executes its arguments", "env rm -rf /tmp/foo", false, ""},
+		{"command builtin executes its arguments", "command rm foo", false, ""},
 
 		// Env-prefixed commands.
 		{"env assignment prefix skipped", "FOO=bar ls", true, ""},
@@ -159,6 +158,50 @@ func TestIsExploreReadOnlyShellAdversarial(t *testing.T) {
 		{"absolute path to rm blocked by basename", "/bin/rm x", false, ""},
 		{"relative path resolves to basename", "./ls", true, ""},
 		{"absolute path to allowlisted bin", "/bin/ls -la", true, ""},
+
+		// Chaining the old splitter missed.
+		{"newline chains a mutating command", "ls\nrm foo", false, ""},
+		{"lone & backgrounds then chains", "ls & rm foo", false, ""},
+		{"fd duplication still not a separator", "ls 2>&1 | grep x", true, ""},
+		{"process substitution runs a command", "cat <(rm foo)", false, ""},
+
+		// Argument-level escapes from allowlisted readers.
+		{"find -execdir", "find . -execdir rm {} ;", false, ""},
+		{"find -fprint writes a file", "find . -fprint out.txt", false, ""},
+		{"plain find still allowed", "find . -name '*.go' -type f", true, ""},
+		{"fd --exec", "fd . --exec rm", false, ""},
+		{"rg --pre runs a preprocessor", "rg --pre ./evil foo", false, ""},
+		{"rg --pre= form", "rg --pre=./evil foo", false, ""},
+		{"plain rg allowed", "rg -n foo src", true, ""},
+		{"sort -o writes a file", "sort -o out.txt in.txt", false, ""},
+		{"sort -o attached", "sort -oout.txt in.txt", false, ""},
+		{"sort --output=", "sort --output=out.txt in.txt", false, ""},
+		{"plain sort allowed", "sort -u in.txt", true, ""},
+		{"tree -o writes a file", "tree -o out.txt", false, ""},
+		{"env with only assignments prints", "env FOO=bar", true, ""},
+		{"bare env allowed", "env", true, ""},
+		{"env -i then command", "env -i FOO=1 rm x", false, ""},
+		{"command -v allowed", "command -v go", true, ""},
+		{"hostname set", "hostname evil", false, ""},
+		{"git diff --output writes", "git diff --output=patch.txt", false, ""},
+		{"git -c config injection", "git -c core.pager=./evil log", false, ""},
+		{"git --config-env", "git --config-env=core.pager=X log", false, ""},
+		{"git log -c combined diff allowed", "git log -c -1", true, ""},
+		{"git grep -O runs a pager", "git grep -O foo", false, ""},
+		{"git diff --ext-diff", "git diff --ext-diff", false, ""},
+		{"git branch list allowed", "git branch -a", true, ""},
+		{"git branch --list pattern allowed", "git branch --list 'feat*'", true, ""},
+		{"git branch --contains allowed", "git branch --contains HEAD", true, ""},
+		{"git tag list allowed", "git tag", true, ""},
+		{"git tag -l pattern allowed", "git tag -l 'v1*'", true, ""},
+		{"git remote -v allowed", "git remote -v", true, ""},
+		{"git remote add blocked", "git remote add x url", false, ""},
+		{"git remote get-url allowed", "git remote get-url origin", true, ""},
+		{"git reflog allowed", "git reflog -5", true, ""},
+		{"git reflog expire blocked", "git reflog expire --all", false, ""},
+		{"go vet -vettool runs a binary", "go vet -vettool=./evil ./...", false, ""},
+		{"go env -w writes config", "go env -w GOFLAGS=x", false, ""},
+		{"plain go vet allowed", "go vet ./...", true, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -189,12 +232,12 @@ func TestInterceptVCSBypassAdversarial(t *testing.T) {
 		{"git later in a pipeline blocked", "cat x | git log", false, ""},
 		{"git after semicolon blocked", "echo hi; git status", false, ""},
 		{"git after || blocked", "false || git status", false, ""},
-		{"git via env wrapper misses", "env git status", true, "HOLE: `env git status` bypasses the guard — only the leading binary is inspected, and env executes git"},
-		{"git via command builtin misses", "command git status", true, "HOLE: `command git status` bypasses the guard — only the leading binary is inspected"},
-		{"git via xargs misses", "xargs git", true, "HOLE: `xargs git` bypasses the guard — only the leading binary is inspected"},
-		{"git via sh -c misses", "sh -c 'git status'", true, "HOLE: `sh -c 'git status'` bypasses the guard — nested scripts are invisible to the parser (documented accepted limitation)"},
-		{"git via command substitution misses", "echo $(git status)", true, "HOLE: `$(git status)` bypasses the guard — command substitution is not split into segments (IsExploreReadOnlyShell blocks this in explore mode, but write/auto modes have no such check)"},
-		{"git via backticks misses", "echo `git status`", true, "HOLE: backtick substitution bypasses the guard for the same reason"},
+		{"git via env wrapper misses", "env git status", true, "HOLE: the guard only inspects the leading binary, and `env` hides git behind it"},
+		{"git via command builtin misses", "command git status", true, "HOLE: the guard only inspects the leading binary, and `command` hides git behind it"},
+		{"git via xargs misses", "xargs git", true, "HOLE: git runs as an xargs argument, not a leading binary"},
+		{"git via sh -c misses", "sh -c 'git status'", true, "HOLE: git runs inside a nested shell string"},
+		{"git via command substitution misses", "echo $(git status)", true, "HOLE: git runs inside a command substitution"},
+		{"git via backticks misses", "echo `git status`", true, "HOLE: git runs inside backticks"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,8 +18,10 @@ import (
 	"github.com/javanhut/ollama_code/internal/gitignore"
 )
 
-// calculateHash computes the SHA-256 hash of a file's content.
-func calculateHash(path string) (string, error) {
+// FileHash computes the SHA-256 hash of a file's content. Exported because the
+// staleness ledger in the TUI records it at read time and compares it before a
+// mutation, and that check has to hash the file exactly the way the tools do.
+func FileHash(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -56,7 +59,10 @@ func HashFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
-			hash, err := calculateHash(a.Path)
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
+			hash, err := FileHash(a.Path)
 			if err != nil {
 				return "", err
 			}
@@ -93,6 +99,9 @@ func ReadFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
 			}
 			info, err := os.Stat(a.Path)
 			if err != nil {
@@ -227,6 +236,10 @@ func readDirRecursive(root string) (string, error) {
 		fileTruncated := n > limit
 		if fileTruncated {
 			chunk = chunk[:limit]
+			// Cut at a line boundary, for the reason clipToLine documents.
+			if i := bytes.LastIndexByte(chunk, '\n'); i > 0 {
+				chunk = chunk[:i+1]
+			}
 		}
 
 		fmt.Fprintf(&out, "===== %s =====\n", rel)
@@ -276,7 +289,7 @@ func WriteFileTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "write_file",
-			Description: "Write text to a file, creating it (and parent directories) if needed. Overwrites existing contents.",
+			Description: "Write text to a file, creating it (and parent directories) if needed. Overwrites existing contents. To overwrite an existing file you MUST read_file it first; for changes to part of a file use edit_file instead.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -297,6 +310,16 @@ func WriteFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
+			// Verify-before-write: write_file supplies the file's entire
+			// contents, so unlike edit_file there is no "parsed before"
+			// condition — broken syntax in a full write is always a mistake,
+			// whether the file is new or a rewrite. Unknown extensions pass.
+			if verr := verifyBytes(a.Path, []byte(a.Content)); verr != nil {
+				return "", fmt.Errorf("write rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix content and retry", a.Path, verr)
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
@@ -305,15 +328,18 @@ func WriteFileTool() Tool {
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()
 			}
-			if err := os.WriteFile(a.Path, []byte(a.Content), mode); err != nil {
+			// Format after the syntax gate, before the write: the byte count,
+			// hash, and diff below then describe what landed on disk.
+			content := string(formatBytes(a.Path, []byte(a.Content)))
+			if err := WriteFileAtomic(a.Path, []byte(content), mode); err != nil {
 				return "", err
 			}
-			hash, _ := calculateHash(a.Path)
-			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash)
-			if diff := unifiedDiff(string(old), a.Content, a.Path); diff != "" {
+			hash, _ := FileHash(a.Path)
+			result := fmt.Sprintf("wrote %d bytes to %s\nNew Hash: %s", len(content), a.Path, hash)
+			if diff := unifiedDiff(string(old), content, a.Path); diff != "" {
 				result += "\n" + diff
 			}
-			return result, nil
+			return result + postEditDiagnostics(ctx, a.Path), nil
 		},
 	}
 }
@@ -345,6 +371,9 @@ func ListDirectoryTool() Tool {
 			path := a.Path
 			if path == "" {
 				path = "."
+			}
+			if err := jailCheck(path); err != nil {
+				return "", err
 			}
 			entries, err := os.ReadDir(path)
 			if err != nil {
@@ -391,6 +420,9 @@ func MakeDirectoryTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			if err := os.MkdirAll(a.Path, 0o755); err != nil {
 				return "", err
 			}
@@ -422,6 +454,9 @@ func TouchFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
 			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
@@ -545,6 +580,8 @@ func GrepTool() Tool {
 					"recursive":   {Type: "boolean", Description: "Search directories recursively. Defaults to true when path is a directory."},
 					"ignore_case": {Type: "boolean", Description: "Case-insensitive match."},
 					"file_types":  {Type: "string", Description: "Comma-separated file extensions to include (e.g. '.go,.md')."},
+					"output_mode": {Type: "string", Description: "'content' (default): matching lines. 'files': only the paths of matching files. 'count': match count per file.", Enum: []string{"content", "files", "count"}},
+					"context":     {Type: "integer", Description: "Lines of context to show before and after each match (content mode only, max 10)."},
 				},
 				Required: []string{"pattern"},
 			},
@@ -556,6 +593,8 @@ func GrepTool() Tool {
 				Recursive  *bool  `json:"recursive"`
 				IgnoreCase bool   `json:"ignore_case"`
 				FileTypes  string `json:"file_types"`
+				OutputMode string `json:"output_mode"`
+				Context    int    `json:"context"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -567,46 +606,44 @@ func GrepTool() Tool {
 			if path == "" {
 				path = "."
 			}
-			recursive := false
+			if err := jailCheck(path); err != nil {
+				return "", err
+			}
+			q := grepQuery{Pattern: a.Pattern, Path: path, IgnoreCase: a.IgnoreCase, Context: min(max(a.Context, 0), 10)}
 			if info, err := os.Stat(path); err == nil && info.IsDir() {
-				recursive = true
+				q.Recursive = true
 			}
 			if a.Recursive != nil {
-				recursive = *a.Recursive
+				q.Recursive = *a.Recursive
 			}
-			argv := []string{"-nE", "--color=never"}
-			if a.IgnoreCase {
-				argv = append(argv, "-i")
+			switch a.OutputMode {
+			case "", "content":
+				q.Mode = "content"
+			case "files", "files_with_matches":
+				q.Mode = "files"
+			case "count":
+				q.Mode = "count"
+			default:
+				return "", fmt.Errorf("output_mode must be content, files, or count")
 			}
-			if recursive {
-				argv = append(argv, "-r")
-			}
-			// Skip dot files and dot directories so the model doesn't waste
-			// context on hidden/config files unless explicitly needed.
-			argv = append(argv, "--exclude-dir=.*", "--exclude=.*")
 			if a.FileTypes != "" {
 				for ft := range strings.SplitSeq(a.FileTypes, ",") {
-					ft = strings.TrimSpace(ft)
-					if ft != "" {
-						argv = append(argv, "--include="+includeGlob(ft))
+					if ft = strings.TrimSpace(ft); ft != "" {
+						q.Globs = append(q.Globs, includeGlob(ft))
 					}
 				}
 			}
-			argv = append(argv, "--", a.Pattern, path)
-			cmd := exec.CommandContext(ctx, "grep", argv...)
-			out, err := cmd.CombinedOutput()
-			text := strings.TrimRight(stripANSI(string(out)), "\n")
+			text, err := runGrepSearch(ctx, q)
 			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-					return "no matches", nil
-				}
-				if text != "" {
-					return groupMatches(text), nil
-				}
 				return "", err
 			}
 			if text == "" {
 				return "no matches", nil
+			}
+			// Grouping parses path:line:text, which files/count/context
+			// output doesn't have.
+			if q.Mode != "content" || q.Context > 0 {
+				return capMatches(text), nil
 			}
 			return groupMatches(text), nil
 		},
@@ -639,6 +676,18 @@ func AppendFileTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
+			// Verify-before-write, gated the same way as edit_file: appends
+			// carry fragments, so only reject when the file parsed before and
+			// would not parse after. A missing or not-yet-parseable file skips
+			// the gate — incremental writes build up over several appends.
+			if old, err := os.ReadFile(a.Path); err == nil && verifyBytes(a.Path, old) == nil {
+				if verr := verifyBytes(a.Path, append(old, []byte(a.Content)...)); verr != nil {
+					return "", fmt.Errorf("append rejected: it would introduce a syntax error in %s: %v\nNo changes were written — fix content and retry", a.Path, verr)
+				}
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
@@ -651,7 +700,7 @@ func AppendFileTool() Tool {
 				return "", err
 			}
 			f.Close()
-			hash, _ := calculateHash(a.Path)
+			hash, _ := FileHash(a.Path)
 			return fmt.Sprintf("appended %d bytes to %s\nNew Hash: %s", len(a.Content), a.Path, hash), nil
 		},
 	}
@@ -682,6 +731,9 @@ func DeleteFileTool() Tool {
 			}
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
+			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
 			}
 			if a.Recursive {
 				if err := os.RemoveAll(a.Path); err != nil {
@@ -723,6 +775,12 @@ func MoveFileTool() Tool {
 			if a.Source == "" || a.Destination == "" {
 				return "", fmt.Errorf("source and destination are required")
 			}
+			if err := jailCheck(a.Source); err != nil {
+				return "", err
+			}
+			if err := jailCheck(a.Destination); err != nil {
+				return "", err
+			}
 			if err := os.MkdirAll(filepath.Dir(a.Destination), 0o755); err != nil {
 				return "", err
 			}
@@ -759,6 +817,12 @@ func CopyFileTool() Tool {
 			}
 			if a.Source == "" || a.Destination == "" {
 				return "", fmt.Errorf("source and destination are required")
+			}
+			if err := jailCheck(a.Source); err != nil {
+				return "", err
+			}
+			if err := jailCheck(a.Destination); err != nil {
+				return "", err
 			}
 			if err := os.MkdirAll(filepath.Dir(a.Destination), 0o755); err != nil {
 				return "", err
@@ -806,6 +870,9 @@ func FindFilesTool() Tool {
 			root := a.Path
 			if root == "" {
 				root = "."
+			}
+			if err := jailCheck(root); err != nil {
+				return "", err
 			}
 			maxDepth := 10
 			if a.MaxDepth != nil {
@@ -881,6 +948,9 @@ func FileInfoTool() Tool {
 			if a.Path == "" {
 				return "", fmt.Errorf("path is required")
 			}
+			if err := jailCheck(a.Path); err != nil {
+				return "", err
+			}
 			info, err := os.Lstat(a.Path)
 			if err != nil {
 				return "", err
@@ -941,6 +1011,9 @@ func GetProjectTreeTool() Tool {
 			root := a.Path
 			if root == "" {
 				root = "."
+			}
+			if err := jailCheck(root); err != nil {
+				return "", err
 			}
 			if a.MaxDepth <= 0 {
 				a.MaxDepth = 4

@@ -42,9 +42,16 @@ func SalvageJSON(raw json.RawMessage) json.RawMessage {
 // errors already render a named, schema-aware message; broken-JSON arguments get
 // explicit guidance to resend a single object; everything else passes through.
 func RepairHint(call ToolCall, err error) string {
-	var ve *ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*ValidationError](err); ok {
 		return "error: " + ve.Error()
+	}
+	// A stale-edit refusal is already model-coaching text; appending "check the
+	// arguments" would misdiagnose it.
+	if se, ok := errors.AsType[*StaleFileError](err); ok {
+		return "error: " + se.Error()
+	}
+	if ue, ok := errors.AsType[*UnreadFileError](err); ok {
+		return "error: " + ue.Error()
 	}
 	if len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments) {
 		raw := string(call.Function.Arguments)
@@ -61,8 +68,7 @@ func RepairHint(call ToolCall, err error) string {
 // as opposed to a legitimate execution error (e.g. "file not found") that
 // re-emitting arguments wouldn't fix.
 func ShouldFormatRepair(call ToolCall, err error) bool {
-	var ve *ValidationError
-	if errors.As(err, &ve) {
+	if _, ok := errors.AsType[*ValidationError](err); ok {
 		return true
 	}
 	return len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments)
