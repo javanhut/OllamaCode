@@ -74,9 +74,9 @@ var fdRedirect = regexp.MustCompile(`\d*>&\d*|&>>?`)
 // on |, ||, &&, ;, newlines and a background &.
 func shellRuleSegments(command string) []string {
 	var out []string
-	for _, line := range strings.Split(command, "\n") {
+	for line := range strings.SplitSeq(command, "\n") {
 		for _, seg := range safeshell.SplitShellSegments(line) {
-			for _, part := range strings.Split(fdRedirect.ReplaceAllString(seg, " "), "&") {
+			for part := range strings.SplitSeq(fdRedirect.ReplaceAllString(seg, " "), "&") {
 				if part = strings.TrimSpace(part); part != "" {
 					out = append(out, part)
 				}

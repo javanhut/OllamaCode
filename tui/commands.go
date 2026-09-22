@@ -114,15 +114,15 @@ func parseCustomCommand(src string) customCommand {
 	body := src
 	if strings.HasPrefix(src, "---\n") || strings.HasPrefix(src, "---\r\n") {
 		rest := src[strings.Index(src, "\n")+1:]
-		if end := strings.Index(rest, "\n---"); end >= 0 {
-			front := rest[:end]
-			body = rest[end+4:]
+		if before, after, ok := strings.Cut(rest, "\n---"); ok {
+			front := before
+			body = after
 			if nl := strings.Index(body, "\n"); nl >= 0 {
 				body = body[nl+1:]
 			} else {
 				body = ""
 			}
-			for _, line := range strings.Split(front, "\n") {
+			for line := range strings.SplitSeq(front, "\n") {
 				key, val, ok := strings.Cut(line, ":")
 				if !ok {
 					continue

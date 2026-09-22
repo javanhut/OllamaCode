@@ -227,7 +227,7 @@ func dirsBetween(root, leaf string) []string {
 		return out
 	}
 	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		cur = filepath.Join(cur, part)
 		out = append(out, cur)
 	}
