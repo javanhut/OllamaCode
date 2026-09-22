@@ -36,6 +36,11 @@ func TestRegistry(t *testing.T) {
 }
 
 func TestRunShellToolReturnsOutput(t *testing.T) {
+	// Opt out of the sandbox so a machine without one (CI) doesn't prepend the
+	// one-time missing-sandbox warning; this test is about the output only.
+	SetShellSandboxEnabled(false)
+	t.Cleanup(func() { SetShellSandboxEnabled(true) })
+
 	r := NewRegistry()
 	r.Register(RunShellTool())
 

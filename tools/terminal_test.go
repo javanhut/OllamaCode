@@ -30,23 +30,15 @@ func openTestTerminal(t *testing.T, command string) (int, int) {
 	return 0, 0
 }
 
-// hasLine reports whether s contains a line that is exactly want. Contains is
-// not good enough here: the pty echoes the typed command back, so a substring
-// check passes on the echo alone even when the program produced nothing.
-func hasLine(s, want string) bool {
-	for line := range strings.SplitSeq(s, "\n") {
-		if strings.TrimSpace(line) == want {
-			return true
-		}
-	}
-	return false
-}
-
 func TestTerminalSendSilenceWhileAlive(t *testing.T) {
 	t.Cleanup(CloseTerminals)
 	id, _ := openTestTerminal(t, "sh")
 
-	out, err := callTool(t, TerminalSendTool(), fmt.Sprintf(`{"id":%d,"input":"echo hi"}`, id))
+	// The pty echoes the typed line back, so the input must not contain the
+	// expected output: `echo h""i` prints "hi" while its echo does not. A line
+	// match is not usable either — if the input lands before the shell's first
+	// prompt, dash prints that prompt in front of the output ("$ hi").
+	out, err := callTool(t, TerminalSendTool(), fmt.Sprintf(`{"id":%d,"input":"echo h\"\"i"}`, id))
 	if err != nil {
 		t.Fatalf("terminal_send: %v", err)
 	}
@@ -56,8 +48,8 @@ func TestTerminalSendSilenceWhileAlive(t *testing.T) {
 	if !strings.Contains(out, "alive=true") {
 		t.Errorf("a shell at its prompt is still alive, got %q", out)
 	}
-	if !hasLine(out, "hi") {
-		t.Errorf("expected a line that is exactly \"hi\" (not just the echoed command), got %q", out)
+	if !strings.Contains(out, "hi") {
+		t.Errorf("expected the command's output \"hi\", got %q", out)
 	}
 }
 
