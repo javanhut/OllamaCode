@@ -137,7 +137,7 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 25)
+	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 40)
 	PromptFamily  string                     `json:"prompt_family,omitempty"`  // force a prompt family section; "none"/"default" = base prompt only
 	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
 	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
@@ -162,6 +162,7 @@ type config struct {
 
 	Instructions        []string `json:"instructions,omitempty"`         // extra instruction files, loaded after the global AGENTS.md
 	ProjectInstructions *bool    `json:"project_instructions,omitempty"` // nil/true = load AGENTS.md/OLLAMA.md/CLAUDE.md files
+	RepoSnapshot        *bool    `json:"repo_snapshot,omitempty"`        // nil/true = put VCS status, recent commits and a file tree in the system prompt
 }
 
 // providerConfig is one additional LLM endpoint beyond the default host. The
@@ -266,12 +267,20 @@ func (p ModelProfile) reviewPass() bool {
 	return strings.EqualFold(strings.TrimSpace(p.CapabilityTier), "strong")
 }
 
+// logActivity records s in the recent-activity list and persists it.
 func (m *Model) logActivity(s string) {
+	m.noteActivity(s)
+	saveConfig(m.cfg)
+}
+
+// noteActivity records s without writing config.json, for per-tool-call
+// entries: rewriting the config on every call was pure disk churn. The entry
+// is persisted by the next saveConfig. Must run on the update goroutine.
+func (m *Model) noteActivity(s string) {
 	m.cfg.Activity = append([]string{s}, m.cfg.Activity...)
 	if len(m.cfg.Activity) > 5 {
 		m.cfg.Activity = m.cfg.Activity[:5]
 	}
-	saveConfig(m.cfg)
 }
 
 // gen on the chat/tool messages is the turn generation they were produced
@@ -296,8 +305,11 @@ type Model struct {
 	todos           *todoList
 	// AGENTS.md-style rules (instructions.go). The block is rendered once per
 	// load so the cached system prefix stays byte-stable.
-	instructions       instructions.Set
-	instructionsBlock  string
+	instructions      instructions.Set
+	instructionsBlock string
+	// repoSnapshot caches repoSnapshotBlock for the session.
+	repoSnapshot       string
+	repoSnapshotDone   bool
 	instructionTracker *instructions.Tracker
 	customCommands     []customCommand // markdown slash commands (commands.go)
 	// sessionPermissions are allow rules granted with "s" at a permission

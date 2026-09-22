@@ -31,6 +31,9 @@ var webContentTools = map[string]bool{
 	"web_fetch": true, "web_search": true, "web_search_api": true, "web_crawl": true,
 }
 
+// maxConcurrentReads caps a pure-read batch's parallelism.
+const maxConcurrentReads = 8
+
 type pendingBatch struct {
 	calls      []tools.ToolCall
 	results    []api.Message
@@ -74,7 +77,6 @@ func (m *Model) freshnessLedger() *tools.FreshnessLedger {
 }
 
 func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message {
-	m.logActivity("Tool: " + call.Function.Name)
 	// Guard this call with the session's stale-edit ledger; the check itself
 	// runs inside the registry (tools/freshness.go), so headless runs and
 	// sub-agents get the same refusal from their own ledgers.
@@ -142,6 +144,9 @@ func (m *Model) savePermissionRule(rule tools.PermissionRule) {
 }
 
 func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
+	// Recorded here, on the update goroutine: invokeTool runs on a tool
+	// goroutine, where touching m.cfg raced the UI.
+	m.noteActivity("Tool: " + call.Function.Name)
 	return func() tea.Msg {
 		var req *modeSwitchRequest
 		if call.Function.Name == "switch_mode" {
@@ -170,11 +175,13 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 
 		select {
 		case result := <-done:
-			return toolResultMsg{gen: gen, index: index, result: result, modeSwitch: req}
+			return toolResultMsg{gen: gen, index: index, result: result, modeSwitch: req,
+				shellMutated: tools.ShellMayMutate(call) && m.workspaceChangedSinceSnapshot()}
 		case <-ctx.Done():
 			return toolResultMsg{
-				gen:   gen,
-				index: index,
+				gen:          gen,
+				index:        index,
+				shellMutated: tools.ShellMayMutate(call) && m.workspaceChangedSinceSnapshot(),
 				result: api.Message{
 					Role:     "tool",
 					ToolName: call.Function.Name,
@@ -386,6 +393,12 @@ func (m *Model) processPendingTools() tea.Cmd {
 		}
 	}
 	parallelLimit := m.parallelToolLimit()
+	// A batch of pure reads has no ordering to protect, so it runs in
+	// parallel even on small models, whose limit is otherwise 1. An explicit
+	// parallel_tools=false in the profile still wins.
+	if tools.BatchIsConcurrentSafe(m.pending.calls) && m.profile.ParallelTools == nil {
+		parallelLimit = max(parallelLimit, maxConcurrentReads)
+	}
 	for i, call := range m.pending.calls {
 		if m.pending.started[i] {
 			continue

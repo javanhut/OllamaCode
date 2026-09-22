@@ -8,8 +8,11 @@ because the whole point is running models that sometimes don't.
 The first line. A tool the current [mode](modes.md) disallows is never sent to
 the model, so it cannot propose the action, and a call for it is rejected before
 dispatch. Shell in explore mode is additionally filtered per command segment
-against a read-only allowlist, with redirection and command substitution
-blocked.
+against a read-only allowlist, with redirection, command and process
+substitution blocked, and with the arguments that turn an allowlisted reader
+into a writer or runner (`find -exec/-delete`, `env <cmd>`, `rg --pre`,
+`sort -o`, `git branch <name>`, `git -c ...`) rejected. Newlines and a lone
+`&` split segments like `;` does.
 
 ## Approval prompts
 
@@ -78,8 +81,18 @@ where re-reading first is equally the right answer.
 The ledger records a hash when a read tool opens a file and again when a tool
 successfully writes one, so the model's own edits are never mistaken for someone
 else's. It is session-scoped, not per-turn: editing from a read taken in an
-earlier turn is the more common version of this mistake. A file the model never
-read is not gated here — that is the plan gate's question, below.
+earlier turn is the more common version of this mistake.
+
+`edit_file`, `multi_edit` and `write_file` also refuse an existing file the
+model has not read this session: an `old_string` recalled from memory can
+fuzzy-match the wrong lines, and a blind `write_file` discards whatever was
+there. `read_file`, an `@`-mention attachment, or the model's own earlier write
+counts as a read; `grep`, `file_info` and `list_directory` do not, since they
+never showed the contents. Creating a new file, and `append_file`,
+`delete_file`, `move_file` and `copy_file`, are not gated.
+
+File writes are atomic (temp file, then rename), so an interrupted edit leaves
+the old contents rather than a truncated file. Symlinks are followed and kept.
 
 ## Workspace confinement
 
@@ -185,7 +198,10 @@ Two limits worth knowing:
   restore them either.
 
 A read-only turn costs nothing: the snapshot is only taken when a mutating
-tool is about to run. Writes made by delegated work land in the same snapshot —
+tool is about to run. A `run_shell` command counts as mutating unless it passes
+the explore-mode read-only allowlist, so `sed -i` or `rm` from the shell is
+undoable too; if the workspace differs from the snapshot after such a command,
+the verify gate runs at turn end as it does after a file-tool edit. Writes made by delegated work land in the same snapshot —
 a sub-agent's or `parallel_edit`'s mutations happen after the turn's snapshot,
 so one `/undo` rewinds the whole delegation — see
 [Tools](tools.md#spawn_subagent).

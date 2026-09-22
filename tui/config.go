@@ -60,7 +60,9 @@ func saveConfig(c config) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	// 0600: the config can hold api_key and provider keys. Atomic so a crash
+	// mid-save can't truncate every setting.
+	_ = writeFileAtomic(path, data, 0o600)
 }
 
 func tokenRatiosPath() string {

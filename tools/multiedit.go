@@ -166,7 +166,7 @@ func MultiEditTool() Tool {
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()
 			}
-			if err := os.WriteFile(a.Path, []byte(updated), mode); err != nil {
+			if err := WriteFileAtomic(a.Path, []byte(updated), mode); err != nil {
 				return "", err
 			}
 			hash, _ := FileHash(a.Path)

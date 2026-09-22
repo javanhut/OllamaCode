@@ -241,7 +241,11 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 			}
 		} else if ledger != nil && observingTools[call.Function.Name] {
 			if path := observedPath(normalized); path != "" {
-				ledger.Observe(path)
+				if call.Function.Name == "read_file" {
+					ledger.ObserveRead(path)
+				} else {
+					ledger.Observe(path)
+				}
 			}
 		}
 	}

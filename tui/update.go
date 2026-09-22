@@ -54,6 +54,9 @@ type toolResultMsg struct {
 	index      int
 	result     api.Message
 	modeSwitch *modeSwitchRequest
+	// shellMutated: a shell call left the workspace different from the
+	// turn's snapshot, so the verify gate owes a run.
+	shellMutated bool
 }
 
 type compactDoneMsg struct {
@@ -787,6 +790,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pending != nil && msg.gen == m.pending.gen && msg.index < len(m.pending.results) {
 			m.pending.results[msg.index] = msg.result
 			m.pending.done++
+			if msg.shellMutated {
+				m.turnTouchedFiles = true
+			}
 			if msg.index < len(m.pending.calls) {
 				call := m.pending.calls[msg.index]
 				if !tools.ToolResultOK(msg.result.Content) {
@@ -1098,6 +1104,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case compactDoneMsg:
 		m.compacting = false
+		// A blank summary means the pass failed. Moving the boundary anyway
+		// would hide half the history behind nothing, so leave it and surface
+		// any overflow the turn was waiting on.
+		if strings.TrimSpace(msg.summary) == "" {
+			m.toast = "compaction failed: empty summary, history kept"
+			m.logActivity("compaction returned an empty summary; archive boundary not moved")
+			if err := m.overflowErr; err != nil {
+				m.overflowErr = nil
+				gen := m.turnGen
+				cmds = append(cmds, func() tea.Msg { return chatErrMsg{gen: gen, err: err} })
+			}
+			break
+		}
 		m.toast = "context compacted"
 		// Store the summary in the volatile tail (archiveSummary) and move the
 		// archive boundary, rather than prepending a system message into history

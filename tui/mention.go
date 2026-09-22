@@ -112,6 +112,13 @@ func findMentions(text string) []string {
 // or out-of-workspace files get an inline note instead of contents, so the
 // model sees what happened rather than the token vanishing silently.
 func expandFileMentions(text string) string {
+	return expandFileMentionsObserved(text, nil)
+}
+
+// expandFileMentionsObserved is expandFileMentions that also reports each
+// fully attached file to observe, so an @-mention satisfies read-before-edit
+// just as a read_file would.
+func expandFileMentionsObserved(text string, observe func(path string)) string {
 	paths := findMentions(text)
 	if len(paths) == 0 {
 		return ""
@@ -152,6 +159,9 @@ func expandFileMentions(text string) string {
 			fence = "~~~" // the file itself holds triple backticks
 		}
 		b.WriteString(fence + "\n" + strings.TrimRight(content, "\n") + "\n" + fence + "\n")
+		if observe != nil && !ranged && !truncated {
+			observe(path)
+		}
 		if truncated {
 			// Mirrors fs.go's truncation note.
 			b.WriteString(fmt.Sprintf("[truncated after %d bytes]\n", len(content)))

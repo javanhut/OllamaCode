@@ -25,8 +25,13 @@ segment: `ls`, `cat`, `head`, `tail`, `grep`/`rg`, `find`/`fd`, `tree`, `wc`,
 `basename`/`dirname`/`realpath`, plus `git status/log/diff/show/branch/remote/blame`
 and `go version/env/list/doc/vet`.
 
-Output redirection (`>`, `>>`) and command substitution (`$(...)`, backticks)
-are blocked, because either one turns a read into a write.
+Output redirection (`>`, `>>`), command substitution (`$(...)`, backticks) and
+process substitution (`<(...)`) are blocked, because each one turns a read into
+a write or a second command. Arguments are checked too: `find -exec/-delete`,
+`fd --exec`, `rg --pre`, `sort -o`, `tree -o`, `env <command>`, `command <cmd>`
+(only `command -v` is allowed), `git -c`, `git diff --output`, `git grep -O`,
+`go vet -vettool` and `go env -w` are rejected, and `git branch`/`tag`/`remote`/
+`reflog` are limited to their listing forms.
 
 ### Verified citations
 

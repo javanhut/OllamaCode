@@ -129,3 +129,20 @@ func matchShellRule(rule PermissionRule, command string) bool {
 	}
 	return matchedRule
 }
+
+// ShellMayMutate reports whether call runs shell input that could change files
+// outside the file tools' view: `sed -i`, `rm`, a code generator. MutatedPaths
+// can't name those paths, so callers snapshot for undo and check the
+// workspace afterwards instead. A command that passes the explore-mode
+// read-only allowlist is exempt, so `ls` and `git status` stay free.
+func ShellMayMutate(call ToolCall) bool {
+	switch call.Function.Name {
+	case "terminal_send":
+		return true
+	case "run_shell":
+		cmd := safeshell.ExtractShellCommand(call.Function.Arguments)
+		ok, _ := safeshell.IsExploreReadOnlyShell(cmd)
+		return !ok
+	}
+	return false
+}

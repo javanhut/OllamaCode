@@ -196,3 +196,24 @@ func TestPruneDoesNotCancelAMeasuredCompaction(t *testing.T) {
 		t.Fatalf("a trivial prune cancelled the compaction (cmd=%v compacting=%v)", cmd != nil, m.compacting)
 	}
 }
+
+// A blank summary means compaction failed; moving the archive boundary would
+// hide half the history behind nothing.
+func TestCompactDoneEmptySummaryKeepsHistory(t *testing.T) {
+	m := overflowTestModel(t)
+	m.overflowErr = errOverflow
+	before := m.archivedThrough
+
+	_, cmd := m.Update(compactDoneMsg{summary: "  ", index: 4})
+
+	if m.archivedThrough != before || m.archiveSummary != "" {
+		t.Fatalf("boundary moved on an empty summary: archivedThrough %d -> %d", before, m.archivedThrough)
+	}
+	msgs := drainCmd(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("expected the pending overflow to surface, got %#v", msgs)
+	}
+	if _, ok := msgs[0].(chatErrMsg); !ok {
+		t.Fatalf("expected chatErrMsg, got %#v", msgs[0])
+	}
+}

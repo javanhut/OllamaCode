@@ -501,7 +501,7 @@ func rollbackBatch(pre map[string]fileSnap, appliedPaths []string) (restored, re
 			if mode == 0 {
 				mode = 0o644
 			}
-			if err := os.WriteFile(p, s.data, mode); err != nil {
+			if err := tools.WriteFileAtomic(p, s.data, mode); err != nil {
 				failed = append(failed, p)
 			} else {
 				restored++

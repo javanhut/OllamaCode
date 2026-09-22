@@ -423,3 +423,31 @@ func shellCallTimeout(args json.RawMessage) time.Duration {
 	}
 	return min(time.Duration(a.TimeoutSec*float64(time.Second)), shellMaxTimeout)
 }
+
+// concurrentSafeTools only observe the workspace: they touch no session state
+// and no files, so any number can run at once and their order doesn't matter.
+// Deliberately explicit rather than derived from ModeReadOnly, which also
+// covers notes, todos, memory and sub-agents.
+var concurrentSafeTools = map[string]bool{
+	"read_file": true, "list_directory": true, "find_files": true, "grep": true,
+	"file_info": true, "get_working_directory": true, "get_project_tree": true,
+	"hash_file": true, "git_status": true, "git_diff": true, "git_log": true,
+	"find_symbol": true, "code_definition": true, "code_references": true,
+	"code_hover": true, "semantic_search": true, "web_fetch": true,
+	"web_search": true, "web_search_api": true, "todo_read": true,
+	"read_session_notes": true,
+}
+
+// BatchIsConcurrentSafe reports whether every call in a batch is a pure read,
+// so the whole batch can run in parallel whatever the model's size.
+func BatchIsConcurrentSafe(calls []ToolCall) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, c := range calls {
+		if !concurrentSafeTools[c.Function.Name] {
+			return false
+		}
+	}
+	return true
+}

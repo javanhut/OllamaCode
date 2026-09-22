@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -51,10 +52,11 @@ type ChatResponse struct {
 }
 
 type GenerateRequest struct {
-	Model     string `json:"model"`
-	Prompt    string `json:"prompt"`
-	Stream    bool   `json:"stream"`
-	KeepAlive string `json:"keep_alive,omitempty"`
+	Model     string         `json:"model"`
+	Prompt    string         `json:"prompt"`
+	Stream    bool           `json:"stream"`
+	KeepAlive string         `json:"keep_alive,omitempty"`
+	Options   map[string]any `json:"options,omitempty"`
 }
 
 type GenerateResponse struct {
@@ -408,6 +410,15 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 		req.KeepAlive = defaultKeepAlive
 	}
 
+	// Same learned ceiling as chat: a num_ctx above what this host could load
+	// would reload the model only to fail allocating it.
+	if limit := ContextCeiling(o.uri, req.Model); limit > 0 {
+		if n, ok := req.Options["num_ctx"].(int); ok && n > limit {
+			req.Options = maps.Clone(req.Options)
+			req.Options["num_ctx"] = limit
+		}
+	}
+
 	urlPath := generatePath("generateResponse", o)
 	jsonData, err := json.Marshal(req)
 	if err != nil {
@@ -419,6 +430,12 @@ func (o OllamaHost) GenerateResponse(req GenerateRequest) (*GenerateResponse, er
 		return nil, fmt.Errorf("http request failed: %v", err)
 	}
 	defer resp.Body.Close()
+	// An error body decodes cleanly into an empty Response, which a caller
+	// would take for a real (blank) answer.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, statusError(resp.StatusCode, body, resp.Header)
+	}
 
 	var genResp GenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {

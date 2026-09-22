@@ -15,7 +15,7 @@ func RunShellTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "run_shell",
-			Description: "Run a shell command via `sh -c`. Use for awk, sed, find, complex pipelines, or anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
+			Description: "Run a shell command via `sh -c`. Do NOT use it to search or read files: use grep, find_files, read_file and list_directory instead, which respect .gitignore and cap their output. Use it for builds, tests, and anything not covered by a dedicated tool. Returns combined stdout+stderr. Supports stdin input via the stdin parameter. Non-zero exits are reported in the result. Default timeout 30s, max 300s; a foreground command that exceeds the timeout is killed. For long-running or never-terminating commands — dev servers, file watchers, `tail -f`, builds you want to keep running — set background=true: the command starts detached and this returns immediately with a job id, so the turn isn't blocked. Read its output or stop it later with shell_output.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{

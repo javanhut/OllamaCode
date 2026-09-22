@@ -88,7 +88,7 @@ func (m *Model) submit() tea.Cmd {
 	// Attach any @-mentioned files to this turn (injected via the dynamic
 	// context; the user's message stays as typed). Computed before the
 	// escalation hold so a confirmed message still carries its attachments.
-	m.mentionBlock = expandFileMentions(value)
+	m.mentionBlock = expandFileMentionsObserved(value, m.freshnessLedger().ObserveRead)
 
 	// If we dreamt while the user was away, hand those thoughts to the model so
 	// it can mention them in its reply.
@@ -157,7 +157,7 @@ func (m *Model) submit() tea.Cmd {
 func (m *Model) dequeueNext() tea.Cmd {
 	next := m.queue[0]
 	m.queue = m.queue[1:]
-	m.mentionBlock = expandFileMentions(next) // attachments belong to the dequeued message
+	m.mentionBlock = expandFileMentionsObserved(next, m.freshnessLedger().ObserveRead) // attachments belong to the dequeued message
 	m.history = append(m.history, api.Message{Role: "user", Content: next})
 	m.logActivity("Message (dequeued): " + next)
 	m.resetTurnGuards()
@@ -293,10 +293,13 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 	b.WriteString("Summarize the following conversation history concisely for context management. Focus on key decisions, file changes, and project state. (Note: The full history has been archived in KV storage with key: " + key + ")\n\n")
 	b.WriteString(conversation.String())
 
+	// Without num_ctx the host falls back to its small default window and
+	// silently truncates the very history being summarized.
 	req := api.GenerateRequest{
-		Model:  m.modelName,
-		Prompt: b.String(),
-		Stream: false,
+		Model:   m.modelName,
+		Prompt:  b.String(),
+		Stream:  false,
+		Options: map[string]any{"num_ctx": m.contextLimit},
 	}
 
 	host := m.host
@@ -704,7 +707,7 @@ func (m *Model) activeSystemPrompt() string {
 	// prefix and, like the rest of it, stable until /instructions reload. The
 	// cursor agent reads the repo's rule files itself.
 	if !m.host.IsCursor() {
-		return base + section + environmentBlock() + m.instructionsBlock
+		return base + section + environmentBlock() + m.repoSnapshotBlock() + m.instructionsBlock
 	}
 	return base + section + environmentBlock()
 }

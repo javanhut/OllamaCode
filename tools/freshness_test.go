@@ -88,8 +88,13 @@ func TestFreshnessRefusalNotSticky(t *testing.T) {
 	if _, err := r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": p, "content": "three\n"})); err == nil {
 		t.Fatal("expected the first call to be refused")
 	}
-	// Baseline dropped on refusal: the retry is allowed through (the model was
-	// told to re-read; the guard does not nag twice with identical text).
+	// Baseline dropped on refusal: the retry gets the read-first message rather
+	// than the same stale text, and a fresh read clears it.
+	_, err := r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": p, "content": "three\n"}))
+	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+		t.Fatalf("retry without a re-read: want UnreadFileError, got %v", err)
+	}
+	mustInvoke(t, r, ctx, "read_file", map[string]any{"path": p})
 	mustInvoke(t, r, ctx, "write_file", map[string]any{"path": p, "content": "three\n"})
 }
 
@@ -108,18 +113,46 @@ func TestFreshnessOwnWriteIsNotStale(t *testing.T) {
 	mustInvoke(t, r, ctx, "edit_file", map[string]any{"path": p, "old_string": "two", "new_string": "three"})
 }
 
-// A file the model never observed is not this guard's business — the plan-mode
-// read-before-edit gate owns that question, and gating here would block every
-// first write in a session.
-func TestFreshnessUnreadFileAllowed(t *testing.T) {
+// Rewriting an existing file the model never read is refused: an edit built
+// from memory can fuzzy-match the wrong lines, and a blind write_file discards
+// whatever was there. Mutators that don't rewrite content are not gated.
+func TestFreshnessUnreadFileRefused(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	p := filepath.Join(dir, "new.txt")
+	p := filepath.Join(dir, "existing.txt")
 	os.WriteFile(p, []byte("x\n"), 0o644)
 
 	r := freshnessRegistry()
 	ctx := WithFreshnessLedger(context.Background(), NewFreshnessLedger())
-	mustInvoke(t, r, ctx, "write_file", map[string]any{"path": p, "content": "y\n"})
+	for _, call := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"write_file", map[string]any{"path": p, "content": "y\n"}},
+		{"edit_file", map[string]any{"path": p, "old_string": "x", "new_string": "y"}},
+		{"edit_file", map[string]any{"path": "existing.txt", "old_string": "x", "new_string": "y"}},
+	} {
+		_, err := r.Invoke(ctx, freshnessCall(t, call.name, call.args))
+		if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+			t.Fatalf("%s on an unread file: want UnreadFileError, got %v", call.name, err)
+		}
+		if hint := RepairHint(freshnessCall(t, call.name, call.args), err); !strings.Contains(hint, "read_file") {
+			t.Fatalf("hint does not tell the model to read: %q", hint)
+		}
+	}
+	if b, _ := os.ReadFile(p); string(b) != "x\n" {
+		t.Fatalf("refused call still wrote the file: %q", b)
+	}
+
+	// A relative read satisfies an absolute edit, and vice versa.
+	mustInvoke(t, r, ctx, "read_file", map[string]any{"path": "existing.txt"})
+	mustInvoke(t, r, ctx, "edit_file", map[string]any{"path": p, "old_string": "x", "new_string": "y"})
+
+	// append and delete don't rewrite from the model's memory.
+	other := filepath.Join(dir, "other.txt")
+	os.WriteFile(other, []byte("a\n"), 0o644)
+	mustInvoke(t, r, ctx, "append_file", map[string]any{"path": other, "content": "b\n"})
+	mustInvoke(t, r, ctx, "delete_file", map[string]any{"path": other})
 }
 
 // Creating a file that does not exist needs no read first — and having created
@@ -209,10 +242,11 @@ func TestFreshnessFailedMutationSeedsNothing(t *testing.T) {
 		t.Fatal("edit with a missing old_string should have failed")
 	}
 
-	os.WriteFile(p, []byte("two\n"), 0o644)
-	// Never observed (the failed edit read the file internally — that is not an
-	// observation), so the drift guard stays silent.
-	mustInvoke(t, r, ctx, "edit_file", map[string]any{"path": p, "old_string": "two", "new_string": "three"})
+	// The failed edit's internal load is not a read, so the file is still unread.
+	_, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "one", "new_string": "two"}))
+	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+		t.Fatalf("failed edit seeded a read: got %v", err)
+	}
 }
 
 // Whole-file readers anchor a baseline; fragment tools like grep do not — they
@@ -226,10 +260,12 @@ func TestFreshnessObservationSources(t *testing.T) {
 	r := freshnessRegistry()
 	ctx := WithFreshnessLedger(context.Background(), NewFreshnessLedger())
 
-	// grep surfaces matching lines, not the file: no baseline.
+	// grep surfaces matching lines, not the file: it is not a read.
 	mustInvoke(t, r, ctx, "grep", map[string]any{"pattern": "one", "path": p})
-	os.WriteFile(p, []byte("two\n"), 0o644)
-	mustInvoke(t, r, ctx, "write_file", map[string]any{"path": p, "content": "three\n"})
+	_, err := r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": p, "content": "three\n"}))
+	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+		t.Fatalf("grep counted as a read: got %v", err)
+	}
 
 	// file_info is a path-keyed read in the TUI ledger's vocabulary: it observes.
 	info := filepath.Join(dir, "b.txt")
@@ -238,6 +274,11 @@ func TestFreshnessObservationSources(t *testing.T) {
 	os.WriteFile(info, []byte("two\n"), 0o644)
 	if _, err := r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": info, "content": "three\n"})); err == nil {
 		t.Fatal("drift after file_info was allowed")
+	}
+	// file_info shows metadata, not contents, so it doesn't satisfy read-first.
+	_, err = r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": info, "content": "three\n"}))
+	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+		t.Fatalf("file_info counted as a read: got %v", err)
 	}
 }
 

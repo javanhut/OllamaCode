@@ -423,7 +423,7 @@ func EditFileTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "edit_file",
-			Description: "Replace a text snippet inside a file. Matching is exact first; if that fails it falls back to whitespace/indentation-tolerant line matching. By default old_string must resolve to exactly one location (safety). Set replace_all to true to substitute every occurrence. Use this for incremental edits instead of rewriting the whole file with write_file.",
+			Description: "Replace a text snippet inside a file. You MUST read_file the file first; editing a file you have not read is refused. Copy old_string from the read output exactly, including indentation, and include 2-3 unchanged lines around the change so it matches exactly one location. Matching is exact first, then whitespace-tolerant. Set replace_all to true to substitute every occurrence. For several changes to one file, use multi_edit in one call. Prefer this over rewriting the whole file with write_file.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -451,7 +451,7 @@ func EditFileTool() Tool {
 			if err == nil {
 				mode = info.Mode().Perm()
 			}
-			if err := os.WriteFile(a.Path, []byte(updated), mode); err != nil {
+			if err := WriteFileAtomic(a.Path, []byte(updated), mode); err != nil {
 				return "", err
 			}
 			hash, _ := FileHash(a.Path)

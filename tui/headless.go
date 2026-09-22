@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/javanhut/ollama_code/api"
 	"github.com/javanhut/ollama_code/internal/headless"
 	"github.com/javanhut/ollama_code/internal/instructions"
 	"github.com/javanhut/ollama_code/internal/memory"
@@ -123,6 +124,7 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 		MaxSteps:    maxSteps,
 		Trace:       recorder,
 		Permissions: cfg.Permissions,
+		NumCtx:      headlessNumCtx(cfg, host, spec, model),
 	}
 	if cfg.ProjectInstructions == nil || *cfg.ProjectInstructions {
 		cwd, _ := os.Getwd()
@@ -178,4 +180,30 @@ func headlessPathArg(call tools.ToolCall) string {
 		return args.Path
 	}
 	return args.FilePath
+}
+
+// headlessNumCtx picks the context window for a one-shot run the way
+// resolveProfile does for the TUI: a cached profile, else /api/show, capped at
+// maxContextBudget. Without it Ollama applies its small default window and
+// silently truncates the system prompt and early tool results.
+func headlessNumCtx(cfg config, host api.OllamaHost, spec, model string) int {
+	if host.IsCursor() || host.IsOpenAI() {
+		return 0
+	}
+	n := 0
+	for _, key := range []string{spec, model} {
+		if p, ok := cfg.Profiles[key]; ok && p.NumCtx > 0 {
+			n = p.NumCtx
+			break
+		}
+	}
+	if n == 0 {
+		n = defaultContextLimit
+		if show, err := host.ShowModel(model); err == nil {
+			if c := show.ContextLength(); c > 0 {
+				n = c
+			}
+		}
+	}
+	return min(n, maxContextBudget)
 }

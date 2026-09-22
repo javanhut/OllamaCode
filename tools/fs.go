@@ -289,7 +289,7 @@ func WriteFileTool() Tool {
 		Type: "function",
 		Function: Function{
 			Name:        "write_file",
-			Description: "Write text to a file, creating it (and parent directories) if needed. Overwrites existing contents.",
+			Description: "Write text to a file, creating it (and parent directories) if needed. Overwrites existing contents. To overwrite an existing file you MUST read_file it first; for changes to part of a file use edit_file instead.",
 			Parameters: Schema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -331,7 +331,7 @@ func WriteFileTool() Tool {
 			// Format after the syntax gate, before the write: the byte count,
 			// hash, and diff below then describe what landed on disk.
 			content := string(formatBytes(a.Path, []byte(a.Content)))
-			if err := os.WriteFile(a.Path, []byte(content), mode); err != nil {
+			if err := WriteFileAtomic(a.Path, []byte(content), mode); err != nil {
 				return "", err
 			}
 			hash, _ := FileHash(a.Path)
@@ -580,6 +580,8 @@ func GrepTool() Tool {
 					"recursive":   {Type: "boolean", Description: "Search directories recursively. Defaults to true when path is a directory."},
 					"ignore_case": {Type: "boolean", Description: "Case-insensitive match."},
 					"file_types":  {Type: "string", Description: "Comma-separated file extensions to include (e.g. '.go,.md')."},
+					"output_mode": {Type: "string", Description: "'content' (default): matching lines. 'files': only the paths of matching files. 'count': match count per file.", Enum: []string{"content", "files", "count"}},
+					"context":     {Type: "integer", Description: "Lines of context to show before and after each match (content mode only, max 10)."},
 				},
 				Required: []string{"pattern"},
 			},
@@ -591,6 +593,8 @@ func GrepTool() Tool {
 				Recursive  *bool  `json:"recursive"`
 				IgnoreCase bool   `json:"ignore_case"`
 				FileTypes  string `json:"file_types"`
+				OutputMode string `json:"output_mode"`
+				Context    int    `json:"context"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return "", fmt.Errorf("invalid arguments: %w", err)
@@ -605,46 +609,41 @@ func GrepTool() Tool {
 			if err := jailCheck(path); err != nil {
 				return "", err
 			}
-			recursive := false
+			q := grepQuery{Pattern: a.Pattern, Path: path, IgnoreCase: a.IgnoreCase, Context: min(max(a.Context, 0), 10)}
 			if info, err := os.Stat(path); err == nil && info.IsDir() {
-				recursive = true
+				q.Recursive = true
 			}
 			if a.Recursive != nil {
-				recursive = *a.Recursive
+				q.Recursive = *a.Recursive
 			}
-			argv := []string{"-nE", "--color=never"}
-			if a.IgnoreCase {
-				argv = append(argv, "-i")
+			switch a.OutputMode {
+			case "", "content":
+				q.Mode = "content"
+			case "files", "files_with_matches":
+				q.Mode = "files"
+			case "count":
+				q.Mode = "count"
+			default:
+				return "", fmt.Errorf("output_mode must be content, files, or count")
 			}
-			if recursive {
-				argv = append(argv, "-r")
-			}
-			// Skip dot files and dot directories so the model doesn't waste
-			// context on hidden/config files unless explicitly needed.
-			argv = append(argv, "--exclude-dir=.*", "--exclude=.*")
 			if a.FileTypes != "" {
 				for ft := range strings.SplitSeq(a.FileTypes, ",") {
-					ft = strings.TrimSpace(ft)
-					if ft != "" {
-						argv = append(argv, "--include="+includeGlob(ft))
+					if ft = strings.TrimSpace(ft); ft != "" {
+						q.Globs = append(q.Globs, includeGlob(ft))
 					}
 				}
 			}
-			argv = append(argv, "--", a.Pattern, path)
-			cmd := exec.CommandContext(ctx, "grep", argv...)
-			out, err := cmd.CombinedOutput()
-			text := strings.TrimRight(stripANSI(string(out)), "\n")
+			text, err := runGrepSearch(ctx, q)
 			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-					return "no matches", nil
-				}
-				if text != "" {
-					return groupMatches(text), nil
-				}
 				return "", err
 			}
 			if text == "" {
 				return "no matches", nil
+			}
+			// Grouping parses path:line:text, which files/count/context
+			// output doesn't have.
+			if q.Mode != "content" || q.Context > 0 {
+				return capMatches(text), nil
 			}
 			return groupMatches(text), nil
 		},

@@ -167,10 +167,28 @@ func writeWorkspaceTree() (string, error) {
 // /undo rewinds the whole delegation.
 func (m *Model) checkpointBeforeCall() func(tools.ToolCall) {
 	return func(call tools.ToolCall) {
-		if paths := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 {
+		if paths := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(paths) > 0 || tools.ShellMayMutate(call) {
 			m.snapshotBeforeMutate()
 		}
 	}
+}
+
+// workspaceChangedSinceSnapshot reports whether the workspace differs from the
+// turn's pre-mutation snapshot. It is how a shell command's edits arm the
+// verify gate: MutatedPaths can't see inside `sed -i`. With no snapshot to
+// compare (checkpoints off, shadow repo broken) it answers false: arming the
+// gate after every `go test` would be worse than the old behavior.
+func (m *Model) workspaceChangedSinceSnapshot() bool {
+	m.ckpt.mu.Lock()
+	defer m.ckpt.mu.Unlock()
+	if m.ckpt.pending == "" || m.ckpt.off {
+		return false
+	}
+	tree, err := writeWorkspaceTree()
+	if err != nil {
+		return false
+	}
+	return tree != m.ckpt.pending
 }
 
 // snapshotBeforeMutate records the workspace as it stands before the turn's

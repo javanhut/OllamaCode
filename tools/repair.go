@@ -50,6 +50,9 @@ func RepairHint(call ToolCall, err error) string {
 	if se, ok := errors.AsType[*StaleFileError](err); ok {
 		return "error: " + se.Error()
 	}
+	if ue, ok := errors.AsType[*UnreadFileError](err); ok {
+		return "error: " + ue.Error()
+	}
 	if len(call.Function.Arguments) > 0 && !json.Valid(call.Function.Arguments) {
 		raw := string(call.Function.Arguments)
 		if len(raw) > 300 {

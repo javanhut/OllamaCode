@@ -33,6 +33,8 @@ type Options struct {
 	Stream *StreamWriter
 	// AugmentResult is forwarded to agent.Options.AugmentResult.
 	AugmentResult func(call tools.ToolCall, result string) string
+	// NumCtx is the num_ctx to request; 0 leaves the host's default window.
+	NumCtx int
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -65,6 +67,7 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 		Trace:         opts.Trace,
 		Permissions:   opts.Permissions,
 		AugmentResult: opts.AugmentResult,
+		NumCtx:        opts.NumCtx,
 	}
 	if opts.Stream != nil {
 		aopts.OnAssistant = opts.Stream.Assistant

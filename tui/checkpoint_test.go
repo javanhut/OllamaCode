@@ -328,3 +328,53 @@ func TestSnapshotBeforeMutateTimeout(t *testing.T) {
 		t.Fatal("a later write queued behind the wedged snapshot instead of skipping it")
 	}
 }
+
+// A shell command that edits files is invisible to MutatedPaths, but it must
+// still be undoable and must arm the verify gate. A read-only command must not
+// pay for a snapshot.
+func TestCheckpointCoversShellMutations(t *testing.T) {
+	dir := ckptWorkspace(t)
+	target := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := subagentTestModel()
+	m.mode = WriteMode
+	before := m.checkpointBeforeCall()
+
+	before(toolCall("run_shell", `{"command":"ls -la"}`))
+	m.ckpt.mu.Lock()
+	pending := m.ckpt.pending
+	m.ckpt.mu.Unlock()
+	if pending != "" {
+		t.Fatal("a read-only shell command should not be snapshotted")
+	}
+
+	sedCall := toolCall("run_shell", `{"command":"sed -i s/original/changed/ a.txt"}`)
+	before(sedCall)
+	if m.workspaceChangedSinceSnapshot() {
+		t.Fatal("workspace reported changed before the command ran")
+	}
+	if err := os.WriteFile(target, []byte("changed"), 0o644); err != nil { // what sed did
+		t.Fatal(err)
+	}
+	if !m.workspaceChangedSinceSnapshot() {
+		t.Fatal("shell edit did not register as a workspace change")
+	}
+
+	// Arms the verify gate through the tool-result path. The second call keeps
+	// the batch open so Update doesn't start the next model request.
+	m.pending = &pendingBatch{gen: 1, calls: []tools.ToolCall{sedCall, sedCall}, results: make([]api.Message, 2), started: []bool{true, true}}
+	m.Update(toolResultMsg{gen: 1, index: 0, result: api.Message{Role: "tool", Content: tools.EncodeToolSuccess("run_shell", "")}, shellMutated: true})
+	if !m.turnTouchedFiles {
+		t.Fatal("shell mutation did not arm the verify gate")
+	}
+
+	m.finalizeCheckpoint("shell turn")
+	if _, touched := m.undoLast(); len(touched) != 1 {
+		t.Fatalf("expected undo to restore 1 file, got %v", touched)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "original" {
+		t.Fatalf("undo did not restore the shell edit, got %q", got)
+	}
+}
