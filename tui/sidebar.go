@@ -49,30 +49,68 @@ func sidebarInner(w int) int { return w - 4 }
 // still working (so the caller can prefix a spinner). The text is plain so it
 // can be truncated without cutting an escape sequence in half.
 func (m *Model) statusText() (string, bool) {
+	label, elapsed, busy := m.statusParts()
+	return label + elapsed, busy
+}
+
+// statusParts is statusText with the elapsed counter kept separate, so a
+// renderer short on columns can trim the label (usually a long tool name) and
+// still show the counter — the one part that proves a slow turn isn't frozen.
+func (m *Model) statusParts() (label, elapsed string, busy bool) {
 	switch {
 	case m.pending != nil:
-		if label := m.currentToolLabel(); label != "" {
-			return fmt.Sprintf("TOOLS %d/%d · %s%s", m.pending.done, len(m.pending.calls), label, m.elapsedSuffix()), true
+		if tool := m.currentToolLabel(); tool != "" {
+			return fmt.Sprintf("TOOLS %d/%d · %s", m.pending.done, len(m.pending.calls), tool), m.elapsedSuffix(), true
 		}
-		return fmt.Sprintf("TOOLS %d/%d%s", m.pending.done, len(m.pending.calls), m.elapsedSuffix()), true
+		return fmt.Sprintf("TOOLS %d/%d", m.pending.done, len(m.pending.calls)), m.elapsedSuffix(), true
 	case m.retrieving:
-		return "SEARCHING CODE" + m.elapsedSuffix(), true
+		return "SEARCHING CODE", m.elapsedSuffix(), true
 	case m.compacting:
-		return "COMPACTING" + m.elapsedSuffix(), true
+		return "COMPACTING", m.elapsedSuffix(), true
 	case m.streaming && m.streamBuf.Len() == 0:
-		return "THINKING" + m.elapsedSuffix(), true
+		return "THINKING", m.elapsedSuffix(), true
 	case m.streaming:
-		return "STREAMING" + m.elapsedSuffix(), true
+		return "STREAMING", m.elapsedSuffix(), true
 	case m.verifying:
-		return "VERIFYING" + m.elapsedSuffix(), true
+		return "VERIFYING", m.elapsedSuffix(), true
 	case m.dreaming:
-		return "DREAMING", true
+		return "DREAMING", "", true
 	case m.asleep:
-		return "ASLEEP", false
+		return "ASLEEP", "", false
 	case m.runningSubagentJobs() > 0:
-		return fmt.Sprintf("SUB-AGENTS ×%d", m.runningSubagentJobs()), true
+		return fmt.Sprintf("SUB-AGENTS ×%d", m.runningSubagentJobs()), "", true
 	}
-	return "READY", false
+	return "READY", "", false
+}
+
+// statusLine renders the status as ONE styled line no wider than width:
+// spinner (when busy), label, elapsed counter. The spinner's own width is
+// measured rather than assumed — the Dot frames already carry a trailing
+// space, and budgeting for it wrong is what used to push the line onto a
+// second row. When columns run short the label is trimmed first, then the
+// counter, never the spinner.
+func (m *Model) statusLine(width int) string {
+	label, elapsed, busy := m.statusParts()
+	prefix := ""
+	if busy {
+		prefix = strings.TrimRight(m.spinner.View(), " ") + " "
+		if lipgloss.Width(prefix) >= width {
+			prefix = ""
+		}
+	}
+	room := width - lipgloss.Width(prefix)
+	if lipgloss.Width(label)+lipgloss.Width(elapsed) > room {
+		if keep := room - lipgloss.Width(elapsed); keep >= 6 {
+			label = truncatePlain(label, keep)
+		} else {
+			label, elapsed = truncatePlain(label+elapsed, room), ""
+		}
+	}
+	style := mutedStyle
+	if busy {
+		style = bodyStyle.Bold(true)
+	}
+	return prefix + style.Render(label+elapsed)
 }
 
 // toastTTL is how long a toast stays on screen. They used to persist until the
@@ -105,12 +143,7 @@ func (m *Model) sidebarSections(inner int) []string {
 	mode := lipgloss.NewStyle().Foreground(m.mode.color()).Bold(true).Render(strings.ToUpper(m.mode.String()))
 	out = append(out, m.sidebarHeading("Mode")+"\n"+mode+"\n"+mutedStyle.Width(inner).Render(m.mode.hint()))
 
-	text, busy := m.statusText()
-	line := bodyStyle.Bold(true).Render(truncatePlain(text, inner-2))
-	if busy {
-		line = m.spinner.View() + " " + line
-	}
-	status := m.sidebarHeading("Status") + "\n" + line
+	status := m.sidebarHeading("Status") + "\n" + m.statusLine(inner)
 	// Live estimate while streaming, last completed count when idle.
 	m.ensureMeasuredRatio()
 	if tokens := m.displayTokens(); tokens > 0 {

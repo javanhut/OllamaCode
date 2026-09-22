@@ -329,36 +329,9 @@ func resolveEdit(a editArgs) (oldContent, updated string, count, tier int, err e
 		return "", "", 0, 0, err
 	}
 
-	if a.StartLine != 0 || a.EndLine != 0 {
-		if a.StartLine < 1 || a.EndLine < 1 {
-			return "", "", 0, 0, fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
-		}
-		lines := strings.Split(string(data), "\n")
-		if a.StartLine > len(lines) || a.EndLine > len(lines) {
-			return "", "", 0, 0, fmt.Errorf("start_line %d or end_line %d exceeds file length %d", a.StartLine, a.EndLine, len(lines))
-		}
-		if a.StartLine > a.EndLine {
-			return "", "", 0, 0, fmt.Errorf("start_line %d is greater than end_line %d", a.StartLine, a.EndLine)
-		}
-		var newLines []string
-		newLines = append(newLines, lines[:a.StartLine-1]...)
-		newLines = append(newLines, a.NewString)
-		newLines = append(newLines, lines[a.EndLine:]...)
-		updated = strings.Join(newLines, "\n")
-		count = 1
-		tier = 1
-	} else {
-		if a.OldString == "" {
-			return "", "", 0, 0, fmt.Errorf("old_string is required when start_line/end_line are not specified (use write_file to replace or write new content)")
-		}
-		var editErr error
-		updated, count, tier, editErr = applyEdit(string(data), a.OldString, a.NewString, a.ReplaceAll)
-		if editErr != nil {
-			if tier >= 2 {
-				return "", "", count, tier, fmt.Errorf("%w in %s", editErr, a.Path)
-			}
-			return "", "", count, tier, fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
-		}
+	updated, count, tier, err = applyOneEdit(string(data), a)
+	if err != nil {
+		return "", "", count, tier, err
 	}
 
 	// Verify-before-write: if the file parsed cleanly before the edit,
@@ -372,6 +345,45 @@ func resolveEdit(a editArgs) (oldContent, updated string, count, tier int, err e
 	// reported to the model describe what actually landed on disk.
 	updated = string(formatBytes(a.Path, []byte(updated)))
 	return string(data), updated, count, tier, nil
+}
+
+// applyOneEdit applies a single edit_file-shaped edit to content in memory: the
+// start_line/end_line branch or the tiered old_string matcher. No I/O, no
+// syntax gate, no formatting — resolveEdit and multi_edit layer those on top,
+// so both tools share one matcher and one set of error messages.
+func applyOneEdit(content string, a editArgs) (updated string, count, tier int, err error) {
+	if a.StartLine != 0 || a.EndLine != 0 {
+		if a.StartLine < 1 || a.EndLine < 1 {
+			return "", 0, 0, fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
+		}
+		lines := strings.Split(content, "\n")
+		if a.StartLine > len(lines) || a.EndLine > len(lines) {
+			return "", 0, 0, fmt.Errorf("start_line %d or end_line %d exceeds file length %d", a.StartLine, a.EndLine, len(lines))
+		}
+		if a.StartLine > a.EndLine {
+			return "", 0, 0, fmt.Errorf("start_line %d is greater than end_line %d", a.StartLine, a.EndLine)
+		}
+		var newLines []string
+		newLines = append(newLines, lines[:a.StartLine-1]...)
+		newLines = append(newLines, a.NewString)
+		newLines = append(newLines, lines[a.EndLine:]...)
+		updated = strings.Join(newLines, "\n")
+		count = 1
+		tier = 1
+	} else {
+		if a.OldString == "" {
+			return "", 0, 0, fmt.Errorf("old_string is required when start_line/end_line are not specified (use write_file to replace or write new content)")
+		}
+		var editErr error
+		updated, count, tier, editErr = applyEdit(content, a.OldString, a.NewString, a.ReplaceAll)
+		if editErr != nil {
+			if tier >= 2 {
+				return "", count, tier, fmt.Errorf("%w in %s", editErr, a.Path)
+			}
+			return "", count, tier, fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
+		}
+	}
+	return updated, count, tier, nil
 }
 
 // PreviewEdit renders the diff edit_file would actually apply, resolved against
@@ -458,7 +470,7 @@ func EditFileTool() Tool {
 			if diff := unifiedDiff(data, updated, a.Path); diff != "" {
 				result += "\n" + diff
 			}
-			return result, nil
+			return result + postEditDiagnostics(ctx, a.Path), nil
 		},
 	}
 }

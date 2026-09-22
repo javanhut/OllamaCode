@@ -140,7 +140,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 		m[name] = leanMutate
 	}
 	for _, name := range []string{
-		"move_file", "copy_file", "touch", "git_checkout", "git_pull", "git_push",
+		"multi_edit", "move_file", "copy_file", "touch", "git_checkout", "git_pull", "git_push",
 		"git_stash", "git_merge", "git_reset", "process_kill", "parallel_edit",
 		"env_set",
 	} {
@@ -162,7 +162,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 		"get_working_directory", "git_status", "git_diff", "git_log", "git_branch",
 		"find_symbol", "process_list", "disk_usage", "read_session_notes", "recall")
 	setTimeout(m, mutateTimeout,
-		"write_file", "edit_file", "append_file", "delete_file", "move_file",
+		"write_file", "edit_file", "multi_edit", "append_file", "delete_file", "move_file",
 		"copy_file", "make_directory", "touch", "git_add", "git_commit", "git_checkout",
 		"git_stash", "git_merge", "git_reset", "git_remote", "process_kill",
 		"update_session_notes", "append_session_notes", "remember", "forget")
@@ -268,15 +268,16 @@ func EvaluatePermission(rules []PermissionRule, call ToolCall) (effect string, m
 }
 
 // PermissionRuleFor derives the rule an "always allow" answer writes for a call.
-// run_shell widens to the command's first word, because a rule pinned to one
+// run_shell widens to the command's name — its first word, or its subcommand
+// for tools like git and npm (see ShellRulePrefix) — because a rule pinned to one
 // exact command line would never match anything again; every other tool becomes
 // a bare tool-name rule. Callers show the result to the user before saving it —
 // this is a widening of the safety boundary and should never be silent.
 func PermissionRuleFor(call ToolCall) PermissionRule {
 	rule := PermissionRule{Tool: call.Function.Name, Effect: PermissionAllow}
 	if call.Function.Name == "run_shell" {
-		if fields := strings.Fields(shellCallCommand(call.Function.Arguments)); len(fields) > 0 {
-			rule.Cmd = fields[0] + " *"
+		if prefix := ShellRulePrefix(shellCallCommand(call.Function.Arguments)); prefix != "" {
+			rule.Cmd = prefix + " *"
 		}
 	}
 	return rule
@@ -317,7 +318,7 @@ func ruleMatches(rule PermissionRule, call ToolCall) bool {
 	}
 	if cmd := strings.TrimSpace(rule.Cmd); cmd != "" {
 		command := shellCallCommand(call.Function.Arguments)
-		if command == "" || !matchCommand(cmd, command) {
+		if command == "" || !matchShellRule(rule, command) {
 			return false
 		}
 	}
@@ -367,6 +368,11 @@ func matchGlob(pattern, s string) bool {
 // is the dangerous direction for a rule to be misread in.
 func matchCommand(pattern, command string) bool {
 	if prefix, ok := strings.CutSuffix(pattern, "*"); ok {
+		// "go test *" also covers a bare "go test": the space before the
+		// star separates arguments, it does not demand one.
+		if bare, spaced := strings.CutSuffix(prefix, " "); spaced && command == bare {
+			return true
+		}
 		return strings.HasPrefix(command, prefix)
 	}
 	return pattern == command

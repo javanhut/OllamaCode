@@ -34,15 +34,45 @@ answer to stdout — no TUI, for scripts, git hooks, and CI. Without `-p`,
 | Flag | Effect |
 |---|---|
 | `-p`, `--prompt` | Run one prompt headless and print the final answer |
-| `-json` | Emit a single JSON object instead of plain text (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, token counts) |
+| `--output-format` | `text` (default), `json` (one object at the end), or `stream-json` (newline-delimited events as the run progresses) |
+| `-json` | Same as `--output-format json`: a single JSON object (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, token counts) |
 | `-model` | Model for the run (default: the configured model); accepts `provider:model` |
 | `-max-steps` | Cap tool-call rounds (default: configured `max_steps`) |
 | `--debug` | Replace `./ocode.log` with a redacted model/tool execution trace |
 
-Errors go to stderr with a non-zero exit code. The same confinement as the TUI
-applies: file tools are jailed to the workspace and `run_shell` goes through
-the OS sandbox. There is no approval prompt headless — running `ocode -p` is
-itself the trust decision.
+**Piped input.** When stdin is a pipe or a file, it is read (up to 1 MiB) and
+becomes part of the prompt. With `-p`, it is appended after a blank line, so
+`git diff | ocode -p "review this diff"` works. Without `-p`, stdin is the whole
+prompt: `ocode < task.md`. Empty stdin is ignored. `--resume` never reads stdin.
+A script that inherits a stdin which never closes (`ssh` without `-n`, some CI
+runners) should redirect it: `ocode -p "..." </dev/null`.
+
+**Streaming events.** `--output-format stream-json` writes one JSON object per
+line as soon as each thing happens:
+
+| `type` | Fields |
+|---|---|
+| `start` | `model`, `cwd`, `tools` |
+| `text` | `step`, `text` — the model's prose for that step |
+| `tool_call` | `step`, `id`, `name`, `args` (the JSON arguments) |
+| `tool_result` | `step`, `id` (pairs with its `tool_call`), `name`, `ok`, `summary` (the result, cut at 2 KiB) |
+| `result` | every `-json` report field, plus `error` if the run failed |
+
+The `result` line is always the last one, even when the run fails.
+
+**Instruction files.** Headless runs load the same `AGENTS.md` / `OLLAMA.md` /
+`CLAUDE.md` files as the TUI (see [Configuration](configuration.md)). Instruction
+files in subdirectories below the working directory are attached to the tool
+result the first time the run reads a path under them.
+
+**Exit status.** The exit code is `0` on success and `1` when the run fails (model
+unreachable, bad config, and so on); the error goes to stderr. A run that hits
+`-max-steps` still exits `0`: it returns its best partial answer with
+`hit_limit: true`, so check that field if you need to know. Flag errors exit `2`.
+
+The same confinement as the TUI applies: file tools are jailed to the workspace
+and `run_shell` goes through the OS sandbox. There is no approval prompt
+headless — running `ocode -p` is itself the trust decision.
 
 ## Resuming sessions
 
@@ -96,6 +126,12 @@ else
 fi
 ```
 
+```sh
+# Review a diff from stdin and follow the run live with jq.
+git diff | ocode -p "review this diff for bugs" --output-format stream-json \
+  | jq -r 'select(.type=="tool_call") | "→ \(.name)"'
+```
+
 ```yaml
 # CI: fail the job when the model can't explain the lint fallout.
 - name: Explain lint failures
@@ -142,6 +178,8 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 |---|---|
 | `y` / `Enter` | Allow this call |
 | `a` | Allow every pending call in this turn |
+| `s` | Allow calls like this one for the rest of the session (the rule is shown) |
+| `A` | Always allow — saves the shown rule to `config.json` |
 | `n` / `Esc` | Deny |
 
 ### Connection modal (`/settings`, `/provider`)
@@ -224,6 +262,18 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/rate good\|bad [note]` | Rate the last completed turn for the fine-tune dataset; bare `/rate` shows the current verdict (see [training.md](training.md)) |
 | `/jobs` | List background shell and sub-agent jobs; `x` kills the highlighted one |
 | `/compact` | Compress the older half of the history into a summary now |
+| `/rename <name>` | Rename the current saved session |
+| `/title <text>` | Set the session title (pins it against auto-titling) |
+| `/stash`, `/unstash` | Park the current draft / restore the last parked one |
+
+### Project instructions and custom commands
+
+| Command | Description |
+|---|---|
+| `/init [guidance]` | Investigate the repository and write or refresh `AGENTS.md` (switches to write mode; each write is still approved) |
+| `/instructions` | List the instruction files in the system prompt; `/instructions reload` re-reads them |
+| `/commands` | List custom markdown commands and where they live; `/commands reload` re-scans |
+| `/<name> [args]` | Run a custom command — see [configuration](configuration.md#custom-commands) |
 
 ### Notes and memory
 

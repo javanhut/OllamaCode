@@ -55,6 +55,9 @@ var slashCommands = []struct {
 	{"/auto", "switch to autonomous mode"},
 	{"/mode", "switch mode (explore, plan, write, auto)"},
 	{"/research", "guided web research: dedupe sources, synthesize with citations"},
+	{"/init", "generate or update AGENTS.md project instructions"},
+	{"/instructions", "list loaded AGENTS.md instruction files (reload to re-read)"},
+	{"/commands", "list custom markdown commands (reload to re-read)"},
 }
 
 // isSlashCommand reports whether val is exactly a known command. The suggestion
@@ -67,6 +70,19 @@ func isSlashCommand(val string) bool {
 		}
 	}
 	return false
+}
+
+// isBuiltinSlashCommand is isSlashCommand under the name custom-command
+// loading reads it by: a file may not shadow a built-in.
+func isBuiltinSlashCommand(name string) bool { return isSlashCommand(name) }
+
+// isKnownSlashCommand also accepts custom markdown commands.
+func (m *Model) isKnownSlashCommand(val string) bool {
+	if isSlashCommand(val) {
+		return true
+	}
+	_, _, ok := m.findCustomCommand(val)
+	return ok && !strings.Contains(val, " ")
 }
 
 func (m *Model) dismissSlash() {
@@ -88,6 +104,11 @@ func (m *Model) updateSlashSuggestions() {
 			if !dup {
 				matches = append(matches, c.name)
 			}
+		}
+	}
+	for _, c := range m.customCommands {
+		if strings.HasPrefix(c.name, val) && val != c.name && !slices.Contains(matches, c.name) {
+			matches = append(matches, c.name)
 		}
 	}
 	if len(matches) > 0 {
@@ -280,6 +301,19 @@ func slashDesc(name string) string {
 	return ""
 }
 
+// slashDescFor describes built-in and custom commands alike.
+func (m *Model) slashDescFor(name string) string {
+	if d := slashDesc(name); d != "" {
+		return d
+	}
+	for _, c := range m.customCommands {
+		if c.name == name {
+			return c.description
+		}
+	}
+	return ""
+}
+
 // slashMenuRows caps how many commands the completion menu shows at once. A
 // bare "/" matches every command, and drawing all of them buried the transcript
 // and squeezed the sidebar until its box couldn't close.
@@ -289,7 +323,7 @@ func (m *Model) slashSuggestionsView() string {
 	if !m.slashVisible || len(m.slashSuggestions) == 0 {
 		return ""
 	}
-	return m.suggestionMenuView(m.slashSuggestions, slashDesc, m.slashSelected)
+	return m.suggestionMenuView(m.slashSuggestions, m.slashDescFor, m.slashSelected)
 }
 
 // mentionSuggestionsView renders the @file completion menu — same chrome as
@@ -414,15 +448,16 @@ func (m *Model) narrowStatusLine() string {
 	if m.width >= 60 {
 		return ""
 	}
-	text, busy := m.statusText()
-	var line string
-	if busy {
-		line = m.spinner.View() + " " + bodyStyle.Bold(true).Render(text)
-	} else {
-		line = mutedStyle.Render(text)
-	}
+	width := max(m.width, 1)
+	line := m.statusLine(width)
+	// The toast gets whatever the status leaves, and is dropped rather than
+	// squeezed below a readable stub: the old 10-column floor pushed the line
+	// past the terminal edge, the terminal wrapped it, and the band this
+	// function promises is one row tall became two.
 	if toast := m.activeToast(); toast != "" {
-		line += "  " + hintStyle.Render(truncatePlain(toast, max(m.width-lipgloss.Width(text)-4, 10)))
+		if room := width - lipgloss.Width(line) - 2; room >= 10 {
+			line += "  " + hintStyle.Render(truncatePlain(toast, room))
+		}
 	}
 	return line
 }
@@ -650,7 +685,16 @@ func truncatePlain(s string, width int) string {
 		return s
 	}
 	if width <= 3 {
-		return s[:min(len(s), width)]
+		// Rune-wise, not byte-wise: a byte slice can split a multibyte
+		// character (·, ×, a CJK path) into invalid UTF-8.
+		var b strings.Builder
+		for _, r := range s {
+			if lipgloss.Width(b.String()+string(r)) > width {
+				break
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
 	}
 	runes := []rune(s)
 	var b strings.Builder

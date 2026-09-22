@@ -84,7 +84,7 @@ func (r *Registry) SetFileChangeHook(fn func([]string)) {
 
 // fileMutators are the tools whose success should invalidate the semantic index.
 var fileMutators = map[string]bool{
-	"write_file": true, "edit_file": true, "append_file": true,
+	"write_file": true, "edit_file": true, "multi_edit": true, "append_file": true,
 	"delete_file": true, "move_file": true, "copy_file": true, "touch": true,
 }
 
@@ -256,6 +256,7 @@ func DefaultRegistry() *Registry {
 	r.Register(WriteFileTool())
 	r.Register(AppendFileTool())
 	r.Register(EditFileTool())
+	r.Register(MultiEditTool())
 	r.Register(DeleteFileTool())
 	r.Register(MoveFileTool())
 	r.Register(CopyFileTool())

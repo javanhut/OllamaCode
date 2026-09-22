@@ -55,7 +55,7 @@ func serveFake() {
 			return
 		case "initialize":
 			send(map[string]any{"jsonrpc": "2.0", "id": *msg.ID, "result": map[string]any{"capabilities": map[string]any{}}})
-		case "textDocument/didOpen":
+		case "textDocument/didOpen", "textDocument/didChange":
 			var params struct {
 				TextDocument struct {
 					URI string `json:"uri"`
@@ -310,5 +310,30 @@ func TestMergeServersOverridesByName(t *testing.T) {
 	}
 	if len(merged) != len(Builtins())+1 {
 		t.Fatalf("override should replace, not append: %d servers", len(merged))
+	}
+}
+
+// ErrorsFor must answer from a publish sent AFTER the change it forwards, and
+// keep only error severity: the hint in the fake's publish is dropped.
+func TestErrorsForReportsOnlyFreshErrors(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	if err := os.WriteFile(file, []byte("def main():\n    return spam()\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := managerWithFakeServer(t, dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !m.HasServer(file) {
+		t.Fatal("fake server should handle .py")
+	}
+	for i := range 2 { // first call opens, second exercises didChange
+		errs, ok := m.ErrorsFor(ctx, file)
+		if !ok || len(errs) != 1 || errs[0].Message != "undefined name spam" {
+			t.Fatalf("call %d: got ok=%v errs=%#v", i, ok, errs)
+		}
+	}
+	if m.HasServer(filepath.Join(dir, "x.rs")) {
+		t.Fatal("no server should claim .rs")
 	}
 }

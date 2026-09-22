@@ -143,9 +143,9 @@ func TestEvaluatePermissionResourceRuleNeedsResource(t *testing.T) {
 	}
 }
 
-func TestPermissionRuleForShellWidensToFirstWord(t *testing.T) {
+func TestPermissionRuleForShellWidensToSubcommand(t *testing.T) {
 	rule := PermissionRuleFor(permCall("run_shell", `{"command":"npm test -- --watch"}`))
-	if rule.Cmd != "npm *" || rule.Effect != PermissionAllow {
+	if rule.Cmd != "npm test *" || rule.Effect != PermissionAllow {
 		t.Fatalf("unexpected shell rule: %+v", rule)
 	}
 	if rule := PermissionRuleFor(permCall("write_file", `{"path":"a.go"}`)); rule.Tool != "write_file" || rule.Cmd != "" || rule.Path != "" {

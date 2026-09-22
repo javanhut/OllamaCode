@@ -29,6 +29,10 @@ func ckptWorkspace(t *testing.T) string {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	t.Chdir(dir)
+	// Any earlier test that built a Model via New() pinned the jail to the
+	// repo checkout; unpin it so the jail follows this test's working dir.
+	tools.SetWorkspaceRoot("")
+	t.Cleanup(func() { tools.SetWorkspaceRoot("") })
 	return dir
 }
 

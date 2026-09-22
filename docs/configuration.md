@@ -52,6 +52,65 @@ outranks a stored key. Prefer that over typing the key.
 | `routes` | Mode → model spec, see [routing](routing.md) |
 | `providers` | Extra endpoints, see below |
 | `mcp_servers` | External MCP stdio servers, see below |
+| `project_instructions` | `false` stops loading `AGENTS.md` / `OLLAMA.md` / `CLAUDE.md` instruction files (on by default), see below |
+| `instructions` | Extra instruction files to load, e.g. `["~/rules/go.md", "docs/CONVENTIONS.md"]`; relative paths resolve against the working directory |
+
+## Project instructions
+
+Ocode reads the same standing-instruction files as opencode, Codex and Claude
+Code, so a repository that already has one works unchanged. They are added to
+the system prompt, broad to specific:
+
+1. the global `AGENTS.md` in the config directory (`~/.config/ollama_code/AGENTS.md` on Linux);
+2. the files listed in `instructions`;
+3. one file per directory from the repository root (the nearest `.git` or
+   `.ivaldi`) down to the working directory — the first of `AGENTS.md`,
+   `OLLAMA.md`, `CLAUDE.md` present in each.
+
+Files with identical content are loaded once. The total is capped at 32 KiB:
+the broadest files are dropped first, and a single oversized file is truncated
+with a visible marker. An instruction file in a directory *below* the working
+directory is attached the first time the model reads or edits something there,
+so large monorepos don't pay for rules the task never touches. Sub-agents and
+`parallel_edit` workers get the same instructions.
+
+Files are re-read before every turn, so an edit (or `/init`) takes effect on
+the next message. `/instructions` lists what is loaded. Instructions rank below
+the mode rules, permission prompts and safety rules — a rules file cannot grant
+itself write access.
+
+## Custom commands
+
+A markdown file in a commands directory becomes a slash command: the file name
+is the command, the body is the prompt it sends.
+
+| Directory | Scope |
+|---|---|
+| `~/.config/ollama_code/commands/` | Global |
+| `.ollama_code/commands/`, `.opencode/command(s)/`, `.claude/commands/` in the repository | Project (overrides a global command of the same name) |
+
+```markdown
+---
+description: Review staged changes
+mode: explore
+---
+Review the staged changes, focusing on $ARGUMENTS.
+
+!`git diff --cached`
+```
+
+- `$ARGUMENTS` is everything typed after the command; `$1`…`$9` are positional
+  (quotes group words), and the highest one used takes the rest.
+  With no placeholder, the arguments are appended.
+- `` !`cmd` `` is replaced by the command's output (10 s timeout, 16 KiB cap).
+  Commands from a **project** directory only run when they are read-only
+  (the explore-mode allowlist: `git diff`, `ls`, `cat`, …) — a cloned
+  repository cannot make `/review` run `curl … | sh`. Global commands are
+  yours and run unrestricted.
+- `@path` mentions attach files exactly as in a typed message.
+- `mode` (optional) switches mode before the prompt is sent.
+- Subdirectories namespace commands: `commands/git/pr.md` is `/git:pr`.
+  A file cannot shadow a built-in command.
 
 ## `profiles`
 
@@ -213,7 +272,7 @@ destructive call in write mode asks.
 |---|---|
 | `tool` | Glob over the tool name: `write_file`, `git_*`, `*` |
 | `path` | Glob matched against the call's target paths. `secrets/**` is a subtree; a pattern with no `/` matches the base name at any depth |
-| `cmd` | Prefix match against `run_shell`'s command when it ends in `*`, otherwise an exact match |
+| `cmd` | Matched against each simple command in `run_shell`'s command line: a prefix match when it ends in `*` (`go test *` also matches a bare `go test`), otherwise exact. `allow` needs every piece of a compound line covered; `deny`/`ask` fire on any piece — see [safety](safety.md#approval-prompts) |
 | `effect` | `allow` skips the prompt, `ask` forces it, `deny` rejects the call |
 
 `deny` outranks `ask`, which outranks `allow`, regardless of the order rules are
@@ -225,7 +284,8 @@ a headless run (`ocode -p`) and inside a spawned subagent, where there is nobody
 to ask. A malformed glob matches nothing, so a typo fails closed.
 
 Pressing `A` at the permission prompt writes an `allow` rule for the current
-call and saves it here. The modal shows the exact rule before you press it.
+call and saves it here; `s` grants the same rule for this session only. The
+modal shows the exact rule before you press either.
 
 ## `lsp_servers`
 

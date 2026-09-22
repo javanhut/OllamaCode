@@ -309,6 +309,55 @@ func (m *Manager) Diagnostics(ctx context.Context, paths []string) []string {
 	return out
 }
 
+// ErrorsFor re-syncs one just-written file and returns only the error-severity
+// diagnostics the server publishes for its NEW contents. The cached publish is
+// cleared before the change notification, so a server that answers with the
+// pre-edit set cannot be mistaken for a verdict on the edit. ok=false means no
+// server applies or none answered in time — silence, not "clean".
+func (m *Manager) ErrorsFor(ctx context.Context, path string) (errs []Diagnostic, ok bool) {
+	client, server, found := m.clientFor(ctx, path)
+	if !found {
+		return nil, false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, false
+	}
+	client.clearDiagnostics(pathToURI(abs))
+	uri, synced := m.sync(client, server, path)
+	if !synced {
+		return nil, false
+	}
+	deadline := time.Now().Add(diagnosticsWait)
+	for {
+		if diags, published := client.diagnosticsFor(uri); published {
+			for _, d := range diags {
+				if d.Severity == SeverityError {
+					errs = append(errs, d)
+				}
+			}
+			return errs, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-client.done:
+			return nil, false
+		case <-time.After(diagnosticsPoll):
+		}
+	}
+}
+
+// HasServer reports whether an installed server handles path, without starting
+// it. Lets a caller skip all LSP work for a file no server can answer for.
+func (m *Manager) HasServer(path string) bool {
+	_, ok := m.serverFor(path)
+	return ok
+}
+
 // awaitDiagnostics polls for a publish covering uri. The protocol gives no
 // reply to wait on, so a bounded poll is the honest implementation.
 func (m *Manager) awaitDiagnostics(ctx context.Context, client *Client, uri string) []Diagnostic {

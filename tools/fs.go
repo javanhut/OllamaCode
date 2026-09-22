@@ -339,7 +339,7 @@ func WriteFileTool() Tool {
 			if diff := unifiedDiff(string(old), content, a.Path); diff != "" {
 				result += "\n" + diff
 			}
-			return result, nil
+			return result + postEditDiagnostics(ctx, a.Path), nil
 		},
 	}
 }

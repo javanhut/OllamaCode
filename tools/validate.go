@@ -222,8 +222,14 @@ func normalizeValue(prop Property, raw json.RawMessage) (json.RawMessage, bool) 
 		}
 		return json.RawMessage(strconv.FormatBool(v)), true
 	case "object":
+		if kind == "string" {
+			raw, kind = unwrapStringified(raw)
+		}
 		return raw, kind == "object"
 	case "array":
+		if kind == "string" {
+			raw, kind = unwrapStringified(raw)
+		}
 		if kind != "array" {
 			return nil, false
 		}
@@ -246,6 +252,22 @@ func normalizeValue(prop Property, raw json.RawMessage) (json.RawMessage, bool) 
 	default:
 		return raw, true
 	}
+}
+
+// unwrapStringified decodes a JSON value a model double-encoded as a string —
+// `"edits": "[{...}]"` for `"edits": [{...}]` is a common weak-model habit.
+// Only the string's own decoded kind is returned; the caller still checks it,
+// so a plain string that is not JSON stays the type error it was.
+func unwrapStringified(raw json.RawMessage) (json.RawMessage, string) {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return raw, "string"
+	}
+	inner := json.RawMessage(strings.TrimSpace(s))
+	if !json.Valid(inner) {
+		return raw, "string"
+	}
+	return inner, jsonKind(inner)
 }
 
 func contains(xs []string, s string) bool {

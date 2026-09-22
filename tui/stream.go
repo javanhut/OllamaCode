@@ -81,6 +81,10 @@ func (m *Model) submit() tea.Cmd {
 		return m.dequeueNext()
 	}
 
+	// Only here, once the message is actually starting a turn — never while a
+	// batch is running: sub-agent and parallel_edit goroutines read the block.
+	m.refreshInstructions()
+
 	// Attach any @-mentioned files to this turn (injected via the dynamic
 	// context; the user's message stays as typed). Computed before the
 	// escalation hold so a confirmed message still carries its attachments.
@@ -695,6 +699,12 @@ func (m *Model) activeSystemPrompt() string {
 		section = m.familyPromptSection()
 	default:
 		section = m.familyPromptSection()
+	}
+	// Instructions go last: they are the most project-specific part of the
+	// prefix and, like the rest of it, stable until /instructions reload. The
+	// cursor agent reads the repo's rule files itself.
+	if !m.host.IsCursor() {
+		return base + section + environmentBlock() + m.instructionsBlock
 	}
 	return base + section + environmentBlock()
 }

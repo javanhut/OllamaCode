@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -328,5 +329,50 @@ func TestUpRecallsHistoryFromFirstRow(t *testing.T) {
 	mm, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	if got := mm.(*Model).input.Value(); got != "older message" {
 		t.Fatalf("up did not recall history, got %q", got)
+	}
+}
+
+// A busy status must stay on one row at every width: the sidebar line used to
+// budget two columns for a three-column spinner prefix and wrap mid-label, and
+// the narrow strip reserved a 10-column toast floor that pushed it past the
+// terminal edge. The elapsed counter must survive truncation of a long tool name.
+func TestStatusLineFitsWidth(t *testing.T) {
+	m := &Model{mode: WriteMode, height: 40, contextLimit: 32000}
+	m.todos = &todoList{}
+	m.streamBuf = &strings.Builder{}
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	m.spinner = s
+	m.busySince = time.Now().Add(-75 * time.Second)
+	m.pending = &pendingBatch{
+		calls:   []tools.ToolCall{{Function: tools.ToolCallFunction{Name: "semantic_search_with_a_very_long_name"}}},
+		results: make([]api.Message, 1), started: make([]bool, 1),
+	}
+	m.toast = "allowed for this session: allow run_shell cmd:go test *"
+
+	for _, w := range []int{8, 20, 30, 59} {
+		m.width = w
+		line := m.narrowStatusLine()
+		if got := lipgloss.Width(line); got > w || lipgloss.Height(line) != 1 {
+			t.Errorf("width %d: narrow status is %d cols × %d rows: %q", w, got, lipgloss.Height(line), stripANSI(line))
+		}
+		if w >= 20 && !strings.Contains(stripANSI(line), "75s") {
+			t.Errorf("width %d: elapsed counter lost: %q", w, stripANSI(line))
+		}
+	}
+
+	m.width = 120
+	line := m.statusLine(sidebarInner(sidebarCols))
+	if got := lipgloss.Width(line); got > sidebarInner(sidebarCols) {
+		t.Errorf("sidebar status is %d cols, inner is %d: %q", got, sidebarInner(sidebarCols), stripANSI(line))
+	}
+	if plain := stripANSI(line); strings.Contains(plain, "  ") || !strings.HasSuffix(plain, "75s") {
+		t.Errorf("sidebar status spacing/counter wrong: %q", plain)
+	}
+}
+
+func TestTruncatePlainNarrowIsRuneSafe(t *testing.T) {
+	if got := truncatePlain("·×·×", 2); got != "·×" {
+		t.Fatalf("truncatePlain = %q", got)
 	}
 }

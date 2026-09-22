@@ -19,7 +19,7 @@ import (
 )
 
 var diffPreviewTools = map[string]bool{
-	"write_file": true, "edit_file": true, "append_file": true,
+	"write_file": true, "edit_file": true, "multi_edit": true, "append_file": true,
 }
 
 // webContentTools pull attacker-controlled bytes into the conversation. Their
@@ -114,6 +114,17 @@ func (m *Model) recordPermission(call tools.ToolCall, decision string) {
 	}
 	_ = m.trace.Record(tracepkg.Event{Kind: "permission", Turn: m.turnGen, Model: m.modelName,
 		Tool: call.Function.Name, Arguments: call.Function.Arguments, Metadata: map[string]any{"decision": decision}})
+}
+
+// addSessionPermission remembers an allow rule until the process exits.
+func (m *Model) addSessionPermission(rule tools.PermissionRule) {
+	for _, existing := range m.sessionPermissions {
+		if existing.Equal(rule) {
+			return
+		}
+	}
+	m.sessionPermissions = append(m.sessionPermissions, rule)
+	m.toast = "allowed for this session: " + rule.String()
 }
 
 // savePermissionRule adds a rule to the live config and writes it to disk, so
@@ -213,6 +224,11 @@ func (m *Model) processPendingTools() tea.Cmd {
 		batchResults := m.pending.results
 		deniedTool := m.pending.deniedTool
 		m.history = append(m.history, batchResults...)
+		// Instruction files from subdirectories the batch just touched ride in
+		// AFTER the whole batch, so no call is ever split from its result.
+		if extra := m.lazyInstructions(batchCalls); extra != "" {
+			m.history = append(m.history, advisory(extra))
+		}
 		// The batch is now whole, so anything held back to avoid splicing into
 		// it (an /undo typed mid-turn) can land here.
 		m.flushDeferredAdvisory()
@@ -649,6 +665,12 @@ func computePreview(call tools.ToolCall) string {
 		oldStr, _ := args["old_string"].(string)
 		newStr, _ := args["new_string"].(string)
 		return path + "\n" + simpleDiff(oldStr, newStr, 3)
+	case "multi_edit":
+		path, _ := args["path"].(string)
+		if diff, ok := tools.PreviewMultiEdit(path, call.Function.Arguments); ok {
+			return diff
+		}
+		return path + "\n(multi_edit: the edits do not all match the file as it is now — approving will fail without writing)"
 	case "parallel_edit":
 		tasks, _ := args["tasks"].([]any)
 		var b strings.Builder
@@ -821,6 +843,11 @@ func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
 	// which is the fail-safe answer.
 	if effect, ok := tools.EvaluatePermission(m.cfg.Permissions, call); ok {
 		return effect != tools.PermissionAllow
+	}
+	// Session rules come from the "s" key and only ever allow; config deny and
+	// ask rules have already answered above, so they still win.
+	if effect, ok := tools.EvaluatePermission(m.sessionPermissions, call); ok && effect == tools.PermissionAllow {
+		return false
 	}
 	if m.pending.allowAll {
 		return false

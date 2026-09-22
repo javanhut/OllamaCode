@@ -325,7 +325,7 @@ func (m *Model) parallelEditTool() tools.Tool {
 					constrain, constraintCache := m.subagentConstraintOptions()
 					res, err := agent.Run(ctx, m.host, m.plannerRegistry(stage), prompt, agent.Options{
 						Model:              m.modelName,
-						System:             plannerSystem,
+						System:             plannerSystem + m.instructionsBlock,
 						MaxSteps:           parallelEditMaxSteps,
 						NumCtx:             m.contextLimit,
 						ConstrainToolCalls: constrain,

@@ -64,6 +64,14 @@ func (c *Client) storeDiagnostics(raw json.RawMessage) {
 	c.diags[params.URI] = params.Diagnostics
 }
 
+// clearDiagnostics forgets the last publish for uri, so the next wait sees only
+// a publish sent after the change that follows — not the stale set from before.
+func (c *Client) clearDiagnostics(uri string) {
+	c.diagMu.Lock()
+	defer c.diagMu.Unlock()
+	delete(c.diags, uri)
+}
+
 func (c *Client) diagnosticsFor(uri string) ([]Diagnostic, bool) {
 	c.diagMu.RLock()
 	defer c.diagMu.RUnlock()

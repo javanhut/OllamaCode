@@ -133,7 +133,7 @@ func (m *Model) subagentOptions(before func(tools.ToolCall), onMutation func()) 
 	}
 	return agent.Options{
 		Model:    m.modelName,
-		System:   subagentSystem,
+		System:   subagentSystem + m.instructionsBlock, // the repo's rules bind delegated work too
 		MaxSteps: subagentMaxSteps,
 		NumCtx:   m.contextLimit,
 		ToolFilter: func(name string) bool {

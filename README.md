@@ -61,6 +61,9 @@ re-read, and preamble-echo detection stop a confused model from spinning.
 
 **Reliable edits.** `edit_file` matches in tiers (exact → whitespace-tolerant →
 fuzzy), refuses edits that would break a file's syntax, and returns a diff.
+`multi_edit` applies several replacements to one file atomically, and after
+every edit the language server's errors for that file come straight back in the
+tool result.
 `parallel_edit` splits a large change into independent subtasks, plans each in
 parallel, then applies them serially with conflict detection.
 
@@ -78,6 +81,21 @@ the last one.
 **Dream mode.** After three minutes idle it drifts into background reflection —
 candidate fixes, consolidated notes, promoted memory — and tells you what it
 thought about when you come back.
+
+**Project instructions and custom commands.** `AGENTS.md` / `CLAUDE.md`
+files are loaded from the repo root down to the working directory (and lazily
+from subdirectories the model works in); `/init` writes one. Markdown files in
+`.ollama_code/commands/` become slash commands with `$ARGUMENTS` and
+`` !`cmd` `` expansion — opencode and Claude Code command files work as-is.
+
+**Precise approvals.** Approve once, for the turn, for the session (`s`), or
+permanently (`A`). Shell rules are scoped to the subcommand (`git status *`, not
+`git *`) and matched per piece of a compound command, so an approval can't be
+smuggled into `git status && curl … | sh`.
+
+**Scriptable.** `ocode -p` takes piped stdin (`git diff | ocode -p "review
+this"`) and `--output-format stream-json` emits newline-delimited events for
+tools and CI.
 
 Plus per-model profiles discovered from `/api/show`, sub-agents, session notes,
 save/load, token-budgeted prompt assembly, transcript search, and mouse

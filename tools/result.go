@@ -197,3 +197,18 @@ func truncateResult(value string, limit int) (string, bool) {
 	}
 	return h + partialTruncMarker + t, true
 }
+
+// AppendEvidence adds extra text to an already-encoded tool result without
+// breaking it: an envelope gains one more evidence item and is re-encoded, so
+// ToolResultOK, pruning and traces still decode it. Legacy plain-text results
+// get the text appended. extra == "" returns raw unchanged.
+func AppendEvidence(raw, extra string) string {
+	if strings.TrimSpace(extra) == "" {
+		return raw
+	}
+	if env, ok := DecodeToolResult(raw); ok {
+		env.Evidence = append(env.Evidence, strings.TrimSpace(extra))
+		return marshalEnvelope(env)
+	}
+	return raw + extra
+}

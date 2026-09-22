@@ -20,6 +20,7 @@ type cliFlags struct {
 	prompt    string
 	model     string
 	json      bool
+	format    string // --output-format: text | json | stream-json
 	maxSteps  int
 	debug     bool
 	resume    string // session name; "" with resumeSet = latest auto-save
@@ -71,16 +72,73 @@ func parseFlags(args []string, stderr io.Writer) (cliFlags, error) {
 	fs.StringVar(&f.prompt, "p", "", "run one prompt non-interactively and print the final answer (shorthand for -prompt)")
 	fs.StringVar(&f.prompt, "prompt", "", "run one prompt non-interactively and print the final answer")
 	fs.StringVar(&f.model, "model", "", "model for the headless run (default: configured model); accepts provider:model")
-	fs.BoolVar(&f.json, "json", false, "with -p, emit a single JSON object instead of plain text")
+	fs.BoolVar(&f.json, "json", false, "with -p, emit a single JSON object instead of plain text (same as --output-format json)")
+	fs.StringVar(&f.format, "output-format", "", "with -p: text (default), json (one object), or stream-json (newline-delimited events)")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "with -p, cap tool-call rounds (default: configured max_steps)")
 	fs.BoolVar(&f.debug, "debug", false, "write a fresh redacted model/tool trace to ./ocode.log")
 	if err := fs.Parse(args); err != nil {
-		return cliFlags{}, err
+		return cliFlags{}, err // flag already printed it
 	}
+	f, err := validateFlags(f)
+	if err != nil {
+		// main exits 2 without printing, so say why here.
+		fmt.Fprintln(stderr, "error:", err)
+	}
+	return f, err
+}
+
+// validateFlags checks combinations the flag package cannot, and resolves the
+// -json alias into the output format.
+func validateFlags(f cliFlags) (cliFlags, error) {
 	if f.resumeSet && f.prompt != "" {
 		return cliFlags{}, fmt.Errorf("--resume cannot be combined with -p (headless runs start fresh)")
 	}
+	switch f.format {
+	case "":
+		if f.json {
+			f.format = "json"
+		}
+	case "text", "json", "stream-json":
+		if f.json && f.format != "json" {
+			return cliFlags{}, fmt.Errorf("-json conflicts with --output-format %s", f.format)
+		}
+	default:
+		return cliFlags{}, fmt.Errorf("--output-format must be text, json, or stream-json (got %q)", f.format)
+	}
 	return f, nil
+}
+
+// maxStdinPrompt caps piped input. A prompt is sent to the model on every
+// step, so anything near this size would not fit a local model's context
+// anyway; failing loudly beats silently truncating the user's input.
+const maxStdinPrompt = 1 << 20
+
+// mergeStdinPrompt folds piped stdin into the headless prompt, the way
+// opencode's `run` does: with -p, stdin is appended after a blank line (so
+// `git diff | ocode -p "review this"` works); without -p, stdin IS the prompt.
+// An empty or whitespace-only stdin leaves the prompt unchanged.
+func mergeStdinPrompt(prompt string, stdin io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(stdin, maxStdinPrompt+1))
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	if len(data) > maxStdinPrompt {
+		return "", fmt.Errorf("piped stdin exceeds %d bytes; pass a file path in the prompt and let the model read it instead", maxStdinPrompt)
+	}
+	piped := strings.TrimRight(string(data), "\n\r\t ")
+	if strings.TrimSpace(piped) == "" {
+		return prompt, nil
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return piped, nil
+	}
+	return prompt + "\n\n" + piped, nil
+}
+
+// stdinPiped reports whether stdin is a pipe or file rather than a terminal.
+func stdinPiped() bool {
+	st, err := os.Stdin.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice == 0
 }
 
 func main() {
@@ -108,6 +166,15 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "debug log:", debugPath)
 	}
+	// Piped input only means a headless run when nothing asked for the TUI
+	// explicitly: --resume is interactive, and bubbletea needs a real terminal.
+	if !f.resumeSet && stdinPiped() {
+		f.prompt, err = mergeStdinPrompt(f.prompt, os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	}
 	if f.prompt == "" {
 		if f.resumeSet {
 			if err := tui.RunResumeWithDebug(f.resume, debugPath); err != nil {
@@ -123,11 +190,12 @@ func main() {
 		return
 	}
 	err = tui.RunHeadless(context.Background(), tui.HeadlessOptions{
-		Prompt:    f.prompt,
-		Model:     f.model,
-		MaxSteps:  f.maxSteps,
-		JSON:      f.json,
-		DebugPath: debugPath,
+		Prompt:       f.prompt,
+		Model:        f.model,
+		MaxSteps:     f.maxSteps,
+		JSON:         f.json,
+		OutputFormat: f.format,
+		DebugPath:    debugPath,
 	}, os.Stdout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

@@ -28,6 +28,11 @@ type Options struct {
 	// to gate, so only deny rules bite here — but they must, since -p is exactly
 	// the mode where nobody is watching.
 	Permissions []tools.PermissionRule
+	// Stream, when set, receives the run's events as they happen (the
+	// --output-format stream-json surface). Nil disables streaming.
+	Stream *StreamWriter
+	// AugmentResult is forwarded to agent.Options.AugmentResult.
+	AugmentResult func(call tools.ToolCall, result string) string
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -53,13 +58,19 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 	if opts.System == "" {
 		opts.System = DefaultSystem
 	}
-	return agent.Run(ctx, host, reg, prompt, agent.Options{
-		Model:       opts.Model,
-		System:      opts.System,
-		MaxSteps:    opts.MaxSteps,
-		Trace:       opts.Trace,
-		Permissions: opts.Permissions,
-	})
+	aopts := agent.Options{
+		Model:         opts.Model,
+		System:        opts.System,
+		MaxSteps:      opts.MaxSteps,
+		Trace:         opts.Trace,
+		Permissions:   opts.Permissions,
+		AugmentResult: opts.AugmentResult,
+	}
+	if opts.Stream != nil {
+		aopts.OnAssistant = opts.Stream.Assistant
+		aopts.OnToolResult = opts.Stream.ToolResult
+	}
+	return agent.Run(ctx, host, reg, prompt, aopts)
 }
 
 // NewReport shapes a run result for -json output.

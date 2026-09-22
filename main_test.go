@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +97,56 @@ func TestParseFlagsResumeDoesNotSwallowFlags(t *testing.T) {
 func TestParseFlagsResumeRejectsHeadless(t *testing.T) {
 	if _, err := parseFlags([]string{"--resume", "-p", "hi"}, io.Discard); err == nil {
 		t.Fatal("--resume with -p should fail")
+	}
+}
+
+func TestMergeStdinPrompt(t *testing.T) {
+	cases := []struct {
+		name, prompt, stdin, want string
+	}{
+		{"stdin only becomes the prompt", "", "fix the bug\n", "fix the bug"},
+		{"prompt plus stdin appends after a blank line", "review this", "diff --git a b\n", "review this\n\ndiff --git a b"},
+		{"empty stdin keeps the prompt", "hello", "", "hello"},
+		{"whitespace stdin keeps the prompt", "hello", " \n\t\n", "hello"},
+		{"leading whitespace in stdin is preserved", "", "  indented\n", "  indented"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := mergeStdinPrompt(c.prompt, strings.NewReader(c.stdin))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Fatalf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestMergeStdinPromptTooLarge(t *testing.T) {
+	big := strings.Repeat("x", maxStdinPrompt+1)
+	if _, err := mergeStdinPrompt("p", strings.NewReader(big)); err == nil {
+		t.Fatal("expected an error for oversized stdin")
+	}
+	exact := strings.Repeat("x", maxStdinPrompt)
+	if _, err := mergeStdinPrompt("", strings.NewReader(exact)); err != nil {
+		t.Fatalf("stdin at the cap should be accepted: %v", err)
+	}
+}
+
+func TestParseFlagsOutputFormat(t *testing.T) {
+	f, err := parseFlags([]string{"-p", "x", "--output-format", "stream-json"}, io.Discard)
+	if err != nil || f.format != "stream-json" {
+		t.Fatalf("format = %q, err = %v", f.format, err)
+	}
+	f, err = parseFlags([]string{"-p", "x", "-json"}, io.Discard)
+	if err != nil || f.format != "json" {
+		t.Fatalf("-json should imply json format, got %q err %v", f.format, err)
+	}
+	if _, err := parseFlags([]string{"-p", "x", "--output-format", "yaml"}, io.Discard); err == nil {
+		t.Fatal("expected an error for an unknown format")
+	}
+	if _, err := parseFlags([]string{"-p", "x", "-json", "--output-format", "stream-json"}, io.Discard); err == nil {
+		t.Fatal("expected -json to conflict with a different --output-format")
 	}
 }

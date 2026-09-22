@@ -20,14 +20,25 @@ git operations.
 ```
 y / Enter   allow once
 a           allow every pending call this turn
+s           allow for this session — the same rule A would save, kept in memory
 A           always allow — saves a rule to config.json
 n / Esc     deny
 ```
 
-`A` is the only answer that outlives the session. The modal prints the exact
-rule it will write before you press it: a bare tool name for most tools, and for
-`run_shell` a prefix rule on the command's first word (`npm *`), because a rule
-pinned to one exact command line would never match again.
+`A` is the only answer that outlives the session; `s` lasts until you quit. The
+modal prints the exact rule before you press either: a bare tool name for most
+tools, and for `run_shell` a prefix rule on the command's name — its first word,
+or its subcommand for tools like git, npm, go and cargo (`git status *`,
+`npm run test *`) — because a rule pinned to one exact command line would never
+match again, and one widened to `git *` would also approve `git push --force`.
+
+Shell rules are matched per simple command. An `allow` rule covers a command
+line only when **every** piece of it (split on `|`, `&&`, `||`, `;`, `&` and
+newlines) is covered by the rule or is a read-only command explore mode already
+permits, and never when the line uses command substitution — so
+`allow git status *` covers `git status | head` but not
+`git status && curl … | sh`. `deny` and `ask` rules match if **any** piece
+matches, so `deny rm *` also catches `cd build && rm -rf .`.
 
 Denial ends the current model turn immediately. Calls in the same batch that
 have not started are cancelled, Ocode asks what should change or why the call

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/javanhut/ollama_code/internal/lsp"
 )
@@ -28,6 +29,11 @@ var (
 	lspExtra     map[string]lsp.Server
 	lspDisabled  bool
 	lspManager   *lsp.Manager
+	// lspEditFeedback gates the post-edit diagnostics below. Off until a UI
+	// calls ConfigureLSP(true, ...): the tier is lazily enabled by default so
+	// the code_* tools work in tests, but an edit in a unit test must never
+	// start (or wait on) a real gopls.
+	lspEditFeedback bool
 )
 
 // ConfigureLSP records the workspace and any user-declared servers, and
@@ -41,6 +47,7 @@ func ConfigureLSP(enabled bool, workspace string, extra map[string]lsp.Server) {
 		lspManager = nil
 	}
 	lspDisabled = !enabled
+	lspEditFeedback = enabled
 	lspWorkspace = workspace
 	lspExtra = extra
 }
@@ -142,4 +149,59 @@ func LSPDiagnostics(ctx context.Context, paths []string) string {
 		out += fmt.Sprintf("\n… (%d more diagnostics omitted)", extra)
 	}
 	return out
+}
+
+// Post-edit feedback: after edit_file / write_file / multi_edit land, the
+// file's own language-server errors are appended to the result, so the model
+// sees a type error on the very next step instead of at the end-of-turn gate
+// several edits later (opencode does the same). Errors only, capped, and for
+// the edited file only: warnings and other files' pre-existing findings would
+// invite the model to wander off the task.
+const (
+	maxEditDiagnostics  = 20
+	editDiagnosticsWait = 5 * time.Second
+)
+
+// postEditDiagnostics returns the suffix to append to a successful write's
+// result, or "". A no-op — no server spawn, no wait — when LSP is off or no
+// installed server handles the file.
+func postEditDiagnostics(ctx context.Context, path string) string {
+	lspMu.Lock()
+	enabled := lspEditFeedback
+	lspMu.Unlock()
+	if !enabled || path == "" {
+		return ""
+	}
+	m := manager()
+	if m == nil || !m.HasServer(path) {
+		return ""
+	}
+	dctx, cancel := context.WithTimeout(ctx, editDiagnosticsWait)
+	defer cancel()
+	errs, ok := m.ErrorsFor(dctx, path)
+	if !ok {
+		return ""
+	}
+	return formatEditDiagnostics(path, errs)
+}
+
+// formatEditDiagnostics renders error diagnostics in the block shape the model
+// is told to fix. Empty input renders nothing: a clean file needs no comment.
+func formatEditDiagnostics(path string, errs []lsp.Diagnostic) string {
+	if len(errs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nLSP errors detected in this file, please fix:\n<diagnostics file=\"")
+	b.WriteString(path)
+	b.WriteString("\">\n")
+	for i, d := range errs {
+		if i == maxEditDiagnostics {
+			fmt.Fprintf(&b, "... and %d more\n", len(errs)-maxEditDiagnostics)
+			break
+		}
+		fmt.Fprintf(&b, "ERROR [%d:%d] %s\n", d.Range.Start.Line+1, d.Range.Start.Character+1, strings.TrimSpace(d.Message))
+	}
+	b.WriteString("</diagnostics>")
+	return b.String()
 }

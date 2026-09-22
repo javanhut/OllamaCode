@@ -53,6 +53,19 @@ type Options struct {
 	// own system message, so System is not prepended again; task is appended
 	// as the next user message. The slice is copied before use.
 	PriorMessages []api.Message
+	// OnAssistant, when set, observes every model reply as it arrives: the
+	// prose content plus the tool calls it made (nil for the final answer,
+	// including the forced synthesis after a step-limit stop). Headless
+	// stream-json output is built on it. It must not block for long.
+	OnAssistant func(content string, calls []tools.ToolCall)
+	// OnToolResult, when set, observes each tool call's outcome in dispatch
+	// order — including calls the loop refused (filtered or repeated) — with
+	// failed=true when the call errored or its command exited nonzero.
+	OnToolResult func(call tools.ToolCall, result string, failed bool)
+	// AugmentResult, when set, may rewrite a successfully dispatched tool's
+	// result before the model sees it (e.g. to attach instruction files the
+	// call just made relevant). Returning result unchanged is a no-op.
+	AugmentResult func(call tools.ToolCall, result string) string
 }
 
 // Result is the outcome of a headless run.
@@ -213,6 +226,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			}
 			res.Output = output
 			res.Messages = append(msgs, api.Message{Role: "assistant", Content: output})
+			if opts.OnAssistant != nil {
+				opts.OnAssistant(output, nil)
+			}
 			if opts.Trace != nil {
 				_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_end", Model: opts.Model, Metadata: map[string]any{"reason": "completed", "steps": res.Steps, "prompt_tokens": res.PromptTokens, "completion_tokens": res.CompletionTokens}})
 			}
@@ -228,14 +244,24 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 
 		res.Steps++
 		msgs = append(msgs, api.Message{Role: "assistant", Content: resp.Message.Content, ToolCalls: calls})
+		if opts.OnAssistant != nil {
+			opts.OnAssistant(resp.Message.Content, calls)
+		}
+		// toolMsg appends a tool result and reports it to the observer, so
+		// every call the model made gets exactly one OnToolResult.
+		toolMsg := func(c tools.ToolCall, content string, failed bool) {
+			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: content})
+			if opts.OnToolResult != nil {
+				opts.OnToolResult(c, content, failed)
+			}
+		}
 
 		progressed := false
 		for _, c := range calls {
 			res.ToolsUsed = append(res.ToolsUsed, c.Function.Name)
 			if opts.ToolFilter != nil && !opts.ToolFilter(c.Function.Name) {
 				res.ToolErrors++
-				msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name,
-					Content: "error: tool not permitted for this agent"})
+				toolMsg(c, "error: tool not permitted for this agent", true)
 				continue
 			}
 			fp := tools.CallFingerprint(c)
@@ -248,8 +274,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			// looping on one action.
 			if fpCount[fp] >= maxIdenticalCalls {
 				res.RepeatedBlocked++
-				msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name,
-					Content: fmt.Sprintf("error: you already ran this exact call %d times with the same result. Stop repeating it — use what you already have, or take a materially different action.", fpCount[fp])})
+				toolMsg(c, fmt.Sprintf("error: you already ran this exact call %d times with the same result. Stop repeating it — use what you already have, or take a materially different action.", fpCount[fp]), true)
 				continue
 			}
 			fpCount[fp]++
@@ -271,7 +296,11 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			if event.Err != nil {
 				res.ToolErrors++
 			}
-			msgs = append(msgs, api.Message{Role: "tool", ToolName: c.Function.Name, Content: event.Result})
+			result := event.Result
+			if opts.AugmentResult != nil && event.Err == nil {
+				result = opts.AugmentResult(event.Call, result)
+			}
+			toolMsg(event.Call, result, event.Err != nil || event.ExitCode != 0)
 		}
 
 		// No forward motion — every call this round was a refused repeat, or the
@@ -287,6 +316,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	output, history, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs)
 	res.Output = output
 	res.Messages = history
+	if opts.OnAssistant != nil {
+		opts.OnAssistant(output, nil)
+	}
 	res.PromptTokens += promptTokens
 	res.CompletionTokens += completionTokens
 	if opts.Trace != nil {

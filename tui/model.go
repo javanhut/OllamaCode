@@ -21,6 +21,7 @@ import (
 	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/internal/calibration"
 	"github.com/javanhut/ollama_code/internal/companion"
+	"github.com/javanhut/ollama_code/internal/instructions"
 	"github.com/javanhut/ollama_code/internal/lsp"
 	"github.com/javanhut/ollama_code/internal/memory"
 	"github.com/javanhut/ollama_code/internal/semantic"
@@ -158,6 +159,9 @@ type config struct {
 	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
 	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
 	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
+
+	Instructions        []string `json:"instructions,omitempty"`         // extra instruction files, loaded after the global AGENTS.md
+	ProjectInstructions *bool    `json:"project_instructions,omitempty"` // nil/true = load AGENTS.md/OLLAMA.md/CLAUDE.md files
 }
 
 // providerConfig is one additional LLM endpoint beyond the default host. The
@@ -282,34 +286,43 @@ var (
 )
 
 type Model struct {
-	cfg              config
-	host             api.OllamaHost
-	tools            *tools.Registry
-	mcpServers       []tools.MCPServer
-	trace            *tracepkg.Recorder
-	lastCalibration  *calibration.Result
-	notes            *sessionNotes
-	todos            *todoList
-	mode             Mode
-	state            state
-	urlInput         textinput.Model
-	keyInput         textinput.Model
-	nameInput        textinput.Model // provider name; the default host has none
-	envInput         textinput.Model // env var holding the provider's key
-	settingsFocus    settingsField
-	settingsTarget   int    // index into settingsTargets(); 0 = default host, last = new provider
-	deferredPrompt   state  // prompt that arrived while a modal was open; stateSettings = none
-	settingsKind     string // wire format of the provider being edited
-	settingsTrust    bool   // cursor providers only: pass --trust
-	models           []string
-	modelsFrom       string // provider the model list came from; "" = default host
-	modelListRequest uint64 // invalidates stale/out-of-order /models responses
-	picker           int
-	pickerTarget     int    // index into pickerTargets(); which endpoint /models is listing
-	pickerPurpose    string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
-	pairLocalModel   string
-	pairCursor       string
-	modelName        string
+	cfg             config
+	host            api.OllamaHost
+	tools           *tools.Registry
+	mcpServers      []tools.MCPServer
+	trace           *tracepkg.Recorder
+	lastCalibration *calibration.Result
+	notes           *sessionNotes
+	todos           *todoList
+	// AGENTS.md-style rules (instructions.go). The block is rendered once per
+	// load so the cached system prefix stays byte-stable.
+	instructions       instructions.Set
+	instructionsBlock  string
+	instructionTracker *instructions.Tracker
+	customCommands     []customCommand // markdown slash commands (commands.go)
+	// sessionPermissions are allow rules granted with "s" at a permission
+	// prompt; unlike cfg.Permissions they are never written to disk.
+	sessionPermissions []tools.PermissionRule
+	mode               Mode
+	state              state
+	urlInput           textinput.Model
+	keyInput           textinput.Model
+	nameInput          textinput.Model // provider name; the default host has none
+	envInput           textinput.Model // env var holding the provider's key
+	settingsFocus      settingsField
+	settingsTarget     int    // index into settingsTargets(); 0 = default host, last = new provider
+	deferredPrompt     state  // prompt that arrived while a modal was open; stateSettings = none
+	settingsKind       string // wire format of the provider being edited
+	settingsTrust      bool   // cursor providers only: pass --trust
+	models             []string
+	modelsFrom         string // provider the model list came from; "" = default host
+	modelListRequest   uint64 // invalidates stale/out-of-order /models responses
+	picker             int
+	pickerTarget       int    // index into pickerTargets(); which endpoint /models is listing
+	pickerPurpose      string // "" = choose one default; "cursor_pair" = choose plan half of a local+Cursor pair
+	pairLocalModel     string
+	pairCursor         string
+	modelName          string
 
 	// Model pulling (from the model picker). pullInput captures the name to
 	// pull; pullStream/progress fields drive the live download UI.
@@ -770,6 +783,8 @@ func New() *Model {
 
 	m.lastActivity = time.Now()
 	m.toast = legacyMemoryNotice(memPath)
+	m.loadInstructions()
+	m.customCommands = loadCustomCommands(customCommandDirs())
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())

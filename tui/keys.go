@@ -797,6 +797,18 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pending.allowAll = true
 		m.state = stateChat
 		return m, m.processPendingTools()
+	case "s":
+		// The same rule "A" would save, held in memory for this session only:
+		// the middle ground between re-approving every `go test` and widening
+		// the boundary in config forever. It also clears any other call in this
+		// batch that the rule now covers, via shouldPromptPermission.
+		i := m.pending.index
+		call := m.pending.calls[i]
+		m.addSessionPermission(tools.PermissionRuleFor(call))
+		m.recordPermission(call, "allowed_for_session")
+		m.pending.started[i] = true
+		m.state = stateChat
+		return m, m.invokeToolCmd(m.pending.gen, i, call)
 	case "A":
 		// Persist the decision, then behave exactly like "y". This widens the
 		// safety boundary beyond the current turn, so the rule it saves is shown
@@ -968,6 +980,61 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if val == "/rate" || strings.HasPrefix(val, "/rate ") {
 			m.input.Reset()
 			m.rateCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rate")))
+			return m, nil
+		}
+		if val == "/instructions" || strings.HasPrefix(val, "/instructions ") {
+			m.input.Reset()
+			if strings.TrimSpace(strings.TrimPrefix(val, "/instructions")) == "reload" {
+				m.loadInstructions()
+				m.toast = fmt.Sprintf("reloaded %d instruction file(s)", len(m.instructions.Files))
+			}
+			m.history = append(m.history, api.Message{Role: "system", Content: m.instructionsReport()})
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+		if val == "/commands" || strings.HasPrefix(val, "/commands ") {
+			m.input.Reset()
+			if strings.TrimSpace(strings.TrimPrefix(val, "/commands")) == "reload" {
+				m.customCommands = loadCustomCommands(customCommandDirs())
+				m.toast = fmt.Sprintf("loaded %d custom command(s)", len(m.customCommands))
+			}
+			m.history = append(m.history, api.Message{Role: "system", Content: m.customCommandsReport()})
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+		// /init and custom commands expand into an ordinary message: the
+		// expansion replaces the input and falls through to submit below, so
+		// queueing, @mentions and history treat it as if it had been typed.
+		expanded := false
+		if val == "/init" || strings.HasPrefix(val, "/init ") {
+			if m.modelName == "" {
+				m.input.Reset()
+				m.lastError = "no model selected — run /model"
+				m.refreshTranscript()
+				return m, nil
+			}
+			m.input.SetValue(m.initCommand(strings.TrimSpace(strings.TrimPrefix(val, "/init"))))
+			val = strings.TrimSpace(m.input.Value())
+			expanded = true
+		} else if c, args, ok := m.findCustomCommand(val); ok && strings.HasPrefix(val, "/") {
+			if m.modelName == "" {
+				m.input.Reset()
+				m.lastError = "no model selected — run /model"
+				m.refreshTranscript()
+				return m, nil
+			}
+			m.input.SetValue(m.runCustomCommand(c, args))
+			val = strings.TrimSpace(m.input.Value())
+			expanded = true
+		}
+		if expanded && m.streaming {
+			// An expanded /init or custom command is a message, and a message
+			// typed mid-turn waits its turn like any other.
+			m.queue = append(m.queue, strings.TrimSpace(m.input.Value()))
+			m.input.Reset()
+			m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))
 			return m, nil
 		}
 		if val == "/research" || strings.HasPrefix(val, "/research ") {

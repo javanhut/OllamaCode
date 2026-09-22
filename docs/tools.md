@@ -20,13 +20,25 @@ Legend: **E** explore · **P** plan · **W** write · **A** auto
 | `hash_file` | ✓ | ✓ | ✓ | ✓ |
 | `write_file` | | | ✓ | ✓ |
 | `edit_file` | | | ✓ | ✓ |
+| `multi_edit` | | | ✓ | ✓ |
 | `append_file` | | | ✓ | ✓ |
 | `delete_file` | | | ✓ | ✓ |
 | `move_file` / `copy_file` | | | ✓ | ✓ |
 | `make_directory` / `touch` | | | ✓ | ✓ |
 | `parallel_edit` | | | ✓ | ✓ |
 
-`write_file` and `edit_file` run the file's formatter before writing — `gofmt`,
+`multi_edit` applies several `old_string`/`new_string` replacements to one
+file as a single atomic change: edits apply in order (each sees the file as the
+earlier ones left it), each is matched by the same tiered matcher as
+`edit_file`, and the syntax guard and formatter run once on the combined
+result. If any edit fails to match, nothing is written and the error names the
+failing edit's index. One call means one approval prompt, and the guard no
+longer rejects an intermediate state that only becomes valid a few edits later.
+Line-range edits are not offered — line numbers shift after the first edit.
+A model that sends `edits` (or any array/object argument) double-encoded as a
+JSON string has it decoded rather than rejected.
+
+`write_file`, `edit_file`, and `multi_edit` run the file's formatter before writing — `gofmt`,
 `rustfmt`, `ruff format`, or `prettier`, chosen by extension. The formatter is
 driven over stdin, so a formatter that rejects the input cannot leave a
 truncated file behind, and one that is not installed is silently skipped. The
@@ -58,6 +70,23 @@ known without configuration, and more can be declared in
 [`lsp_servers`](configuration.md#lsp_servers). A compiler's index knows which
 same-named identifiers actually are the symbol, which neither the tree-sitter
 path nor the word-boundary grep below it can tell.
+
+After a successful `write_file`, `edit_file`, or `multi_edit`, the edited
+file's language-server **errors** (not warnings, capped at 20) are appended to
+the tool result:
+
+```
+LSP errors detected in this file, please fix:
+<diagnostics file="main.go">
+ERROR [12:5] undefined: foo
+</diagnostics>
+```
+
+The model sees a type error on its next step instead of at the end-of-turn
+verification gate several edits later. The server's cached result is discarded
+before the change is sent, so the report describes the new contents. This
+waits at most 5 seconds, and is skipped entirely — no server started, no wait —
+when `lsp` is off or no installed server handles the file.
 
 Servers start on the first code intelligence question, not at boot, and are
 shut down when the session exits. Every failure — no server installed, a server

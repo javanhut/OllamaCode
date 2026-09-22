@@ -486,7 +486,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// can be added); a second Enter then runs it. A fully-typed command wins
 			// over the menu — "/model" runs /model, not the suggested "/models".
 			if msg.String() == "enter" && m.slashVisible && len(m.slashSuggestions) > 0 &&
-				!isSlashCommand(strings.TrimSpace(m.input.Value())) {
+				!m.isKnownSlashCommand(strings.TrimSpace(m.input.Value())) {
 				m.input.SetValue(m.slashSuggestions[m.slashSelected])
 				m.input.CursorEnd()
 				m.dismissSlash()
