@@ -187,6 +187,7 @@ func (m *Model) resetTurnGuards() {
 	}
 	m.lastVerification = ""
 	m.verifyAttempts = 0
+	m.checksNudges = 0
 	m.challengedThisTurn = false
 	m.reviewedThisTurn = false
 	m.autoContinues = 0

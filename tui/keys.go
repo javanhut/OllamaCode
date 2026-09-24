@@ -910,7 +910,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.refreshTranscript()
 				m.viewport.GotoBottom()
 			} else {
-				m.toast = "invalid mode: " + args + " (choose explore, plan, write, auto)"
+				m.toast = "invalid mode: " + args + " (choose explore, plan, write, verify, auto)"
 			}
 			return m, nil
 		}

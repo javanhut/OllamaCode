@@ -6,9 +6,9 @@ the current mode is never sent to the model, and a call for it is rejected
 before dispatch.
 
 ```
- explore  ──shift+tab──▶  plan  ──shift+tab──▶  write  ──shift+tab──▶ explore
-   │                        │                     │
- read-only              read + notes         full toolset
+ explore ─▶ plan ─▶ write ─▶ verify ─▶ explore  (shift+tab)
+    │         │       │        │
+read-only  notes   all tools  review + checks
 ```
 
 `auto` is separate: it is only reachable by explicit user action (`/auto`),
@@ -89,6 +89,25 @@ or the command, and waits for `y` / `a` / `n`.
 On entering write mode from plan mode, the session notes are injected into
 history as a `Plan Summary`, so the executing model starts from the plan.
 
+## verify — adversarial review
+
+Read-only review of the explore findings, the plan and every line write
+changed. `run_shell` uses the explore allowlist plus `go test`, which prompts.
+
+`run_checks` (prompts) detects the project and runs its formatter check and
+full test suite, and fails any changed source file without unit tests:
+
+| Manifest | Format | Tests |
+|---|---|---|
+| `go.mod` | `gofmt -l` | `go test ./...` |
+| `Cargo.toml` | `cargo fmt --check` | `cargo test` |
+| `package.json` (npm/pnpm/yarn/bun by lockfile) | `format:check` script, else prettier or biome | `<pm> test` |
+| Python (pip/uv/poetry/pipenv by lockfile) | `ruff format --check`, or `black --check` | `pytest` |
+
+A verify turn cannot end until `run_checks` has passed on the current code.
+On any failure the verdict is FAIL: findings go to the notes and the model
+switches back to plan.
+
 ## auto — autonomous
 
 Full toolset with prompts suppressed for paths **inside the working directory**.
@@ -101,7 +120,7 @@ auto mode — the tool call is rejected explicitly.
 
 | Trigger | Path |
 |---|---|
-| `shift+tab` | cycles explore → plan → write → explore |
+| `shift+tab` | cycles explore → plan → write → verify → explore |
 | `/mode <name>` | jumps directly, including `auto` |
 | `/auto` | shortcut for `/mode auto` |
 | model calls `switch_mode` | goes through the approval prompt like any destructive tool |

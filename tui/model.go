@@ -490,6 +490,9 @@ type Model struct {
 	loopContinues       map[string]int  // "continue anyway" grants per detector this user turn
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
+	reviewPaths         map[string]bool // files changed since verify mode last passed
+	checksPassed        string          // review fingerprint run_checks last passed at
+	checksNudges        int             // verify-gate re-invocations this turn
 	fetchedContent      bool            // untrusted web content entered the conversation this turn
 	verifying           bool            // a compile check is running
 	verifyAttempts      int             // failed compile checks this turn
@@ -798,6 +801,7 @@ func New() *Model {
 	m.loadInstructions()
 	m.customCommands = loadCustomCommands(customCommandDirs())
 	registry.Register(m.switchModeTool())
+	registry.Register(m.runChecksTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())
 	// Push background-shell completions into the update loop (see shell_bg.go).

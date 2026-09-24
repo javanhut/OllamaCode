@@ -95,10 +95,7 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		out, err := tools.NewShellCommand(ctx, command).CombinedOutput()
-		text := strings.TrimSpace(string(out))
-		if len(text) > 4000 {
-			text = "…\n" + text[len(text)-4000:] // tail: compiler errors cluster at the end
-		}
+		text := outputTail(out)
 		// Lint runs after the check either way: a failed compile is exactly
 		// when per-diagnostic signal helps most. Informational only — it never
 		// decides pass/fail, and a missing linter binary is silent.
@@ -123,6 +120,16 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 		}
 		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text, lint: lint}
 	}
+}
+
+// outputTail keeps the end of a command's output, where compiler and test
+// failures cluster.
+func outputTail(out []byte) string {
+	text := strings.TrimSpace(string(out))
+	if len(text) > 4000 {
+		text = "…\n" + text[len(text)-4000:]
+	}
+	return text
 }
 
 // joinDiagnostics merges two diagnostic blocks, tolerating either being empty.

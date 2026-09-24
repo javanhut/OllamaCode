@@ -516,6 +516,7 @@ func (m *Model) helpContent(innerW int) string {
 		{"explore", "read-only — model can only inspect"},
 		{"plan", "read + update session notes"},
 		{"write", "all tools; writes need your approval"},
+		{"verify", "read-only review of the explore/plan/write work"},
 		{"auto", "autonomous — unlimited changes in workspace"},
 		{"shift+tab", "cycle modes"},
 		{"", ""},

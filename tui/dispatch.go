@@ -147,6 +147,9 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 	// Recorded here, on the update goroutine: invokeTool runs on a tool
 	// goroutine, where touching m.cfg raced the UI.
 	m.noteActivity("Tool: " + call.Function.Name)
+	if call.Function.Name == "run_checks" {
+		call.Function.Arguments, _ = json.Marshal(map[string][]string{"files": m.reviewPathList()})
+	}
 	return func() tea.Msg {
 		var req *modeSwitchRequest
 		if call.Function.Name == "switch_mode" {
@@ -446,9 +449,13 @@ func (m *Model) processPendingTools() tea.Cmd {
 		if call.Function.Name == "run_shell" || call.Function.Name == "terminal_open" {
 			cmd := safeshell.ExtractShellCommand(call.Function.Arguments)
 
-			// Explore-mode read-only allowlist (per-segment bin/sub check).
-			if m.mode == ExploreMode {
-				if ok, reason := safeshell.IsExploreReadOnlyShell(cmd); !ok {
+			// Explore/verify read-only allowlist (per-segment bin/sub check).
+			if m.mode == ExploreMode || m.mode == VerifyMode {
+				check := safeshell.IsExploreReadOnlyShell
+				if m.mode == VerifyMode {
+					check = safeshell.IsVerifyReadOnlyShell
+				}
+				if ok, reason := check(cmd); !ok {
 					m.failedCalls[tools.CallFingerprint(call)]++
 					m.pending.results[i] = api.Message{
 						Role:     "tool",
@@ -578,9 +585,13 @@ func (m *Model) processPendingTools() tea.Cmd {
 			continue
 		}
 
-		// Explore-mode run_shell calls are prechecked above and are read-only,
-		// so they don't need a permission prompt.
-		exploreReadOnly := m.mode == ExploreMode && call.Function.Name == "run_shell"
+		// Explore/verify run_shell calls are prechecked above. Verify's extra
+		// commands (go test) run workspace code, so only explore-safe ones skip
+		// the prompt.
+		exploreReadOnly := false
+		if call.Function.Name == "run_shell" && (m.mode == ExploreMode || m.mode == VerifyMode) {
+			exploreReadOnly, _ = safeshell.IsExploreReadOnlyShell(safeshell.ExtractShellCommand(call.Function.Arguments))
+		}
 		if m.shouldPromptPermission(call) && !exploreReadOnly {
 			m.pending.index = i
 			m.pending.preview = computePreview(call)

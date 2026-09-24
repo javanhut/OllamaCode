@@ -6,6 +6,7 @@ package safeshell
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -56,7 +57,23 @@ var exploreShellAllowedGoSubs = map[string]bool{
 	"version": true, "env": true, "list": true, "doc": true, "vet": true,
 }
 
+// Verify may also run the tests; the go entry in exploreForbiddenFlags blocks
+// the test flags that write files.
+var verifyShellAllowedGoSubs = func() map[string]bool {
+	m := maps.Clone(exploreShellAllowedGoSubs)
+	m["test"] = true
+	return m
+}()
+
 func IsExploreReadOnlyShell(command string) (bool, string) {
+	return readOnlyShell(command, exploreShellAllowedGoSubs)
+}
+
+func IsVerifyReadOnlyShell(command string) (bool, string) {
+	return readOnlyShell(command, verifyShellAllowedGoSubs)
+}
+
+func readOnlyShell(command string, goSubs map[string]bool) (bool, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, "empty command"
@@ -106,7 +123,7 @@ func IsExploreReadOnlyShell(command string) (bool, string) {
 			}
 		case "go":
 			sub := FirstNonFlagArg(fields[1:])
-			if sub != "" && !exploreShellAllowedGoSubs[sub] {
+			if sub != "" && !goSubs[sub] {
 				return false, fmt.Sprintf("go subcommand %q is not in the explore-mode read-only allowlist", sub)
 			}
 		case "ivaldi":
@@ -130,14 +147,15 @@ func IsExploreReadOnlyShell(command string) (bool, string) {
 // writer or a command runner. A flag matches exactly, or as a prefix of an
 // attached value (-ofile, --output=file).
 var exploreForbiddenFlags = map[string][]string{
-	"find":     {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"},
-	"fd":       {"-x", "--exec", "-X", "--exec-batch"},
-	"rg":       {"--pre"},
-	"sort":     {"-o", "--output"},
-	"tree":     {"-o"},
-	"date":     {"-s", "--set"},
-	"file":     {"-C", "--compile"},
-	"go":       {"-toolexec", "-vettool", "-exec", "-w", "-u"},
+	"find": {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"},
+	"fd":   {"-x", "--exec", "-X", "--exec-batch"},
+	"rg":   {"--pre"},
+	"sort": {"-o", "--output"},
+	"tree": {"-o"},
+	"date": {"-s", "--set"},
+	"file": {"-C", "--compile"},
+	"go": {"-toolexec", "-vettool", "-exec", "-w", "-u", "-mod", "-modfile", "-o", "-c", "-fuzz",
+		"-coverprofile", "-cpuprofile", "-memprofile", "-blockprofile", "-mutexprofile", "-trace", "-outputdir"},
 	"git":      {"--config-env", "--exec-path", "--output", "--ext-diff", "-O", "--open-files-in-pager", "--textconv"},
 	"hostname": {"-F", "--file", "-b", "--boot"},
 }
@@ -149,6 +167,9 @@ func exploreArgsReadOnly(bin string, args []string) (bool, string) {
 	for _, a := range args {
 		if bin == "go" && strings.HasPrefix(a, "--") {
 			a = a[1:] // the go tool accepts -flag and --flag alike
+		}
+		if bin == "go" && strings.HasPrefix(a, "-test.") {
+			a = "-" + a[len("-test."):] // test binary spelling: -test.coverprofile
 		}
 		for _, f := range exploreForbiddenFlags[bin] {
 			if a == f || strings.HasPrefix(a, f+"=") ||

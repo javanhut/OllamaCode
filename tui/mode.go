@@ -21,6 +21,7 @@ const (
 	PlanMode
 	WriteMode
 	AutoMode
+	VerifyMode
 )
 
 func (m Mode) String() string {
@@ -33,6 +34,8 @@ func (m Mode) String() string {
 		return "write"
 	case AutoMode:
 		return "auto"
+	case VerifyMode:
+		return "verify"
 	}
 	return "?"
 }
@@ -47,6 +50,8 @@ func (m Mode) hint() string {
 		return "writes need approval"
 	case AutoMode:
 		return "autonomous (unlimited changes in workspace)"
+	case VerifyMode:
+		return "read-only review"
 	}
 	return ""
 }
@@ -57,6 +62,8 @@ func (m Mode) next() Mode {
 		return PlanMode
 	case PlanMode:
 		return WriteMode
+	case WriteMode:
+		return VerifyMode
 	default:
 		return ExploreMode
 	}
@@ -72,6 +79,8 @@ func (m Mode) color() color.Color {
 		return lipgloss.Color("196") // Red
 	case AutoMode:
 		return lipgloss.Color("129") // Purple
+	case VerifyMode:
+		return lipgloss.Color("42") // Green
 	}
 	return lipgloss.Color("39")
 }
@@ -86,6 +95,8 @@ func parseMode(s string) (Mode, bool) {
 		return WriteMode, true
 	case "auto":
 		return AutoMode, true
+	case "verify":
+		return VerifyMode, true
 	default:
 		return ExploreMode, false
 	}
@@ -299,13 +310,13 @@ func (m *Model) switchModeTool() tools.Tool {
 		Type: "function",
 		Function: tools.Function{
 			Name:        "switch_mode",
-			Description: "Request a transition to a different mode (explore, plan, write). Use this when you have finished exploration and are ready to plan, or after the user has reviewed the recorded plan and you need write mode. Never retry a denied transition or advance a changed plan without asking the user again.",
+			Description: "Request a transition to a different mode (explore, plan, write, verify). Use this when you have finished exploration and are ready to plan, after the user has reviewed the recorded plan and you need write mode, or after writing to have the changes reviewed in verify mode. Never retry a denied transition or advance a changed plan without asking the user again.",
 			Parameters: tools.Schema{
 				Type: "object",
 				Properties: map[string]tools.Property{
 					"mode": {
 						Type:        "string",
-						Enum:        []string{"explore", "plan", "write"},
+						Enum:        []string{"explore", "plan", "write", "verify"},
 						Description: "The target mode.",
 					},
 					"reason": {
@@ -395,6 +406,10 @@ func pinnedToolNames(mode Mode) map[string]bool {
 		pinned["ask_user"] = true
 		pinned["read_session_notes"] = true
 		pinned["update_session_notes"] = true
+		pinned["append_session_notes"] = true
+	}
+	if mode == VerifyMode {
+		pinned["run_checks"] = true
 		pinned["append_session_notes"] = true
 	}
 	return pinned
@@ -501,6 +516,8 @@ func toolMode(mode Mode) tools.ToolMode {
 		return tools.ModeWrite
 	case AutoMode:
 		return tools.ModeAuto
+	case VerifyMode:
+		return tools.ModeVerify
 	default:
 		return 0
 	}

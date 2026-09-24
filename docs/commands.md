@@ -161,7 +161,7 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 |---|---|
 | `Enter` | Send |
 | `Shift+Enter` / `Ctrl+J` | Newline |
-| `Shift+Tab` | Cycle mode: explore → plan → write → explore |
+| `Shift+Tab` | Cycle mode: explore → plan → write → verify → explore |
 | `Esc` / `Ctrl+S` | Interrupt the running turn |
 | `Ctrl+C` | Interrupt mid-turn; quit when idle |
 | `↑` / `↓` | Recall previous messages (when the input is empty or unmodified) |
@@ -232,7 +232,7 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 
 | Command | Description |
 |---|---|
-| `/mode <explore\|plan\|write\|auto>` | Switch directly |
+| `/mode <explore\|plan\|write\|verify\|auto>` | Switch directly |
 | `/auto` | Shortcut for `/mode auto` |
 
 ### Research

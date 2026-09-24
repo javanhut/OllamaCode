@@ -637,7 +637,7 @@ func (m *Model) routeCommand(args string) {
 func (m *Model) showRoutes() {
 	var b strings.Builder
 	b.WriteString("Model routing (per mode):\n")
-	for _, mode := range []Mode{ExploreMode, PlanMode, WriteMode, AutoMode} {
+	for _, mode := range []Mode{ExploreMode, PlanMode, WriteMode, VerifyMode, AutoMode} {
 		mark := " "
 		if mode == m.mode {
 			mark = "*"

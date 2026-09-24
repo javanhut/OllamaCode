@@ -255,17 +255,8 @@ func (m *Model) loadCommand(name string) {
 	m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // and so does the turn a rating would have named
 	m.notes.set(s.Notes)
 	m.modelName = s.Model
-	if s.Mode != "" {
-		switch s.Mode {
-		case "explore":
-			m.mode = ExploreMode
-		case "plan":
-			m.mode = PlanMode
-		case "write":
-			m.mode = WriteMode
-		case "auto":
-			m.mode = AutoMode
-		}
+	if mode, ok := parseMode(s.Mode); ok {
+		m.mode = mode
 	}
 	m.cfg.Model = m.modelName
 	saveConfig(m.cfg)

@@ -18,9 +18,10 @@ const (
 	ModePlan
 	ModeWrite
 	ModeAuto
+	ModeVerify
 
-	ModeReadOnly     = ModeExplore | ModePlan | ModeWrite | ModeAuto
-	ModeExploreShell = ModeExplore | ModeWrite | ModeAuto
+	ModeReadOnly     = ModeExplore | ModePlan | ModeWrite | ModeAuto | ModeVerify
+	ModeExploreShell = ModeExplore | ModeWrite | ModeAuto | ModeVerify
 	ModeMutable      = ModeWrite | ModeAuto
 )
 
@@ -116,6 +117,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 		m[name] = policy(ModeReadOnly, true, false, false, ToolCostLow)
 	}
 	m["run_shell"] = policy(ModeExploreShell, true, true, false, ToolCostHigh)
+	m["run_checks"] = policy(ModeVerify, true, true, false, ToolCostHigh)
 	m["shell_output"] = policy(ModeMutable, true, false, false, ToolCostLow)
 	// job_kill terminates a process group or a sub-agent, like shell_output's
 	// kill flag; job_list/job_output are plain reads (classified above).
@@ -168,7 +170,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 		"update_session_notes", "append_session_notes", "remember", "forget")
 	setTimeout(m, networkTimeout,
 		"web_search", "web_search_api", "web_fetch", "web_crawl", "code_index", "semantic_search")
-	setTimeout(m, longTimeout, "spawn_subagent", "parallel_edit")
+	setTimeout(m, longTimeout, "spawn_subagent", "parallel_edit", "run_checks")
 	// The ceiling, for a caller holding only the name — ToolCallTimeout reads
 	// the call's own timeout_sec instead.
 	setTimeout(m, shellMaxTimeout+shellGrace, "run_shell")

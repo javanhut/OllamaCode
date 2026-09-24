@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -799,11 +798,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.failedCalls[tools.CallFingerprint(call)]++
 				} else if mutated := tools.MutatedPaths(call.Function.Name, call.Function.Arguments); len(mutated) > 0 {
 					m.turnTouchedFiles = true // a file edit succeeded → verify before finishing
-					if m.turnChangedPaths == nil {
-						m.turnChangedPaths = map[string]bool{}
-					}
 					for _, path := range mutated {
-						m.turnChangedPaths[filepath.Clean(path)] = true
+						m.noteChanged(path)
 					}
 					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
 					// The ledger re-stamp after a successful mutation happens
@@ -816,6 +812,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// says it only inspected files. (Background jobs arm the gate
 					// on completion instead — see subagentDoneMsg.)
 					m.turnTouchedFiles = true
+				}
+			}
+			if msg.index < len(m.pending.calls) && m.pending.calls[msg.index].Function.Name == "run_checks" {
+				m.checksPassed = ""
+				if tools.ToolResultOK(msg.result.Content) {
+					m.checksPassed = m.reviewFingerprint()
 				}
 			}
 			if msg.modeSwitch != nil && tools.ToolResultOK(msg.result.Content) {
@@ -1082,6 +1084,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// corrective nudge and a re-invoke; the retried answer passes
 			// through here again and is accepted as-is, so this can't loop.
 			if cc := m.maybeCitationGate(finalAssistant); cc != nil {
+				cmds = append(cmds, cc)
+				m.refreshTranscript()
+				m.viewport.GotoBottom()
+				break
+			}
+			if cc := m.maybeChecksGate(); cc != nil {
 				cmds = append(cmds, cc)
 				m.refreshTranscript()
 				m.viewport.GotoBottom()

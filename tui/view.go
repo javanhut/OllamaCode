@@ -53,7 +53,7 @@ var slashCommands = []struct {
 	{"/compact", "compress older history into a summary now"},
 	{"/show_thinking", "toggle live and saved model reasoning"},
 	{"/auto", "switch to autonomous mode"},
-	{"/mode", "switch mode (explore, plan, write, auto)"},
+	{"/mode", "switch mode (explore, plan, write, verify, auto)"},
 	{"/research", "guided web research: dedupe sources, synthesize with citations"},
 	{"/init", "generate or update AGENTS.md project instructions"},
 	{"/instructions", "list loaded AGENTS.md instruction files (reload to re-read)"},

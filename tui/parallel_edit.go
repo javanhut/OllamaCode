@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -249,10 +248,7 @@ func (m *Model) applyStagedOp(ctx context.Context, op stagedOp) (string, error) 
 	out, err := m.tools.Invoke(ctx, tools.ToolCall{Function: tools.ToolCallFunction{Name: name, Arguments: raw}})
 	if err == nil {
 		m.turnTouchedFiles = true
-		if m.turnChangedPaths == nil {
-			m.turnChangedPaths = map[string]bool{}
-		}
-		m.turnChangedPaths[filepath.Clean(op.path)] = true
+		m.noteChanged(op.path)
 	}
 	return out, err
 }

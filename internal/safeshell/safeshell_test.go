@@ -251,3 +251,31 @@ func TestInterceptVCSBypassAdversarial(t *testing.T) {
 		})
 	}
 }
+
+func TestIsVerifyReadOnlyShell(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"go test ./...", true},
+		{"go test -run TestX -count=1 -cover ./tui", true},
+		{"go test -v ./tui 2>&1 | tail -20", true},
+		{"go vet ./... && go test ./tools", true},
+		{"go test -coverprofile=c.out ./...", false},
+		{"go test -args -test.coverprofile=c.out", false},
+		{"go test -c -o bin ./tui", false},
+		{"go test -fuzz=FuzzX ./tui", false},
+		{"go test -exec rm ./tui", false},
+		{"go test -mod=mod ./...", false},
+		{"go build ./...", false},
+		{"go generate ./...", false},
+	}
+	for _, c := range cases {
+		if got, reason := IsVerifyReadOnlyShell(c.cmd); got != c.want {
+			t.Errorf("%q: got %v (%s), want %v", c.cmd, got, reason, c.want)
+		}
+	}
+	if ok, _ := IsExploreReadOnlyShell("go test ./..."); ok {
+		t.Error("go test must stay out of explore")
+	}
+}
