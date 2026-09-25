@@ -5,7 +5,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -867,7 +866,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.streaming && !strings.HasPrefix(val, "/") {
+		if m.turnInProgress() && !strings.HasPrefix(val, "/") {
 			m.queue = append(m.queue, val)
 			m.input.Reset()
 			m.slashVisible = false
@@ -1029,7 +1028,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			val = strings.TrimSpace(m.input.Value())
 			expanded = true
 		}
-		if expanded && m.streaming {
+		if expanded && m.turnInProgress() {
 			// An expanded /init or custom command is a message, and a message
 			// typed mid-turn waits its turn like any other.
 			m.queue = append(m.queue, strings.TrimSpace(m.input.Value()))
@@ -1071,15 +1070,8 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.fetchModels()
 		case "/clear":
 			m.input.Reset()
-			if m.streaming && m.stream != nil {
-				m.stream.cancel()
-			}
-			m.turnGen++ // orphan any in-flight stream/tool messages
+			m.abandonTurnWork() // orphan any in-flight stream/tool/background work
 			m.streamBuf.Reset()
-			m.streaming = false
-			m.stream = nil
-			m.busySince = time.Time{}
-			m.pending = nil
 			m.queue = nil
 			m.history = nil
 			m.archiveSummary, m.archivedThrough, m.prunedThrough = "", 0, 0

@@ -407,7 +407,7 @@ const inputLabelWidth = 7
 func (m *Model) inputPrefix() string {
 	c := m.mode.color()
 	label := "message"
-	if m.streaming {
+	if m.turnInProgress() {
 		label = "queued"
 	}
 	return lipgloss.NewStyle().

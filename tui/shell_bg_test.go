@@ -31,7 +31,7 @@ func TestShellJobCompletionNotifies(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected commands (re-armed waiter + wake stream)")
 	}
-	if !m.streaming || m.stream == nil {
+	if !m.generating() || m.stream == nil {
 		t.Fatal("idle parent should have been woken with a new stream")
 	}
 	m.stream.cancel()
@@ -42,7 +42,7 @@ func TestShellJobCompletionNotifies(t *testing.T) {
 func TestShellJobCompletionDoesNotWakeBusy(t *testing.T) {
 	m := subagentTestModel()
 	m.modelName = "test-model"
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 
 	m.Update(shellJobDoneMsg{id: 3, exitCode: 1, tail: "boom"})

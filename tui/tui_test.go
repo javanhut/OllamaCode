@@ -449,7 +449,7 @@ func TestFaceAnimatesAcrossTicks(t *testing.T) {
 	states := map[string]func(*Model){
 		"idle":     func(m *Model) { m.modelName = "llama3" },
 		"thinking": func(m *Model) { m.modelName = "llama3"; m.pending = &pendingBatch{} },
-		"talking":  func(m *Model) { m.modelName = "llama3"; m.streaming = true },
+		"talking":  func(m *Model) { m.modelName = "llama3"; m.phase = phaseStreaming },
 		"sleeping": func(m *Model) { m.modelName = "" }, // no model loaded
 	}
 

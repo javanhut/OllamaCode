@@ -24,7 +24,7 @@ func overflowTestModel(t *testing.T) *Model {
 	m := statusTestModel()
 	m.contextLimit = 32768
 	m.turnGen = 7
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{gen: 7, cancel: func() {}}
 	for i := range 8 {
 		role := "user"

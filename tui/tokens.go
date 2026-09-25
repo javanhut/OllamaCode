@@ -104,7 +104,7 @@ func estimateMsgsTokens(msgs []api.Message) int {
 // rounds and tool results land — plus the partial reply buffered so far.
 func (m *Model) displayTokens() int {
 	n := m.totalTokens
-	if !m.streaming && m.pending == nil {
+	if !m.generating() {
 		return n
 	}
 	// The model's view, not the log: this number is context in use against

@@ -18,7 +18,7 @@ import (
 func TestChatChunkQueuesMissingRenderFrame(t *testing.T) {
 	m := statusTestModel()
 	m.turnGen = 2
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.lastRenderTime = time.Now()
 
 	_, cmd := m.Update(chatChunkMsg{gen: 2, content: "new text"})
@@ -82,22 +82,25 @@ func TestStatusTextPhases(t *testing.T) {
 		busy  bool
 	}{
 		{"idle", func(m *Model) {}, "READY", false},
-		{"thinking", func(m *Model) { m.streaming = true }, "THINKING", true},
+		{"thinking", func(m *Model) { m.phase = phaseStreaming }, "THINKING", true},
 		{"streaming with content", func(m *Model) {
-			m.streaming = true
+			m.phase = phaseStreaming
 			m.streamBuf.WriteString("hi")
 		}, "STREAMING", true},
-		{"retrieving", func(m *Model) { m.retrieving = true }, "SEARCHING CODE", true},
+		{"retrieving", func(m *Model) { m.phase = phaseRetrieving }, "SEARCHING CODE", true},
 		{"compacting", func(m *Model) { m.compacting = true }, "COMPACTING", true},
-		{"verifying", func(m *Model) { m.verifying = true }, "VERIFYING", true},
-		{"retrieving beats streaming", func(m *Model) {
-			m.retrieving = true
-			m.streaming = true
-		}, "SEARCHING CODE", true},
-		{"tools beat retrieving", func(m *Model) {
+		{"verifying", func(m *Model) { m.phase = phaseVerifying }, "VERIFYING", true},
+		// Retrieving-while-streaming and tools-while-retrieving used to be
+		// representable, and these cases pinned which flag won. A turn now has
+		// one phase, so only the real states remain.
+		{"tools", func(m *Model) {
 			m.pending = pending
-			m.retrieving = true
+			m.phase = phaseTools
 		}, "TOOLS 0/1 · read_file", true},
+		{"compacting during a stream shows compacting", func(m *Model) {
+			m.phase = phaseStreaming
+			m.compacting = true
+		}, "COMPACTING", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -118,7 +121,7 @@ func TestChatErrSchedulesBackoffRetry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // keep logActivity's config write out of the real HOME
 	m := statusTestModel()
 	m.turnGen = 7
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{gen: 7, cancel: func() {}}
 
 	_, cmd := m.Update(chatErrMsg{gen: 7, err: errors.New("connection reset")})
@@ -146,7 +149,7 @@ func TestRetryStreamMsgStartsStream(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected the retry to start a new stream")
 	}
-	if !m.streaming || m.stream == nil {
+	if !m.generating() || m.stream == nil {
 		t.Fatal("retry did not start a stream")
 	}
 	if m.turnGen != 4 {
@@ -161,7 +164,7 @@ func TestRetryStreamMsgStaleGenDropped(t *testing.T) {
 
 	m.Update(retryStreamMsg{gen: 3})
 
-	if m.streaming || m.stream != nil {
+	if m.generating() || m.stream != nil {
 		t.Fatal("stale retry started a stream")
 	}
 }
@@ -169,7 +172,7 @@ func TestRetryStreamMsgStaleGenDropped(t *testing.T) {
 func TestChatDoneClearsRetryToast(t *testing.T) {
 	m := statusTestModel()
 	m.turnGen = 1
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{gen: 1, cancel: func() {}}
 	m.toast = "stream error — retrying (1/2) in 2s…"
 
@@ -178,7 +181,7 @@ func TestChatDoneClearsRetryToast(t *testing.T) {
 	if m.toast != "" {
 		t.Fatalf("retry toast should clear on success, got %q", m.toast)
 	}
-	if m.streaming {
+	if m.generating() {
 		t.Fatal("stream should be marked done")
 	}
 }
@@ -186,7 +189,7 @@ func TestChatDoneClearsRetryToast(t *testing.T) {
 func TestChatDoneKeepsOtherToasts(t *testing.T) {
 	m := statusTestModel()
 	m.turnGen = 1
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{gen: 1, cancel: func() {}}
 	m.toast = "context compacted"
 
@@ -208,7 +211,7 @@ func TestNarrowStatusLine(t *testing.T) {
 	if got := m.narrowStatusLine(); !strings.Contains(got, "READY") {
 		t.Fatalf("idle narrow status should show READY, got %q", got)
 	}
-	m.streaming = true
+	m.phase = phaseStreaming
 	if got := m.narrowStatusLine(); !strings.Contains(got, "THINKING") {
 		t.Fatalf("busy narrow status should show the phase, got %q", got)
 	}
@@ -228,7 +231,7 @@ func TestTranscriptPhaseSpinners(t *testing.T) {
 		setup func(m *Model)
 		want  string
 	}{
-		{"retrieving", func(m *Model) { m.retrieving = true }, "Searching code..."},
+		{"retrieving", func(m *Model) { m.phase = phaseRetrieving }, "Searching code..."},
 		{"compacting", func(m *Model) { m.compacting = true }, "Compacting context..."},
 	}
 	for _, c := range cases {
@@ -250,7 +253,7 @@ func TestTranscriptVerifyingLine(t *testing.T) {
 		{Role: "user", Content: "fix it"},
 		{Role: "assistant", Content: "done, I fixed it"},
 	}
-	m.verifying = true
+	m.phase = phaseVerifying
 	m.refreshTranscript()
 	if !strings.Contains(m.transcript.String(), "verifying…") {
 		t.Fatalf("transcript missing the verifying line:\n%s", m.transcript.String())
@@ -278,7 +281,7 @@ func TestLayoutSizesTextareaToPrefix(t *testing.T) {
 func TestInputPrefixWidthStableWhileStreaming(t *testing.T) {
 	m := statusTestModel()
 	idle := lipgloss.Width(m.inputPrefix())
-	m.streaming = true
+	m.phase = phaseStreaming
 	if busy := lipgloss.Width(m.inputPrefix()); busy != idle {
 		t.Fatalf("prefix width changed while streaming: %d -> %d", idle, busy)
 	}

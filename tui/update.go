@@ -66,6 +66,7 @@ type compactDoneMsg struct {
 	index   int
 	// reason explains a pass that produced no usable summary.
 	reason string
+	epoch  int // workEpoch at start; an abandoned turn's pass is dropped
 }
 
 type modelsLoadedMsg struct {
@@ -170,7 +171,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		// Keep the phase spinners and elapsed counters moving during any busy
 		// phase, including stalls mid-stream and the turn-start/verify gates.
-		if m.streaming || m.pending != nil || m.verifying || m.retrieving || m.compacting {
+		if m.turnActive() {
 			m.refreshTranscript()
 		}
 		if dc := m.maybeDream(); dc != nil {
@@ -187,7 +188,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case verifyDoneMsg:
-		m.verifying = false
+		if msg.epoch != m.workEpoch {
+			break // the turn was abandoned while the check ran
+		}
+		m.setPhase(phaseIdle, "check done")
+		m.verifyCancel = nil
 		if msg.ok {
 			m.lastVerification = fmt.Sprintf("%s (`%s`, checkpoint %s)", msg.label, msg.command, msg.fingerprint)
 			if m.profile.reviewPass() && !m.reviewedThisTurn {
@@ -309,8 +314,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if k := msg.String(); k == "ctrl+c" {
 			// Mid-turn, ctrl+c interrupts the turn (like esc) instead of
-			// quitting; it only quits when idle.
-			if m.streaming {
+			// quitting; it only quits when idle. "Mid-turn" includes the
+			// compile check, retrieval and compaction, not just streaming:
+			// ctrl+c during a slow build used to quit ocode outright.
+			if m.turnActive() {
 				m.cancelSubagents()
 				return m, m.interruptTurn()
 			}
@@ -327,14 +334,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only from chat: inside any modal esc means "close this", not "cancel the
 		// turn" — at a permission prompt it means "deny this call" (updatePermission),
 		// and the jobs and endpoint modals can both be opened mid-turn.
-		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.streaming && m.stream != nil &&
+		if (msg.String() == "ctrl+s" || msg.String() == "esc") && m.turnActive() &&
 			m.state == stateChat {
 			m.cancelSubagents()
 			return m, m.interruptTurn()
 		}
 		// Idle esc with no menus open cancels running background sub-agents —
 		// the only thing still working when no turn is in flight.
-		if msg.String() == "esc" && !m.streaming && m.pending == nil && m.state == stateChat && m.runningSubagentJobs() > 0 {
+		if msg.String() == "esc" && !m.turnActive() && m.state == stateChat && m.runningSubagentJobs() > 0 {
 			m.cancelSubagents()
 			m.toast = "cancelled background sub-agents"
 			return m, nil
@@ -709,7 +716,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.renderQueued = false
-		if !m.streaming {
+		if m.phase != phaseStreaming {
 			break
 		}
 		wasAtBottom := m.viewport.AtBottom()
@@ -768,12 +775,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = append(m.history, advisory("[LOOP BROKEN] You keep restating the same message. Tools are disabled for your next response — answer the user in plain text."))
 			m.stopForBlockerReport()
 		}
-		m.pending = &pendingBatch{
-			calls:   calls,
-			results: make([]api.Message, len(calls)),
-			started: make([]bool, len(calls)),
-			gen:     m.turnGen,
-		}
+		m.startToolBatch(calls)
 		m.markToolsStart(len(calls))
 		m.busySince = time.Now()
 		cmd := m.processPendingTools()
@@ -874,8 +876,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Wake the parent when it is idle so it reacts to the report now
 		// instead of waiting for the user's next message. A user-interrupted
 		// job doesn't wake: esc meant stop.
-		if !job.wasInterrupted() && !m.streaming && m.pending == nil &&
-			!m.verifying && !m.retrieving && !m.compacting &&
+		if !job.wasInterrupted() && !m.turnActive() &&
 			m.state == stateChat && m.modelName != "" {
 			// The user's turn already ended, so this reply is a new one: it must not
 			// inherit that turn's bans, forced ending, or spent step budget — the
@@ -902,8 +903,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// now instead of waiting for the user's next message. (There is no
 		// interrupted variant: kills come from the model's own shell_output
 		// call, which means a turn is already in flight.)
-		if !m.streaming && m.pending == nil &&
-			!m.verifying && !m.retrieving && !m.compacting &&
+		if !m.turnActive() &&
 			m.state == stateChat && m.modelName != "" {
 			// This reply is a new turn: it must not inherit the previous
 			// turn's bans, forced ending, or spent step budget.
@@ -947,7 +947,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !structuredOutput {
 			structuredOutput = likelyStructuredOutput(finalAssistant)
 		}
-		m.streaming = false
+		m.setPhase(phaseIdle, "reply done")
 		m.stream = nil
 		m.busySince = time.Time{}
 		m.lastActivity = time.Now() // idle clock starts when the turn finishes
@@ -1004,12 +1004,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content:   historyContent,
 				ToolCalls: parsed,
 			})
-			m.pending = &pendingBatch{
-				calls:   parsed,
-				results: make([]api.Message, len(parsed)),
-				started: make([]bool, len(parsed)),
-				gen:     m.turnGen,
-			}
+			m.startToolBatch(parsed)
 			m.markToolsStart(len(parsed))
 			m.busySince = time.Now()
 			if cmd := m.processPendingTools(); cmd != nil {
@@ -1112,7 +1107,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyGPUCheck(msg)
 
 	case compactDoneMsg:
+		if msg.epoch != m.workEpoch {
+			break // started before the turn was abandoned; its flag is already clear
+		}
 		m.compacting = false
+		m.compactCancel = nil
 		// A blank summary means the pass failed. Moving the boundary anyway
 		// would hide half the history behind nothing, so leave it and surface
 		// any overflow the turn was waiting on.
@@ -1181,7 +1180,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ragRetrievedMsg:
 		// Retrieval finished for a user turn; record the block and start the
 		// model call now that relevant context is in hand.
-		m.retrieving = false
+		if msg.epoch != m.workEpoch {
+			break // the turn was abandoned during retrieval: start nothing
+		}
+		m.setPhase(phaseIdle, "retrieved")
 		m.lastRagQuery = msg.query
 		m.lastRagBlock = msg.block
 		cmds = append(cmds, m.startStream())
@@ -1229,7 +1231,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// identical request overflows identically all three times, so the backoff
 		// spends ~12s to end the turn anyway. Compaction is forced here because
 		// the proactive 80% threshold never fired — m.contextLimit is only a guess
-		// on an OpenAI-compatible host. Note m.streaming is deliberately left set:
+		// on an OpenAI-compatible host. Note the phase is deliberately left as is:
 		// the status line and the transcript spinner both rank compacting above
 		// streaming, so this paints exactly like a proactive pass.
 		overflow := agent.IsContextOverflow(msg.err)
@@ -1301,7 +1303,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			source = "cloud"
 		}
 		m.lastError = fmt.Sprintf("[%s] error: %v", source, msg.err)
-		m.streaming = false
+		m.setPhase(phaseIdle, "error")
 		m.stream = nil
 		m.compacting = false
 		// Without this, a turn killed while its overflow recovery rode on an
@@ -1343,7 +1345,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Auto-submit: when the user stops talking, send the message.
 				val := strings.TrimSpace(m.input.Value())
 				if val != "" {
-					if m.streaming {
+					if m.turnInProgress() {
 						m.queue = append(m.queue, val)
 						m.input.Reset()
 						m.toast = fmt.Sprintf("queued (%d in queue)", len(m.queue))

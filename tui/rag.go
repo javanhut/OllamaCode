@@ -29,6 +29,7 @@ type ragLoadedMsg struct {
 type ragRetrievedMsg struct {
 	query string
 	block string
+	epoch int // workEpoch at start; an abandoned turn's lookup is dropped
 }
 type ragRefreshedMsg struct{ idx *semantic.Index }
 
@@ -91,6 +92,7 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 	model := m.embedModel()
 	topK, maxTokens := m.ragLimits()
 	budget := min(m.contextLimit/8, maxTokens)
+	epoch := m.workEpoch
 	return func() tea.Msg {
 		results, err := idx.Search(query, func(q string) ([]float32, error) {
 			embs, err := host.Embed(model, []string{q})
@@ -103,9 +105,9 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 			return embs[0], nil
 		}, topK)
 		if err != nil {
-			return ragRetrievedMsg{query: query, block: ""}
+			return ragRetrievedMsg{query: query, block: "", epoch: epoch}
 		}
-		return ragRetrievedMsg{query: query, block: formatRAGBlock(results, budget)}
+		return ragRetrievedMsg{query: query, block: formatRAGBlock(results, budget), epoch: epoch}
 	}
 }
 
@@ -223,7 +225,7 @@ func (m *Model) startStreamWithRAGGate(query string) []tea.Cmd {
 	if m.ragEnabled() && m.ragReady {
 		// The model call waits on retrieval (fires on ragRetrievedMsg); flag it
 		// so the UI shows a searching state instead of looking idle.
-		m.retrieving = true
+		m.setPhase(phaseRetrieving, "auto-RAG")
 		m.busySince = time.Now()
 		cmds = append(cmds, m.retrieveRAGCmd(query))
 	} else {

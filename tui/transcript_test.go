@@ -130,7 +130,7 @@ func TestStructuredStreamIsWithheldFromLiveRender(t *testing.T) {
 		mm, _ := New().Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 		m := mm.(*Model)
 		m.history = append(m.history, api.Message{Role: "user", Content: "read the config"})
-		m.streaming = true
+		m.phase = phaseStreaming
 		m.stream = &streamState{}
 		m.streamBuf.WriteString(opening)
 		m.stream.visibility = true
@@ -148,7 +148,7 @@ func TestStructuredStreamIsWithheldFromLiveRender(t *testing.T) {
 	mm, _ := New().Update(tea.WindowSizeMsg{Width: 120, Height: 34})
 	m := mm.(*Model)
 	m.history = append(m.history, api.Message{Role: "user", Content: "read the config"})
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{}
 	m.streamBuf.WriteString("Here is what LIVEPROSE the config does")
 	m.stream.visibility = true

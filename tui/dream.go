@@ -58,7 +58,7 @@ func (m *Model) dreamsOn() bool {
 // the session has been idle past the threshold (and we haven't hit the per-sleep
 // cap or the inter-dream interval), or nil.
 func (m *Model) maybeDream() tea.Cmd {
-	if !m.dreamsOn() || m.streaming || m.pending != nil || m.dreaming {
+	if !m.dreamsOn() || m.turnActive() || m.dreaming {
 		return nil
 	}
 	if m.state != stateChat || m.modelName == "" || len(m.history) < 2 {

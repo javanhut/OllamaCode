@@ -209,14 +209,7 @@ func (m *Model) interruptTurn() tea.Cmd {
 				"partial_content": m.streamBuf.String(), "partial_thinking": m.streamThinking.String(),
 			}})
 	}
-	if m.stream != nil && m.stream.cancel != nil {
-		m.stream.cancel()
-	}
-	m.turnGen++ // orphan any in-flight stream/tool messages
-	m.streaming = false
-	m.stream = nil
-	m.pending = nil
-	m.busySince = time.Time{}
+	m.abandonTurnWork()
 	m.finishTurnClock() // bank what the cancelled turn cost before the reset
 	m.resetTurnGuards()
 	m.ratedFrom, m.ratedTo, m.turnRating = 0, 0, "" // an abandoned turn leaves nothing to rate
@@ -295,9 +288,10 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 	sourceTokens := estimateMsgsTokens(toCompact) + estimateTokens(m.archiveSummary)
 
 	host := m.host
-	gen := m.turnGen
+	epoch := m.workEpoch
+	ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout)
+	m.compactCancel = cancel
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout)
 		defer cancel()
 		resp, err := host.ChatOnce(ctx, req)
 		// The tools ride along only to keep the cached prefix intact. A model
@@ -308,17 +302,21 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 			resp, err = host.ChatOnce(ctx, req)
 		}
 		if err != nil {
-			return chatErrMsg{gen: gen, err: err}
+			// Through compactDoneMsg, not chatErrMsg: a chatErrMsg carries a
+			// turnGen that has usually moved on by now, so it was dropped as
+			// stale and left compacting stuck on, blocking every later pass.
+			return compactDoneMsg{index: mid, epoch: epoch, reason: "request failed: " + err.Error()}
 		}
 		summary := stripThinkBlock(resp.Message.Content)
 		// A summary that is no shorter than what it replaces reclaims nothing;
 		// moving the boundary on it would only trade history for paraphrase.
 		if estimateTokens(summary) >= sourceTokens {
-			return compactDoneMsg{index: mid, reason: "summary was not shorter than the history it replaced"}
+			return compactDoneMsg{index: mid, epoch: epoch, reason: "summary was not shorter than the history it replaced"}
 		}
 		return compactDoneMsg{
 			summary: summary,
 			index:   mid,
+			epoch:   epoch,
 		}
 	}
 }
@@ -777,7 +775,7 @@ func (m *Model) startStream() tea.Cmd {
 	m.stream = &streamState{resp: respCh, errs: errCh, cancel: cancel, modelSource: source, gen: m.turnGen,
 		constrained: constrained, toolsSuppressed: suppressed,
 		promptTokens: promptTokens, firstTokenBy: time.Now().Add(prefillBudget(promptTokens))}
-	m.streaming = true
+	m.setPhase(phaseStreaming, "model call")
 	m.streamBuf.Reset()
 	m.thinkTail = ""
 	m.streamThinking.Reset()

@@ -104,6 +104,32 @@ submit()
   chatDoneMsg       → finish, or hand off an offloaded plan, or verify-gate
 ```
 
+### Turn phases
+
+A turn is in exactly one phase at a time (`tui/turn.go`):
+
+```
+idle → retrieving → streaming ⇄ tools → verifying → idle
+```
+
+Repair rounds go from verifying back to streaming, and any phase can drop to
+idle (done, error, interrupt, a pause for the user). Every change goes through
+`setPhase`, which records it in the `--debug` trace. Compaction is a separate
+region (`m.compacting`), because a proactive pass runs alongside the stream.
+
+Two predicates answer the two questions the code keeps asking:
+
+- `turnInProgress()`: a turn is running, so a new message waits in the queue.
+- `turnActive()`: a turn or a compaction is running, so esc and ctrl+c have
+  something to stop, and nothing new starts on its own.
+
+Everything a turn starts shares its lifetime. `abandonTurnWork` (used by esc,
+`/rewind` and `/clear`) cancels the stream, the tool batch's context, the
+compile check and any compaction. Results already on their way are dropped by
+`turnGen` (stream and tools) or `workEpoch` (compile check, retrieval,
+compaction). Only an abandoned turn advances `workEpoch`, so a proactive
+compaction that spans several steps is not mistaken for stale.
+
 ### Prompt assembly
 
 Ordering is deliberate and stable:

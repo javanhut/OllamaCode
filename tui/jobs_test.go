@@ -130,14 +130,14 @@ func TestJobsModalKeys(t *testing.T) {
 func TestJobsModalEscDoesNotInterruptStream(t *testing.T) {
 	m := newSized(t)
 	m.state = stateJobs
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{gen: m.turnGen}
 
 	m = press(t, m, tea.KeyEscape, 0)
 	if m.state != stateChat {
 		t.Fatalf("esc left state at %v, want stateChat", m.state)
 	}
-	if !m.streaming {
+	if !m.generating() {
 		t.Fatal("esc in the jobs modal interrupted the turn")
 	}
 }

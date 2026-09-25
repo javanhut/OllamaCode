@@ -166,8 +166,8 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
 | `Enter` | Send |
 | `Shift+Enter` / `Ctrl+J` | Newline |
 | `Shift+Tab` | Cycle mode: explore → plan → write → explore |
-| `Esc` / `Ctrl+S` | Interrupt the running turn |
-| `Ctrl+C` | Interrupt mid-turn; quit when idle |
+| `Esc` / `Ctrl+S` | Interrupt the running turn in any phase (model, tools, compile check, code search, compaction) and cancel its work |
+| `Ctrl+C` | Interrupt mid-turn, as `Esc` does; quit only when nothing is running |
 | `↑` / `↓` | Recall previous messages (when the input is empty or unmodified) |
 | `Ctrl+F` | Search the transcript |
 | `n` / `N` | Next / previous match (with the search prompt dismissed) |

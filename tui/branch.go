@@ -171,13 +171,7 @@ func (m *Model) rewindCommand(args string) {
 // whole reset at once precisely so no reader is left holding an index into
 // messages that no longer exist.
 func (m *Model) rewindTo(cut int) {
-	if m.stream != nil && m.stream.cancel != nil {
-		m.stream.cancel()
-	}
-	m.turnGen++ // orphan anything in flight from the turn being dropped
-	m.streaming = false
-	m.stream = nil
-	m.pending = nil
+	m.abandonTurnWork() // orphan anything in flight from the turn being dropped
 	m.streamBuf.Reset()
 	m.streamThinking.Reset()
 	m.deferredPrompt = stateSettings // nothing left to approve or answer

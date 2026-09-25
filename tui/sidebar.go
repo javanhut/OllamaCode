@@ -63,15 +63,15 @@ func (m *Model) statusParts() (label, elapsed string, busy bool) {
 			return fmt.Sprintf("TOOLS %d/%d · %s", m.pending.done, len(m.pending.calls), tool), m.elapsedSuffix(), true
 		}
 		return fmt.Sprintf("TOOLS %d/%d", m.pending.done, len(m.pending.calls)), m.elapsedSuffix(), true
-	case m.retrieving:
+	case m.phase == phaseRetrieving:
 		return "SEARCHING CODE", m.elapsedSuffix(), true
 	case m.compacting:
 		return "COMPACTING", m.elapsedSuffix(), true
-	case m.streaming && m.streamBuf.Len() == 0:
+	case m.generating() && m.streamBuf.Len() == 0:
 		return "THINKING", m.elapsedSuffix(), true
-	case m.streaming:
+	case m.generating():
 		return "STREAMING", m.elapsedSuffix(), true
-	case m.verifying:
+	case m.phase == phaseVerifying:
 		return "VERIFYING", m.elapsedSuffix(), true
 	case m.dreaming:
 		return "DREAMING", "", true

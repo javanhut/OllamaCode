@@ -29,7 +29,7 @@ func interruptTestModel() *Model {
 func TestInterruptRunsQueuedMessageNext(t *testing.T) {
 	cancelled := false
 	m := interruptTestModel()
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() { cancelled = true }}
 	m.queue = []string{"first queued", "second queued"}
 	m.streamBuf.WriteString("partial reply")
@@ -54,7 +54,7 @@ func TestInterruptRunsQueuedMessageNext(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected a stream command for the dequeued message")
 	}
-	if !m.streaming || m.stream == nil {
+	if !m.generating() || m.stream == nil {
 		t.Fatal("dequeued message did not start a new stream")
 	}
 	m.stream.cancel()
@@ -62,7 +62,7 @@ func TestInterruptRunsQueuedMessageNext(t *testing.T) {
 
 func TestInterruptWithoutQueueJustStops(t *testing.T) {
 	m := interruptTestModel()
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 	m.state = statePermission
 	m.pending = &pendingBatch{}
@@ -72,7 +72,7 @@ func TestInterruptWithoutQueueJustStops(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected no follow-up command with an empty queue")
 	}
-	if m.streaming || m.stream != nil || m.pending != nil {
+	if m.generating() || m.stream != nil || m.pending != nil {
 		t.Fatal("interrupt left turn state set")
 	}
 	if m.state != stateChat {
@@ -110,7 +110,7 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	m := interruptTestModel()
 	m.mode = WriteMode
 	m.state = statePermission
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 	m.busySince = time.Now()
 	m.pending = &pendingBatch{
@@ -128,7 +128,7 @@ func TestDenyPermissionRecordsFailure(t *testing.T) {
 	if m.state != stateChat {
 		t.Fatalf("expected stateChat after denial, got %v", m.state)
 	}
-	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+	if m.generating() || m.stream != nil || !m.busySince.IsZero() {
 		t.Fatal("denial left the UI thinking, so the user's feedback would be queued")
 	}
 	// The batch finalizes into history once every call is done.
@@ -219,7 +219,7 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	m := interruptTestModel()
 	m.mode = PlanMode
 	m.notes.set("1. edit tui/mode.go\n2. run go test ./...")
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 	m.busySince = time.Now()
 	call := tc("ask_user", `{"question":"Does this plan match what you want?","options":"approve|revise"}`)
@@ -239,7 +239,7 @@ func TestAskUserStopsTurnAndRecordsPlanReviewCheckpoint(t *testing.T) {
 	if m.toast != "waiting for your answer" {
 		t.Fatalf("toast = %q", m.toast)
 	}
-	if m.streaming || m.stream != nil || !m.busySince.IsZero() {
+	if m.generating() || m.stream != nil || !m.busySince.IsZero() {
 		t.Fatal("ask_user left the UI thinking, so the user's answer would be queued")
 	}
 

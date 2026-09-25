@@ -26,6 +26,7 @@ type verifyDoneMsg struct {
 	fingerprint string
 	output      string
 	lint        string // capped linter diagnostics, "" when no linter applies
+	epoch       int    // workEpoch at start; an abandoned turn's check is dropped
 }
 
 const noCheckChallenge = "[SELF-CHECK] Before you finish: did you ACTUALLY verify this works — run it, build it, or test it — and watch it succeed? If not, do that now with your tools. If you genuinely cannot verify it, say so plainly and list exactly what remains unverified. Do not claim something works without evidence."
@@ -84,15 +85,17 @@ func (m *Model) maybeVerifyGate() tea.Cmd {
 		}
 		return nil
 	}
-	m.verifying = true
+	m.setPhase(phaseVerifying, "checking the build")
 	m.busySince = time.Now()
 	return m.verifyRunCmd(cmd, label, verification.Fingerprint(".", m.changedPaths()))
 }
 
 // verifyRunCmd runs the compile check in the background and reports the result.
 func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
+	epoch := m.workEpoch
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	m.verifyCancel = cancel
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		out, err := tools.NewShellCommand(ctx, command).CombinedOutput()
 		text := strings.TrimSpace(string(out))
@@ -121,7 +124,7 @@ func (m *Model) verifyRunCmd(command, label, fingerprint string) tea.Cmd {
 			_ = m.trace.Record(tracepkg.Event{Kind: "verification", Turn: m.turnGen, Model: m.modelName,
 				Result: text, Error: errText, Metadata: map[string]any{"command": command, "label": label, "fingerprint": fingerprint[:12], "ok": err == nil, "lint": lint}})
 		}
-		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text, lint: lint}
+		return verifyDoneMsg{ok: err == nil, label: label, command: command, fingerprint: fingerprint[:12], output: text, lint: lint, epoch: epoch}
 	}
 }
 

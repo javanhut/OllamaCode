@@ -143,7 +143,7 @@ func TestSubagentCompletionNotifies(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected commands (re-armed waiter + wake stream)")
 	}
-	if !m.streaming || m.stream == nil {
+	if !m.generating() || m.stream == nil {
 		t.Fatal("idle parent should have been woken with a new stream")
 	}
 	m.stream.cancel()
@@ -157,7 +157,7 @@ func TestSubagentCompletionDoesNotWakeBusyOrInterrupted(t *testing.T) {
 	// Busy parent: notification lands in history, no new stream.
 	m := subagentTestModel()
 	m.modelName = "test-model"
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 	job := &subagentJob{id: 1, tasks: []string{"t"}, started: time.Now()}
 	job.finish("report")
@@ -176,7 +176,7 @@ func TestSubagentCompletionDoesNotWakeBusyOrInterrupted(t *testing.T) {
 	job2 := &subagentJob{id: 2, tasks: []string{"t"}, started: time.Now(), interrupted: true}
 	job2.finish("(cancelled)")
 	m2.Update(subagentDoneMsg{job: job2})
-	if m2.streaming || m2.stream != nil {
+	if m2.generating() || m2.stream != nil {
 		t.Fatal("interrupted job must not wake the parent")
 	}
 	if !strings.Contains(m2.history[0].Content, "JOB 2 CANCELLED") {
@@ -363,7 +363,7 @@ func TestInterruptCancelsBackgroundSubagents(t *testing.T) {
 	}
 	<-started
 
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{cancel: func() {}}
 	m.cancelSubagents() // what the esc/ctrl+c handlers do before interruptTurn
 	m.interruptTurn()

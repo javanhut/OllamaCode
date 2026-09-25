@@ -64,7 +64,7 @@ func TestPrefillBudgetCoversLongPrompts(t *testing.T) {
 func TestPrefillingStatus(t *testing.T) {
 	m := &Model{streamBuf: &strings.Builder{}, md: newMarkdownRenderer(), notesMd: newMarkdownRenderer()}
 	m.viewport.SetWidth(80)
-	m.streaming = true
+	m.phase = phaseStreaming
 	m.stream = &streamState{promptTokens: 77000}
 
 	var b strings.Builder

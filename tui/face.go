@@ -186,7 +186,7 @@ func (m *Model) faceView() string {
 		dir, lid = eyeCenter, lidClosed
 		z := []string{"z    ", " zZ  ", "  zZ ", "   zZ"}
 		mouth = z[(f/2)%len(z)] // slow drift
-	case m.streaming: // responding — mouth opens and closes while talking
+	case m.generating(): // responding — mouth opens and closes while talking
 		label = "speaking"
 		dir, lid = eyeCenter, lidOpen
 		talk := []string{"-----", "[ - ]", "[   ]", "[ - ]"}

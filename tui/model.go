@@ -404,7 +404,7 @@ type Model struct {
 	viewport      viewport.Model
 	input         textarea.Model
 	stream        *streamState
-	streaming     bool
+	phase         turnPhase // where the current turn is (turn.go)
 	streamBuf     *strings.Builder
 	streamMDSrc   string // last stable prefix rendered by streamMarkdown, its render, and the width it was rendered at
 	streamMD      string
@@ -452,6 +452,13 @@ type Model struct {
 	lastPromptEval int
 	cache          cacheMonitor  // prompt-cache reuse, reloads, GPU placement (cache.go)
 	selection      toolSelection // capped tool set last sent, kept stable for the prompt cache (mode.go)
+	// workEpoch advances only when a turn is abandoned (turn.go). Background
+	// work stamps it at start, and a result from an older epoch is dropped:
+	// turnGen can't serve, since it advances on every step and would discard
+	// a proactive compaction that legitimately spans several.
+	workEpoch      int
+	compactCancel  context.CancelFunc
+	verifyCancel   context.CancelFunc
 	prevPromptEval int
 
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)
@@ -478,7 +485,6 @@ type Model struct {
 	// finds those sites, because a snapshot describing a history the model no
 	// longer has will silently suppress a baseline it can never get back.
 	contextSnapshot map[string]string
-	retrieving      bool // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
 	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
@@ -510,7 +516,6 @@ type Model struct {
 	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths    map[string]bool // exact files covered by targeted verification
 	fetchedContent      bool            // untrusted web content entered the conversation this turn
-	verifying           bool            // a compile check is running
 	verifyAttempts      int             // failed compile checks this turn
 	lastVerification    string          // exact command/evidence from the latest gate
 	challengedThisTurn  bool            // self-check challenge already issued this turn

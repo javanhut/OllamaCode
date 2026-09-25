@@ -19,7 +19,7 @@ func (m *Model) refreshTranscript() {
 	// frame then reads that as "the user scrolled up" and stops following.
 	atBottom := !m.ready || m.viewport.AtBottom()
 	var b strings.Builder
-	if len(m.history) == 0 && !m.streaming && m.lastError == "" {
+	if len(m.history) == 0 && !m.turnInProgress() && m.lastError == "" {
 		// With the welcome panel off, an empty session rendered as a blank void.
 		if m.welcomeOn() {
 			b.WriteString(m.welcomePanel())
@@ -93,7 +93,7 @@ func (m *Model) refreshTranscript() {
 		}
 
 		switch {
-		case m.streaming:
+		case m.generating():
 			if openTurn == nil {
 				openTurn = &assistantTurn{userIdx: userIdx}
 			}
@@ -104,10 +104,10 @@ func (m *Model) refreshTranscript() {
 			if m.streamBuf.Len() > 0 && (m.stream == nil || !m.stream.hideContent) {
 				openTurn.segments = append(openTurn.segments, turnSegment{text: m.streamBuf.String(), live: true})
 			}
-		case m.retrieving || m.compacting || m.verifying:
+		case m.turnActive():
 			// Turn-start gates (RAG retrieval, compaction) and the verify gate
-			// run with m.streaming false; open a turn anyway so the phase
-			// spinner renders instead of the transcript looking frozen.
+			// run outside the generating phases; open a turn anyway so the
+			// phase spinner renders instead of the transcript looking frozen.
 			if openTurn == nil {
 				openTurn = &assistantTurn{userIdx: userIdx}
 			}
@@ -299,11 +299,11 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 	if t.streaming && !hasText && m.pending == nil {
 		phase := " Thinking..."
 		switch {
-		case m.retrieving:
+		case m.phase == phaseRetrieving:
 			phase = " Searching code..."
 		case m.compacting:
 			phase = " Compacting context..."
-		case m.verifying:
+		case m.phase == phaseVerifying:
 			phase = " Verifying..."
 		case m.prefilling():
 			// A long prompt is minutes of silence while the model reads it. Left as
@@ -398,7 +398,7 @@ func (m *Model) writeAssistantTurn(b *strings.Builder, t *assistantTurn, _ bool)
 		}
 		b.WriteString("\n")
 	}
-	if t.streaming && m.verifying {
+	if t.streaming && m.phase == phaseVerifying {
 		b.WriteString(m.spinner.View())
 		b.WriteString(mutedStyle.Render(" verifying…" + m.elapsedSuffix()))
 		b.WriteString("\n")

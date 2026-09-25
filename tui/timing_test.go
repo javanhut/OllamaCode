@@ -154,7 +154,7 @@ func TestShowThinkingToggle(t *testing.T) {
 func TestShowThinkingWhileStreaming(t *testing.T) {
 	m := &Model{
 		cfg:        config{Thinking: true},
-		streaming:  true,
+		phase:      phaseStreaming,
 		history:    []api.Message{{Role: "user", Content: "why?"}},
 		streamBuf:  &strings.Builder{},
 		transcript: &strings.Builder{},

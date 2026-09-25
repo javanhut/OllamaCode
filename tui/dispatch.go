@@ -35,6 +35,10 @@ var webContentTools = map[string]bool{
 const maxConcurrentReads = 8
 
 type pendingBatch struct {
+	// ctx is the batch's lifetime: every tool call in it derives from ctx, so
+	// abandoning the turn stops running commands instead of orphaning them.
+	ctx        context.Context
+	cancel     context.CancelFunc
 	calls      []tools.ToolCall
 	results    []api.Message
 	started    []bool
@@ -58,7 +62,7 @@ func (m *Model) pauseForUser(toast, reason string) {
 		_ = m.trace.Record(tracepkg.Event{Kind: "turn_end", Turn: m.turnGen, Model: m.modelName,
 			Metadata: map[string]any{"reason": reason, "steps": m.stepCount, "open_todos": m.todos.openCount()}})
 	}
-	m.streaming = false
+	m.setPhase(phaseIdle, reason)
 	m.stream = nil
 	m.busySince = time.Time{}
 	m.toast = toast
@@ -148,6 +152,10 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 	// Recorded here, on the update goroutine: invokeTool runs on a tool
 	// goroutine, where touching m.cfg raced the UI.
 	m.noteActivity("Tool: " + call.Function.Name)
+	parent := context.Background()
+	if m.pending != nil && m.pending.ctx != nil {
+		parent = m.pending.ctx
+	}
 	return func() tea.Msg {
 		var req *modeSwitchRequest
 		if call.Function.Name == "switch_mode" {
@@ -155,7 +163,7 @@ func (m *Model) invokeToolCmd(gen, index int, call tools.ToolCall) tea.Cmd {
 		}
 
 		timeout := tools.ToolCallTimeout(call)
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 
 		done := make(chan api.Message, 1)
@@ -241,7 +249,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// it (an /undo typed mid-turn) can land here.
 		m.flushDeferredAdvisory()
 		m.noteFetchedContent(batchCalls, batchResults)
-		m.pending = nil
+		m.dropPending()
 		m.markToolsDone()
 
 		// A denial is a user decision, not another recoverable tool failure. End

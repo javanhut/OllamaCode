@@ -81,7 +81,7 @@ func TestDisplayTokensIdleUsesCompletedCount(t *testing.T) {
 func TestDisplayTokensMidTurnShowsLiveEstimate(t *testing.T) {
 	resetRatio(t)
 	m := &Model{
-		streaming:   true,
+		phase:       phaseStreaming,
 		totalTokens: 100, // stale: last completed turn
 		streamBuf:   &strings.Builder{},
 		history:     []api.Message{{Role: "user", Content: strings.Repeat("x", 4000)}},
@@ -97,7 +97,7 @@ func TestDisplayTokensMidTurnShowsLiveEstimate(t *testing.T) {
 func TestDisplayTokensNeverDropsBelowCompletedCount(t *testing.T) {
 	resetRatio(t)
 	m := &Model{
-		streaming:   true,
+		phase:       phaseStreaming,
 		totalTokens: 50000,
 		streamBuf:   &strings.Builder{},
 		history:     []api.Message{{Role: "user", Content: "hi"}},
@@ -109,7 +109,7 @@ func TestDisplayTokensNeverDropsBelowCompletedCount(t *testing.T) {
 
 func TestDisplayTokensNilStreamBuf(t *testing.T) {
 	resetRatio(t)
-	m := &Model{streaming: true, totalTokens: 42}
+	m := &Model{phase: phaseStreaming, totalTokens: 42}
 	if got := m.displayTokens(); got != 42 {
 		t.Fatalf("nil streamBuf should fall back to the completed count, got %d", got)
 	}
