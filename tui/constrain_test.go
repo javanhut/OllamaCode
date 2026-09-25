@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestToolCallFormatGating(t *testing.T) {
 		if !ok || !strings.Contains(string(first), "anyOf") {
 			t.Fatalf("first probe should be the union, got ok=%v %s", ok, first)
 		}
-		if !m.downgradeToolCallFormat() {
+		if !m.downgradeToolCallFormat(errors.New("unexpected status code: 400: schema conversion failed")) {
 			t.Fatal("downgrade should offer a weaker rung")
 		}
 		next, ok := m.toolCallFormat(true, defs)

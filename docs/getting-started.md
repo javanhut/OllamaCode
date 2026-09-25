@@ -54,6 +54,11 @@ hardcoded. Models under 15B parameters automatically get a compact system
 prompt and a trimmed toolset. Sampling follows the model's vendor: see
 [Sampling](configuration.md#sampling).
 
+A greeting ("hello", "hey there", "good morning") gets a short chat reply
+asking what you'd like to do; your next message is the task. The model asks
+open questions in chat as well, and only shows a picker when the answer is a
+choice between a few options.
+
 ## Your first task
 
 Type what you want. You start in explore mode, which is read-only, so nothing

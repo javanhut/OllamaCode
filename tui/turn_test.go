@@ -5,10 +5,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/tools"
 )
 
 func isQuit(cmd tea.Cmd) bool {
@@ -166,5 +168,44 @@ func TestInterruptFromEveryPhaseReachesIdle(t *testing.T) {
 				t.Fatalf("%s: ctrl+c should quit once idle", p)
 			}
 		}
+	}
+}
+
+// Keys that arrive as an approval prompt opens are the tail of whatever the
+// user was typing, not an answer: "now rewrite…" used to deny a write with its
+// first letter.
+func TestPromptIgnoresKeysDuringGrace(t *testing.T) {
+	m := statusTestModel()
+	m.startToolBatch([]tools.ToolCall{{Function: tools.ToolCallFunction{Name: "write_file", Arguments: []byte(`{"path":"a.txt","content":"x"}`)}}})
+	m.showPrompt(statePermission)
+
+	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if m.state != statePermission || m.pending.started[0] {
+		t.Fatal("a key typed as the prompt opened answered it")
+	}
+
+	// The user has read it and stopped typing.
+	m.promptShownAt = time.Now().Add(-time.Second)
+	m.promptKeyAt = time.Now().Add(-time.Second)
+	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if m.state == statePermission {
+		t.Fatal("a deliberate answer after the grace period was ignored")
+	}
+}
+
+// Someone typing through the prompt without noticing it keeps it deaf until
+// they pause, however long they type.
+func TestPromptGraceExtendsWhileTyping(t *testing.T) {
+	m := statusTestModel()
+	m.startToolBatch([]tools.ToolCall{{Function: tools.ToolCallFunction{Name: "write_file", Arguments: []byte(`{"path":"a.txt","content":"x"}`)}}})
+	m.showPrompt(statePermission)
+	m.promptShownAt = time.Now().Add(-2 * promptGrace) // opened a while ago...
+	m.promptKeyAt = time.Now()                         // ...but the user is still typing
+	m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if m.state != statePermission || m.pending.started[0] {
+		t.Fatal("a key mid-typing approved the prompt")
+	}
+	if !strings.Contains(m.toast, "prompt just opened") {
+		t.Fatalf("toast = %q, want an explanation", m.toast)
 	}
 }

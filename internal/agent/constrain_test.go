@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -433,5 +434,28 @@ func TestUnwrapResponseEnvelopeIsExact(t *testing.T) {
 		if got, ok := UnwrapResponseEnvelope(content); ok {
 			t.Errorf("ordinary content %q was unwrapped as %q", content, got)
 		}
+	}
+}
+
+// Ollama 0.34 rejects any request that carries tools and a format, even
+// format:"json", so after that error every weaker rung would fail too.
+func TestRejectSkipsRungsOnToolGrammarConflict(t *testing.T) {
+	c := NewConstraintCache()
+	conflict := errors.New(`unexpected status code: 400: {"error":{"code":400,"message":"Failed to initialize samplers: failed to parse grammar"}}`)
+	if !c.Reject("k", conflict) {
+		t.Fatal("the first conflict should allow one unconstrained retry")
+	}
+	if got := c.rungs["k"]; got != RungOff {
+		t.Fatalf("rung = %s, want off", got)
+	}
+	if c.Reject("k", conflict) {
+		t.Fatal("nothing weaker than off to retry with")
+	}
+
+	// Any other rejection still steps down one rung at a time.
+	c2 := NewConstraintCache()
+	c2.Reject("k", errors.New("unexpected status code: 400: schema conversion failed"))
+	if got := c2.rungs["k"]; got != RungNameEnum {
+		t.Fatalf("rung = %s, want name-enum", got)
 	}
 }

@@ -129,7 +129,38 @@ func (m *Model) promptState(s state) {
 		m.deferredPrompt = s
 		return
 	}
+	m.showPrompt(s)
+}
+
+// promptGrace is how long a prompt that opened on its own ignores keys, and
+// how long typing must pause before it listens. It appears mid-turn, often
+// while the user is typing their next message, and the next keystroke used to
+// answer it: "yes, and…" approved a write the user never saw, and "now
+// rewrite…" denied one with its first letter. Someone who hasn't noticed the
+// prompt keeps typing, so each ignored key extends the grace: the prompt
+// listens once typing stops.
+const promptGrace = 600 * time.Millisecond
+
+// showPrompt opens an approval or question prompt and starts its grace period.
+func (m *Model) showPrompt(s state) {
 	m.state = s
+	m.promptShownAt = time.Now()
+}
+
+// inPromptGrace reports whether a key is too soon to be an answer: within the
+// grace after the prompt opened, or after the last key it ignored. It records
+// the key when it swallows one, and says why on the status line.
+func (m *Model) inPromptGrace() bool {
+	since := m.promptShownAt
+	if m.promptKeyAt.After(since) {
+		since = m.promptKeyAt
+	}
+	if time.Since(since) >= promptGrace {
+		return false
+	}
+	m.promptKeyAt = time.Now()
+	m.toast = "a prompt just opened — read it, then press your answer again"
+	return true
 }
 
 // resumeDeferredPrompt shows a prompt that arrived while a modal was open. It
@@ -146,7 +177,7 @@ func (m *Model) resumeDeferredPrompt() {
 	if s == statePermission && m.pending == nil {
 		return
 	}
-	m.state = s
+	m.showPrompt(s)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -455,8 +486,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case statePermission:
+			if m.inPromptGrace() {
+				return m, nil // typed before the prompt could have been read
+			}
 			return m.updatePermission(msg)
 		case stateQuestion:
+			if m.inPromptGrace() {
+				return m, nil
+			}
 			return m.updateQuestion(msg)
 		case stateLoopGuard:
 			return m.updateLoopGuard(msg)
@@ -1103,6 +1140,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case routeCheckMsg:
+		m.applyRouteCheck(msg)
+
 	case gpuCheckMsg:
 		m.applyGPUCheck(msg)
 
@@ -1264,7 +1304,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// format, not a transient failure: step down the fallback ladder and
 		// retry immediately rather than burning a stream retry (and its backoff)
 		// on a request shape that will deterministically fail again.
-		if m.stream != nil && m.stream.constrained && agent.IsFormatRejection(msg.err) && m.downgradeToolCallFormat() {
+		if m.stream != nil && m.stream.constrained && agent.IsFormatRejection(msg.err) && m.downgradeToolCallFormat(msg.err) {
 			m.streamBuf.Reset() // discard any partial response; the retry regenerates it
 			m.logActivity(fmt.Sprintf("constrained decoding rejected, trying weaker format: %v", msg.err))
 			m.toast = "host rejected constrained decoding — retrying with a weaker format"
@@ -1302,7 +1342,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if strings.Contains(m.host.URL(), "ollama.com") {
 			source = "cloud"
 		}
-		m.lastError = fmt.Sprintf("[%s] error: %v", source, msg.err)
+		m.lastError = fmt.Sprintf("[%s] error: %v", source, msg.err) + m.routeFailureHint(msg.err)
 		m.setPhase(phaseIdle, "error")
 		m.stream = nil
 		m.compacting = false

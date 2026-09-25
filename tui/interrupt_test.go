@@ -278,7 +278,10 @@ func TestAskUserCancelsOtherUnstartedCallsInBatch(t *testing.T) {
 	}
 }
 
-func TestTaskIntroductionOnlyExposesAskUser(t *testing.T) {
+// A greeting gets a plain-text reply with no tools. It used to expose only
+// ask_user, which turned "hello" into a picker and, with the latch never
+// clearing, an endless loop of them.
+func TestTaskIntroductionGetsPlainTextReply(t *testing.T) {
 	if !needsTaskClarification("Hello i have a task for you") {
 		t.Fatal("test phrase should require task clarification")
 	}
@@ -293,9 +296,8 @@ func TestTaskIntroductionOnlyExposesAskUser(t *testing.T) {
 	if !m.clarificationOnly {
 		t.Fatal("generic task introduction was treated as an actionable request")
 	}
-	visible := m.toolsForMode()
-	if len(visible) != 1 || visible[0].Function.Name != "ask_user" {
-		t.Fatalf("visible tools = %v, want only ask_user", toolNames(visible))
+	if visible := m.toolsForMode(); len(visible) != 0 {
+		t.Fatalf("visible tools = %v, want none", toolNames(visible))
 	}
 	if m.stream != nil {
 		m.stream.cancel()

@@ -28,6 +28,12 @@ A           always allow — saves a rule to config.json
 n / Esc     deny
 ```
 
+A prompt opens on its own mid-turn, often while you are typing, so for its
+first 0.6 seconds, and for as long as you keep typing after that, it ignores
+keys and says so on the status line. Pause, read it, then answer. Without this,
+the first letter of a sentence answered a prompt you had not seen: `y` approved
+a write, `n` denied one.
+
 `A` is the only answer that outlives the session; `s` lasts until you quit. The
 modal prints the exact rule before you press either: a bare tool name for most
 tools, and for `run_shell` a prefix rule on the command's name — its first word,

@@ -204,6 +204,37 @@ func (c *ConstraintCache) Downgrade(key string) bool {
 	return true
 }
 
+// Reject records a host's refusal of the current rung and reports whether a
+// retry is worth making. Ordinarily it steps down one rung. A tool/grammar
+// conflict skips straight to unconstrained: a host that cannot combine a
+// tool list with any response grammar rejects every rung alike, so stepping
+// through them only spends two more requests learning that.
+func (c *ConstraintCache) Reject(key string, err error) bool {
+	if IsToolGrammarConflict(err) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.rungs[key] >= RungOff {
+			return false
+		}
+		c.rungs[key] = RungOff
+		return true
+	}
+	return c.Downgrade(key)
+}
+
+// IsToolGrammarConflict reports a host that could not build its sampler from
+// the tool-call grammar and the response format together. Ollama 0.34 on the
+// llama-server runner answers any request carrying both tools and a format,
+// even format:"json", with "Failed to initialize samplers: failed to parse
+// grammar"; the same request without tools, or without a format, succeeds.
+func IsToolGrammarConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "failed to parse grammar") || strings.Contains(s, "Failed to initialize samplers")
+}
+
 // Disable permanently selects the unconstrained rung for a model+host pair.
 // Use it when a host accepts the schema but the model loops while trying to
 // satisfy it; HTTP acceptance alone does not prove behavioral compatibility.

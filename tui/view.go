@@ -21,7 +21,7 @@ var slashCommands = []struct {
 	{"/provider", "add or edit an API endpoint and its key"},
 	{"/model", "show/set/calibrate the current model"},
 	{"/models", "list, switch, or pull models"},
-	{"/route", "bind a model to a mode (big for plan, small for write)"},
+	{"/route", "bind a mode to a model: /route plan <endpoint>:<model>"},
 	{"/clear", "reset the conversation"},
 	{"/help", "show help screen"},
 	{"/?", "show help screen"},

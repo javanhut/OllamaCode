@@ -33,9 +33,9 @@ func (m *Model) toolCallFormat(actionTurn bool, defs []tools.Tool) (json.RawMess
 
 // downgradeToolCallFormat records a host rejection (HTTP 400 from the
 // schema->grammar conversion) and reports whether a weaker rung exists to
-// retry with.
-func (m *Model) downgradeToolCallFormat() bool {
-	return toolCallConstraintCache.Downgrade(agent.ConstraintKey(m.host, m.modelName))
+// retry with. A tool/grammar conflict goes straight to unconstrained.
+func (m *Model) downgradeToolCallFormat(err error) bool {
+	return toolCallConstraintCache.Reject(agent.ConstraintKey(m.host, m.modelName), err)
 }
 
 // disableToolCallFormat drops straight to the unconstrained rung. The host

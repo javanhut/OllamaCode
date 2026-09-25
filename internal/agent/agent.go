@@ -190,7 +190,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		// A host that rejects the schema (400 from the grammar conversion) gets
 		// an immediate retry at the next-weaker rung; the cache starts later
 		// requests at the working rung, so the probe cost is paid once.
-		for err != nil && constrained && IsFormatRejection(err) && constraints.Downgrade(constraintKey) {
+		for err != nil && constrained && IsFormatRejection(err) && constraints.Reject(constraintKey, err) {
 			req.Format, constrained = constraints.Format(constraintKey, defs)
 			recordModelRequest(opts.Trace, opts.Model, req, constrained)
 			resp, err = host.ChatOnce(ctx, req)

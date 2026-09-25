@@ -575,36 +575,36 @@ func (m *Model) resumeRoutedTurn() []tea.Cmd {
 	return cmds
 }
 
-const routeUsage = "usage: /route <explore|plan|write|auto> <model> · /route <mode> off · /route off — no args shows the table"
+const routeUsage = "usage: /route <explore|plan|write|auto> <model> — prefix an endpoint's name to use it (/route plan ollama:qwen3.8:latest); a bare name runs on the default host · /route <mode> off · /route off — no args shows the table"
 
 // routeCommand implements /route: bind a model to a mode, unbind one, or clear
 // routing entirely.
-func (m *Model) routeCommand(args string) {
+func (m *Model) routeCommand(args string) tea.Cmd {
 	fields := strings.Fields(args)
 	switch len(fields) {
 	case 0:
 		m.showRoutes()
-		return
+		return nil
 	case 1:
 		if !strings.EqualFold(fields[0], "off") && !strings.EqualFold(fields[0], "clear") {
 			m.toast = routeUsage
-			return
+			return nil
 		}
 		m.cfg.Routes = nil
 		saveConfig(m.cfg)
 		m.restoreDefaultModel()
 		m.toast = "routing off — all modes use " + m.cfg.Model
-		return
+		return nil
 	case 2:
 	default:
 		m.toast = routeUsage
-		return
+		return nil
 	}
 
 	mode, ok := parseMode(fields[0])
 	if !ok {
 		m.toast = "invalid mode: " + fields[0] + " (choose explore, plan, write, auto)"
-		return
+		return nil
 	}
 	name := fields[1]
 
@@ -616,7 +616,7 @@ func (m *Model) routeCommand(args string) {
 			m.restoreDefaultModel()
 		}
 		m.toast = mode.String() + " unbound"
-		return
+		return nil
 	}
 
 	if m.cfg.Routes == nil {
@@ -632,6 +632,7 @@ func (m *Model) routeCommand(args string) {
 	if strings.HasSuffix(name, "-cloud") && resolveAPIKey(m.cfg) == "" {
 		m.toast += " — no API key set, add one in /settings"
 	}
+	return m.routeCheckCmd(mode.String(), name)
 }
 
 func (m *Model) showRoutes() {

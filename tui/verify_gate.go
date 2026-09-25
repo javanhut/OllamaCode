@@ -29,7 +29,12 @@ type verifyDoneMsg struct {
 	epoch       int    // workEpoch at start; an abandoned turn's check is dropped
 }
 
-const noCheckChallenge = "[SELF-CHECK] Before you finish: did you ACTUALLY verify this works — run it, build it, or test it — and watch it succeed? If not, do that now with your tools. If you genuinely cannot verify it, say so plainly and list exactly what remains unverified. Do not claim something works without evidence."
+// noCheckChallenge asks for evidence when a turn changed files that no build
+// or test command covers. It used to say only "run it, build it, or test it",
+// and a model with an HTML file and no browser answered by downloading and
+// running a Node.js binary from the internet. Verification uses what is
+// already here; anything else is reported as unverified.
+const noCheckChallenge = "[SELF-CHECK] Before you finish: did you ACTUALLY verify this works — run it, build it, or test it with tools already available here — and watch it succeed? If not, do that now. Do not download or install software to verify; if nothing here can run it, review the code carefully instead. If you genuinely cannot verify it, say so plainly and list exactly what remains unverified. Do not claim something works without evidence."
 
 func (m *Model) verifyOn() bool {
 	return m.cfg.Verify == nil || *m.cfg.Verify

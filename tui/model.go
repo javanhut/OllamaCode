@@ -395,8 +395,9 @@ type Model struct {
 	// for the same action again.
 	denialFeedbackTool string
 	// clarificationOnly is set for greetings/help offers that announce a task
-	// without stating it. Only ask_user is exposed for that turn, preventing
-	// stale notes or memory from being mistaken for the current assignment.
+	// without stating it. That turn gets no tools and a plain-text reply asking
+	// what they want, so stale notes or memory can't be mistaken for the
+	// current assignment. The user's answer, however it arrives, clears it.
 	clarificationOnly bool
 
 	history       []api.Message
@@ -456,7 +457,10 @@ type Model struct {
 	// work stamps it at start, and a result from an older epoch is dropped:
 	// turnGen can't serve, since it advances on every step and would discard
 	// a proactive compaction that legitimately spans several.
-	workEpoch      int
+	workEpoch int
+	// promptShownAt is when the current approval or question prompt opened.
+	promptShownAt  time.Time
+	promptKeyAt    time.Time // last key a fresh prompt ignored (update.go)
 	compactCancel  context.CancelFunc
 	verifyCancel   context.CancelFunc
 	prevPromptEval int
@@ -883,6 +887,11 @@ func (m *Model) Init() tea.Cmd {
 	// Same for background shell job completions (shellJobDoneMsg).
 	if cmd := m.awaitShellJobEvent(); cmd != nil {
 		cmds = append(cmds, cmd)
+	}
+	// A route to a model that exists nowhere is flagged now, not when its mode
+	// is first entered and every request fails.
+	if len(m.cfg.Routes) > 0 {
+		cmds = append(cmds, m.routeCheckAllCmd())
 	}
 	// If no model is configured, try to load the first one we can find.
 	if strings.TrimSpace(m.modelName) == "" {

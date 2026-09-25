@@ -50,6 +50,29 @@ type pendingBatch struct {
 	deniedTool string // non-empty means the user ended this tool round
 }
 
+// answerPauseFromQueue hands the first queued message to a turn that has just
+// paused for the user. A message typed while the model worked is the user's
+// latest word, and the queue only drained when a turn ended, so it sat there
+// while a picker waited, and went out later, answering nothing. With a picker
+// open it becomes the picker's answer; otherwise (a denial asking for
+// feedback, an open question) it is the next message.
+func (m *Model) answerPauseFromQueue() tea.Cmd {
+	if len(m.queue) == 0 {
+		return nil
+	}
+	if !m.hasPendingQuestion() {
+		return m.dequeueNext()
+	}
+	next := m.queue[0]
+	m.queue = m.queue[1:]
+	m.applyQuestionAnswer(next)
+	m.toast = "answered with your queued message: " + truncatePlain(next, 60)
+	m.logActivity("Message (queued, answered question): " + next)
+	cmd := m.startStream()
+	m.refreshTranscript()
+	return cmd
+}
+
 // pauseForUser closes the model-side activity state when a tool round ends at a
 // human checkpoint. Native tool-call messages arrive before the stream state is
 // cleared by chatDoneMsg, so without this the UI keeps showing THINKING and the
@@ -266,7 +289,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.finishTurnClock()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
-			return nil
+			return m.answerPauseFromQueue()
 		}
 		if questionIndex >= 0 {
 			m.markPlanPresented()
@@ -290,7 +313,7 @@ func (m *Model) processPendingTools() tea.Cmd {
 			m.finishTurnClock()
 			m.refreshTranscript()
 			m.viewport.GotoBottom()
-			return nil
+			return m.answerPauseFromQueue()
 		}
 
 		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)

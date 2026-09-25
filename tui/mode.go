@@ -328,15 +328,10 @@ func (m *Model) switchModeTool() tools.Tool {
 }
 
 func (m *Model) toolsForMode() []tools.Tool {
-	all := m.tools.Definitions()
 	if m.clarificationOnly {
-		for _, tool := range all {
-			if tool.Function.Name == "ask_user" {
-				return []tools.Tool{tool}
-			}
-		}
-		return nil
+		return nil // a greeting gets a plain-text reply (see startStream)
 	}
+	all := m.tools.Definitions()
 	lean := m.profile.smallModel()
 	// Workflow-critical tools survive both the small-model filter and the schema
 	// cap. Without this a small model in plan mode is told it MUST record the

@@ -630,6 +630,10 @@ func (m *Model) applyQuestionAnswer(answer string) {
 		m.history[m.questionResult].Content = "ANSWER: " + answer
 	}
 	m.recordPlanReview()
+	// The answer is the task statement clarification was waiting for. Left
+	// set, the latch kept the turn on ask_user alone with "task not yet
+	// stated", and the model asked again for as long as the user answered.
+	m.clarificationOnly = m.clarificationOnly && needsTaskClarification(answer)
 	m.state = stateChat
 	m.question = tools.AskUserQuestion{}
 	m.questionChecked = nil
@@ -933,8 +937,7 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if val == "/route" || strings.HasPrefix(val, "/route ") {
 			m.input.Reset()
-			m.routeCommand(strings.TrimSpace(strings.TrimPrefix(val, "/route")))
-			return m, nil
+			return m, m.routeCommand(strings.TrimSpace(strings.TrimPrefix(val, "/route")))
 		}
 		if val == "/settings" || strings.HasPrefix(val, "/settings ") {
 			m.input.Reset()
