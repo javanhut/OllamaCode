@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -245,6 +244,9 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 					if question := visibleAskUserQuestion(call); question != "" {
 						t.segments = append(t.segments, turnSegment{text: question})
 					}
+					if answer, ok := strings.CutPrefix(entry.result, "ANSWER: "); ok {
+						t.segments = append(t.segments, turnSegment{text: "**You:** " + answer})
+					}
 				}
 			}
 		}
@@ -254,19 +256,13 @@ func (m *Model) collectAssistantTurn(start int) (assistantTurn, int) {
 }
 
 func visibleAskUserQuestion(call tools.ToolCall) string {
-	var args struct {
-		Question string `json:"question"`
-		Options  string `json:"options"`
-	}
-	if json.Unmarshal(call.Function.Arguments, &args) != nil {
-		return ""
-	}
-	question := strings.TrimSpace(args.Question)
+	q := tools.ParseAskUser(call.Function.Arguments)
+	question := strings.TrimSpace(q.Question)
 	if question == "" {
 		return ""
 	}
-	if options := strings.TrimSpace(args.Options); options != "" {
-		question += "\n\nOptions: " + strings.Join(strings.Split(options, "|"), " · ")
+	if len(q.Options) > 0 {
+		question += "\n\nOptions: " + strings.Join(q.Options, " · ")
 	}
 	return question
 }

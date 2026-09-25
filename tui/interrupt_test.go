@@ -302,6 +302,36 @@ func TestTaskIntroductionOnlyExposesAskUser(t *testing.T) {
 	}
 }
 
+func TestAskUserAnswerClearsClarificationLatch(t *testing.T) {
+	m := interruptTestModel()
+	m.input = textarea.New()
+	m.clarificationOnly = true
+	call := tools.ToolCall{}
+	call.Function.Name = "ask_user"
+	call.Function.Arguments = []byte(`{"question":"What next?","options":["Fix a bug","Other"]}`)
+	m.history = append(m.history,
+		api.Message{Role: "assistant", ToolCalls: []tools.ToolCall{call}},
+		api.Message{Role: "tool", ToolName: "ask_user", Content: "pending"})
+	m.question = tools.AskUserQuestion{Question: "What next?"}
+	m.questionResult = len(m.history) - 1
+
+	m.applyQuestionAnswer("build a demo")
+	if m.clarificationOnly {
+		t.Fatal("answering ask_user left the tool list locked to ask_user")
+	}
+	turn, _ := m.collectAssistantTurn(len(m.history) - 2)
+	var text []string
+	for _, seg := range turn.segments {
+		text = append(text, seg.text)
+	}
+	got := strings.Join(text, "\n")
+	for _, want := range []string{"What next?", "Fix a bug · Other", "**You:** build a demo"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("transcript missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestConcreteTaskDoesNotTriggerClarificationOnly(t *testing.T) {
 	for _, request := range []string{
 		"I have a task: add a primary indicator to AssetDetailsHeader",

@@ -630,6 +630,9 @@ func (m *Model) applyQuestionAnswer(answer string) {
 		m.history[m.questionResult].Role == "tool" && m.history[m.questionResult].ToolName == "ask_user" {
 		m.history[m.questionResult].Content = "ANSWER: " + answer
 	}
+	// The user has now said what they want; keeping the greeting latch would
+	// strip every tool but ask_user and trap the model in a question loop.
+	m.clarificationOnly = false
 	m.recordPlanReview()
 	m.state = stateChat
 	m.question = tools.AskUserQuestion{}
