@@ -198,7 +198,44 @@ func (m *Model) shouldCompact() bool {
 	if measured := min(m.lastPromptEval, m.prevPromptEval); measured > pressure {
 		pressure = measured
 	}
-	return pressure > m.contextLimit*8/10
+	return pressure > m.compactAt()
+}
+
+const (
+	// defaultCompactThreshold is the share of the context window at which
+	// history is compacted. Models lose accuracy well before their advertised
+	// limit (NoLiMa: 11 of 13 models at half their baseline or worse by 32K;
+	// Chroma's context-rot study: all 18 degrade as input grows), so waiting
+	// for 80% kept the model working in its weakest range.
+	defaultCompactThreshold = 0.6
+	// smallModelCompactTokens caps the threshold for small models, whose
+	// effective context is shortest: roughly 60% of Qwen3's native 32K.
+	smallModelCompactTokens = 20000
+)
+
+// compactAt is the prompt size, in tokens, above which history is compacted:
+// a share of the context window (profile, then config, then the default),
+// capped in tokens for small models or by the profile's compact_tokens.
+func (m *Model) compactAt() int {
+	frac := defaultCompactThreshold
+	if m.cfg.CompactThreshold > 0 {
+		frac = m.cfg.CompactThreshold
+	}
+	if m.profile.CompactThreshold > 0 {
+		frac = m.profile.CompactThreshold
+	}
+	// Below 0.3 compaction would fire every turn; above 0.9 the summary
+	// request itself may no longer fit.
+	frac = min(max(frac, 0.3), 0.9)
+	at := int(float64(m.contextLimit) * frac)
+	limit := m.profile.CompactTokens
+	if limit == 0 && m.profile.smallModel() {
+		limit = smallModelCompactTokens
+	}
+	if limit > 0 {
+		at = min(at, limit)
+	}
+	return at
 }
 
 // requestEstimate sizes the parts of the request a compaction pass can move:

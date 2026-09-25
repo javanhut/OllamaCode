@@ -30,7 +30,7 @@ func tokenRatioKey(provider, model string) string {
 }
 
 func (m *Model) calibrateModelCmd() tea.Cmd {
-	host, model := m.host, m.modelName
+	host, model, numCtx := m.host, m.modelName, m.contextLimit
 	provider := m.ratioProvider()
 	return func() tea.Msg {
 		runtime := "unknown"
@@ -39,7 +39,7 @@ func (m *Model) calibrateModelCmd() tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		result, err := calibration.Run(ctx, host, model, provider, runtime)
+		result, err := calibration.Run(ctx, host, model, provider, runtime, numCtx)
 		if err == nil {
 			if models, listErr := host.GetModelList(); listErr == nil {
 				result.Digest = models.DigestFor(model)

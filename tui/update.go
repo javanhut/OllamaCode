@@ -31,6 +31,7 @@ type chatDoneMsg struct {
 	thinking   string
 	promptEval int
 	evalCount  int
+	stats      promptStats
 }
 type chatErrMsg struct {
 	gen int
@@ -47,6 +48,7 @@ type chatToolCallsMsg struct {
 	calls      []tools.ToolCall
 	promptEval int
 	evalCount  int
+	stats      promptStats
 }
 
 type toolResultMsg struct {
@@ -742,9 +744,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// number defeat the outlier smoothing shouldCompact relies on.
 		if m.stream != nil && m.stream.toolsSuppressed {
 			m.history = append(m.history, advisory(droppedToolCallNotice(msg.calls)))
-			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount})
+			return m.Update(chatDoneMsg{gen: msg.gen, content: preamble, promptEval: msg.promptEval, evalCount: msg.evalCount, stats: msg.stats})
 		}
 		m.observePromptEval(msg.promptEval)
+		cmds = append(cmds, m.observePromptStats(msg.promptEval, msg.stats))
 		m.recordModelResponse(msg.gen, preamble, msg.calls, msg.promptEval, msg.evalCount)
 		calls := dedupeCalls(msg.calls)
 		if m.trace != nil && len(calls) != len(msg.calls) {
@@ -921,6 +924,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.totalTokens = msg.promptEval + msg.evalCount
 		m.observePromptEval(msg.promptEval)
+		cmds = append(cmds, m.observePromptStats(msg.promptEval, msg.stats))
 		wasAtBottom := m.viewport.AtBottom()
 		if msg.thinking != "" {
 			m.recordThinking(msg.thinking)
@@ -1103,6 +1107,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.endTurnTail()...)
 			}
 		}
+
+	case gpuCheckMsg:
+		m.applyGPUCheck(msg)
 
 	case compactDoneMsg:
 		m.compacting = false

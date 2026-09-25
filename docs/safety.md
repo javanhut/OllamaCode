@@ -306,6 +306,12 @@ the cut is nudged back past leading tool messages. Anything dropped is
 recoverable from the KV archive via `/archive`, and a rolling summary of
 compacted history rides along in the volatile tail.
 
+Compaction starts once the prompt passes 60% of the context window, and at 20K
+tokens for small models. Models lose accuracy well before their advertised
+limit, so waiting longer keeps them working where they are weakest. The point
+is set by `compact_threshold` and per-model `compact_tokens`, and `/stats`
+shows it.
+
 Compaction first stubs old tool results; only if that is not enough does it
 summarize the older half. The summary request repeats the normal chat request
 (the same system prompt, tools, options and history messages) with the instruction
@@ -315,6 +321,25 @@ the instruction, not the whole history again. The summary uses fixed headings
 the previous summary, with the newer conversation winning on conflicts. A
 summary that is not shorter than what it replaces is rejected and the history
 kept.
+
+## Prompt cache and GPU placement
+
+On a native Ollama host, every response reports how many prompt tokens were
+reused from the KV cache (`prompt_eval_cached_count`) and how long the model
+took to load (`load_duration`). ocode shows the cache share in `/stats` and
+records it in the `--debug` trace. A load on a model that was already warm,
+with the same model and `num_ctx` and within the 30-minute keep-alive, is
+flagged as a mid-session reload: the cached prompt is gone, usually because
+another client or model evicted it.
+
+After each new model load or reload, ocode reads `/api/ps`. If less than 97%
+of the model is in GPU memory, it warns: the rest runs on the CPU and
+generation slows several times over. The fixes are a smaller context
+(`/model ctx`) or `OLLAMA_KV_CACHE_TYPE=q8_0` on the server. `/stats` also
+shows the context the server actually loaded, next to what ocode asked for.
+
+Every request to the chat model sends the same `num_ctx`, because Ollama
+reloads a model whenever it changes.
 
 ## Secret handling
 

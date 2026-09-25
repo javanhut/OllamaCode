@@ -382,7 +382,7 @@ func (m *Model) toolsForMode() []tools.Tool {
 		}
 		out = keep
 		if room := maxVisible - len(keep); room > 0 {
-			out = append(out, selectRelevantTools(rest, m.latestUserRequest(), min(room, len(rest)))...)
+			out = append(out, m.stickySelection(rest, m.latestUserRequest(), min(room, len(rest)))...)
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
 	}
@@ -415,14 +415,116 @@ func (m *Model) latestUserRequest() string {
 	return ""
 }
 
+// toolSelection is the capped tool set last sent, kept so the next request
+// can send the same one. Ollama renders the tool list near the start of the
+// prompt, so a changed list throws away the cached prompt and the host
+// re-reads the whole conversation.
+type toolSelection struct {
+	key   string // mode and cap the set was chosen under
+	names []string
+}
+
+// stickySelection is selectRelevantTools that keeps the previous set unless
+// the request needs a tool the set lacks. A needed tool is one a category
+// keyword boosted (web, git, symbols, processes, editing) or the request
+// named; for each missing one, the lowest-ranked tool in the set is swapped
+// out. Ranking differences that no request asked for no longer
+// reshuffle the list. It returns the same set for the same inputs, so every
+// caller in one request agrees.
+func (m *Model) stickySelection(all []tools.Tool, query string, limit int) []tools.Tool {
+	key := fmt.Sprintf("%s|%d", m.mode, limit)
+	ranked := rankTools(all, query)
+	byName := make(map[string]rankedTool, len(ranked))
+	for _, r := range ranked {
+		byName[r.tool.Function.Name] = r
+	}
+
+	var chosen []string
+	if m.selection.key == key {
+		// Keep what is still eligible; bans and mode rules can remove tools.
+		for _, name := range m.selection.names {
+			if _, ok := byName[name]; ok {
+				chosen = append(chosen, name)
+			}
+		}
+	}
+	in := make(map[string]bool, limit)
+	for _, name := range chosen {
+		in[name] = true
+	}
+	// Fill any gap (first request, or tools that became ineligible) by rank.
+	for _, r := range ranked {
+		if len(chosen) >= limit {
+			break
+		}
+		if name := r.tool.Function.Name; !in[name] {
+			chosen, in[name] = append(chosen, name), true
+		}
+	}
+	// Swap in what this request needs, strongest first, evicting the weakest
+	// tool that it outranks.
+	for _, r := range ranked {
+		name := r.tool.Function.Name
+		if !r.boosted || in[name] {
+			continue
+		}
+		weakest := -1
+		for i, c := range chosen {
+			if byName[c].boosted {
+				continue // needed by this request too
+			}
+			if weakest < 0 || lessRanked(byName[c], byName[chosen[weakest]]) {
+				weakest = i
+			}
+		}
+		if weakest < 0 || !lessRanked(byName[chosen[weakest]], r) {
+			break
+		}
+		delete(in, chosen[weakest])
+		chosen[weakest], in[name] = name, true
+	}
+
+	sort.Strings(chosen)
+	m.selection = toolSelection{key: key, names: chosen}
+	out := make([]tools.Tool, 0, len(chosen))
+	for _, name := range chosen {
+		out = append(out, byName[name].tool)
+	}
+	return out
+}
+
 // selectRelevantTools keeps the small-model schema budget focused while
 // preserving the core inspect/edit workflow. Strong profiles normally leave
 // MaxVisibleTools unset and receive every mode-allowed tool.
 func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool {
-	type ranked struct {
-		tool  tools.Tool
-		score int
+	ranked := rankTools(all, query)
+	out := make([]tools.Tool, 0, limit)
+	for _, item := range ranked[:limit] {
+		out = append(out, item.tool)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
+	return out
+}
+
+// rankedTool is a tool's relevance to a request. boosted means the request
+// asks for this tool: a category keyword matched (web, git, symbols,
+// processes, editing), or the request named it.
+type rankedTool struct {
+	tool    tools.Tool
+	score   int
+	boosted bool
+}
+
+// lessRanked orders tools by score, then name, so ranking is deterministic.
+func lessRanked(a, b rankedTool) bool {
+	if a.score == b.score {
+		return a.tool.Function.Name > b.tool.Function.Name
+	}
+	return a.score < b.score
+}
+
+// rankTools scores every tool against the request, best first.
+func rankTools(all []tools.Tool, query string) []rankedTool {
 	core := map[string]int{
 		"switch_mode": 100, "read_file": 99, "grep": 98, "find_files": 96,
 		"ask_user": 97, "list_directory": 95, "edit_file": 94, "run_shell": 93,
@@ -440,17 +542,25 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 		}
 		return false
 	}
-	rankedTools := make([]ranked, 0, len(all))
+	rankedTools := make([]rankedTool, 0, len(all))
 	for _, tool := range all {
 		name := tool.Function.Name
 		score := core[name]
+		named := false
 		for _, term := range strings.FieldsFunc(query, func(r rune) bool {
 			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
 		}) {
 			if len(term) >= 3 && strings.Contains(strings.ToLower(name+" "+tool.Function.Description), term) {
 				score += 8
 			}
+			if term == name {
+				named = true
+			}
 		}
+		// The per-word points above are only a tie-breaker: common words
+		// ("the", "and") hit nearly every description. What marks a tool as
+		// needed is a category boost below, or the request naming it.
+		beforeCategory := score
 		if has("web", "online", "latest", "current", "documentation", "url", "http") && strings.HasPrefix(name, "web_") {
 			score += 50
 		}
@@ -467,20 +577,12 @@ func selectRelevantTools(all []tools.Tool, query string, limit int) []tools.Tool
 		if has("create", "add", "implement", "fix", "change", "edit", "delete", "write") && tool.Policy.Destructive {
 			score += 35
 		}
-		rankedTools = append(rankedTools, ranked{tool: tool, score: score})
+		rankedTools = append(rankedTools, rankedTool{tool: tool, score: score, boosted: named || score > beforeCategory})
 	}
 	sort.SliceStable(rankedTools, func(i, j int) bool {
-		if rankedTools[i].score == rankedTools[j].score {
-			return rankedTools[i].tool.Function.Name < rankedTools[j].tool.Function.Name
-		}
-		return rankedTools[i].score > rankedTools[j].score
+		return lessRanked(rankedTools[j], rankedTools[i])
 	})
-	out := make([]tools.Tool, 0, limit)
-	for _, item := range rankedTools[:limit] {
-		out = append(out, item.tool)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Function.Name < out[j].Function.Name })
-	return out
+	return rankedTools
 }
 
 func (m *Model) toolAllowedInMode(name string) bool {

@@ -51,8 +51,8 @@ ollama pull nomic-embed-text      # embeddings, for auto-RAG
 OllamaCode discovers each model's real context length and capabilities from
 `/api/show` and caches them per model, so `num_ctx` adapts instead of being
 hardcoded. Models under 15B parameters automatically get a compact system
-prompt, a trimmed toolset, and low-temperature decoding — small models
-hallucinate paths and malform tool JSON at default temperature.
+prompt and a trimmed toolset. Sampling follows the model's vendor: see
+[Sampling](configuration.md#sampling).
 
 ## Your first task
 

@@ -35,6 +35,8 @@ type Options struct {
 	AugmentResult func(call tools.ToolCall, result string) string
 	// NumCtx is the num_ctx to request; 0 leaves the host's default window.
 	NumCtx int
+	// Sampling is forwarded to agent.Options.Sampling.
+	Sampling map[string]any
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -68,6 +70,7 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 		Permissions:   opts.Permissions,
 		AugmentResult: opts.AugmentResult,
 		NumCtx:        opts.NumCtx,
+		Sampling:      opts.Sampling,
 	}
 	if opts.Stream != nil {
 		aopts.OnAssistant = opts.Stream.Assistant

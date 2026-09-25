@@ -55,7 +55,11 @@ func (m *Model) maybeTitleCmd() tea.Cmd {
 	if r := []rune(excerpt); len(r) > titleExcerptRunes {
 		excerpt = string(r[:titleExcerptRunes])
 	}
-	host, model := m.host, m.modelName
+	// The chat's own num_ctx, not a small one to save memory: Ollama reloads a
+	// model whenever num_ctx changes, so a 2048 here reloaded the chat model
+	// twice (down for the title, back up for the next turn) and threw away its
+	// cached prompt each time.
+	host, model, numCtx := m.host, m.modelName, m.contextLimit
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -65,7 +69,7 @@ func (m *Model) maybeTitleCmd() tea.Cmd {
 				{Role: "system", Content: titleSystemPrompt},
 				{Role: "user", Content: excerpt},
 			},
-			Options: map[string]any{"num_ctx": 2048, "temperature": 0.2, "num_predict": 24},
+			Options: map[string]any{"num_ctx": numCtx, "temperature": 0.2, "num_predict": 24},
 		})
 		if err != nil {
 			return titleDoneMsg{}

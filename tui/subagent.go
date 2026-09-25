@@ -137,6 +137,7 @@ func (m *Model) subagentOptions(before func(tools.ToolCall), onMutation func()) 
 		System:   subagentSystem + m.instructionsBlock, // the repo's rules bind delegated work too
 		MaxSteps: subagentMaxSteps,
 		NumCtx:   m.contextLimit,
+		Sampling: m.samplingOptions(true),
 		ToolFilter: func(name string) bool {
 			return !subagentExcluded[name] && toolAllowedInMode(mode, name)
 		},

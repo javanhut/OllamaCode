@@ -323,7 +323,12 @@ func WriteFileTool() Tool {
 			if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 				return "", err
 			}
-			old, _ := os.ReadFile(a.Path) // nil for a new file
+			old, readErr := os.ReadFile(a.Path) // nil for a new file
+			if readErr == nil {
+				if p := findPlaceholder(a.Path, a.Content, string(old)); p != "" {
+					return "", placeholderError(a.Path, p)
+				}
+			}
 			mode := os.FileMode(0o644)
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()

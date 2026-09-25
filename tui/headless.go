@@ -125,6 +125,7 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 		Trace:       recorder,
 		Permissions: cfg.Permissions,
 		NumCtx:      headlessNumCtx(cfg, host, spec, model),
+		Sampling:    headlessSampling(cfg, spec, model),
 	}
 	if cfg.ProjectInstructions == nil || *cfg.ProjectInstructions {
 		cwd, _ := os.Getwd()
@@ -180,6 +181,20 @@ func headlessPathArg(call tools.ToolCall) string {
 		return args.Path
 	}
 	return args.FilePath
+}
+
+// headlessSampling applies the TUI's sampling rules to the cached profile. With
+// no profile cached, the family preset (if any) still applies by name.
+func headlessSampling(cfg config, spec, model string) map[string]any {
+	var p ModelProfile
+	for _, key := range []string{spec, model} {
+		if cached, ok := cfg.Profiles[key]; ok {
+			p = cached
+			break
+		}
+	}
+	opts, _ := resolveSampling(p, model, true)
+	return opts
 }
 
 // headlessNumCtx picks the context window for a one-shot run the way

@@ -305,3 +305,20 @@ func (f *failingChat) ChatOnce(ctx context.Context, req api.ChatRequest) (api.Ch
 	}
 	return f.inner.ChatOnce(ctx, req)
 }
+
+// Sampling options reach the request alongside num_ctx, which they must not
+// override: num_ctx decides whether the host reloads the model.
+func TestRunSendsSamplingOptions(t *testing.T) {
+	client := &recordChat{responses: []api.ChatResponse{{Message: api.Message{Role: "assistant", Content: "done"}}}}
+	_, err := Run(context.Background(), client, tools.NewRegistry(), "task", Options{
+		NumCtx:   65536,
+		Sampling: map[string]any{"temperature": 0.6, "top_k": 20, "num_ctx": 2048},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := client.requests[0].Options
+	if opts["temperature"] != 0.6 || opts["top_k"] != 20 || opts["num_ctx"] != 65536 {
+		t.Fatalf("options = %v", opts)
+	}
+}

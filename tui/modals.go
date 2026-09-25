@@ -633,9 +633,15 @@ func (m *Model) statsModal() string {
 	b.WriteString("\n")
 	if m.contextLimit > 0 {
 		m.ensureMeasuredRatio()
-		row("context", fmt.Sprintf("%dk / %dk tokens", m.displayTokens()/1000, m.contextLimit/1000))
+		row("context", fmt.Sprintf("%dk / %dk tokens · compacts at %dk", m.displayTokens()/1000, m.contextLimit/1000, m.compactAt()/1000))
 	}
 	row("model", m.modelName)
+	if _, source := m.samplingSource(true); source != "" {
+		row("sampling", source)
+	}
+	for _, r := range m.cache.cacheStatsRows() {
+		row(r[0], r[1])
+	}
 	row("mode", strings.ToUpper(m.mode.String()))
 
 	b.WriteString("\n")

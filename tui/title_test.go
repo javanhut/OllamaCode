@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -165,5 +168,33 @@ func TestResumeCarriesTitleState(t *testing.T) {
 	}
 	if !m.titleGenTried {
 		t.Fatal("a resumed conversation with replies must not re-fire generation")
+	}
+}
+
+// The title request must reuse the chat's num_ctx: Ollama reloads the model on
+// any num_ctx change, and a smaller window here cost two reloads per session.
+func TestTitleRequestKeepsChatNumCtx(t *testing.T) {
+	var got float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Options map[string]any `json:"options"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		got, _ = req.Options["num_ctx"].(float64)
+		w.Write([]byte(`{"done":true,"message":{"role":"assistant","content":"Fix parser"}}`))
+	}))
+	defer server.Close()
+	m := &Model{modelName: "qwen3.8", contextLimit: 65536}
+	m.host.SetURI(server.URL)
+	m.cfg.Host = m.host.URL()
+	m.history = []api.Message{{Role: "user", Content: "fix the parser"}, {Role: "assistant", Content: "done"}}
+
+	cmd := m.maybeTitleCmd()
+	if cmd == nil {
+		t.Fatal("no title request was scheduled")
+	}
+	cmd()
+	if got != 65536 {
+		t.Fatalf("title num_ctx = %v, want the chat's 65536", got)
 	}
 }

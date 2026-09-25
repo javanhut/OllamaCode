@@ -262,7 +262,7 @@ The recipe and its safety rules are described in [research.md](research.md).
 | `/undo` | Revert the file changes from the last turn |
 | `/diff` | View the last turn's diffs full-screen |
 | `/copy` | Copy the last response to the clipboard |
-| `/stats` | Timing and token totals |
+| `/stats` | Timing and token totals, plus (on Ollama) how much of the last prompt came from the KV cache, mid-session model reloads, and how much of the model sits in GPU memory |
 | `/rate good\|bad [note]` | Rate the last completed turn for the fine-tune dataset; bare `/rate` shows the current verdict (see [training.md](training.md)) |
 | `/jobs` | List background shell and sub-agent jobs; `x` kills the highlighted one |
 | `/compact` | Compress the older half of the history into a summary now |

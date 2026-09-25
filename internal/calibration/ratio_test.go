@@ -35,7 +35,7 @@ func (c *ratioClient) ChatOnce(_ context.Context, req api.ChatRequest) (api.Chat
 
 func TestMeasureCharsPerToken(t *testing.T) {
 	client := &ratioClient{charsPerToken: 3.5}
-	ratio, ok := measureCharsPerToken(context.Background(), client, "model")
+	ratio, ok := measureCharsPerToken(context.Background(), client, "model", 0)
 	if !ok {
 		t.Fatal("measurement failed")
 	}
@@ -50,14 +50,14 @@ func TestMeasureCharsPerToken(t *testing.T) {
 func TestMeasureCharsPerTokenSkipsWithoutPromptEval(t *testing.T) {
 	// PromptEval stays 0, as with endpoints that don't report usage.
 	client := &ratioClient{charsPerToken: 0}
-	if _, ok := measureCharsPerToken(context.Background(), client, "model"); ok {
+	if _, ok := measureCharsPerToken(context.Background(), client, "model", 0); ok {
 		t.Fatal("expected ok=false when prompt_eval_count is never reported")
 	}
 }
 
 func TestMeasureCharsPerTokenSkipsOnError(t *testing.T) {
 	client := &ratioClient{charsPerToken: 4, err: errors.New("boom")}
-	if _, ok := measureCharsPerToken(context.Background(), client, "model"); ok {
+	if _, ok := measureCharsPerToken(context.Background(), client, "model", 0); ok {
 		t.Fatal("expected ok=false when the host errors")
 	}
 }
@@ -65,14 +65,14 @@ func TestMeasureCharsPerTokenSkipsOnError(t *testing.T) {
 func TestMeasureCharsPerTokenRejectsGarbage(t *testing.T) {
 	// 100 chars/token is not a real tokenizer; treat it as a bad count.
 	client := &ratioClient{charsPerToken: 100}
-	if _, ok := measureCharsPerToken(context.Background(), client, "model"); ok {
+	if _, ok := measureCharsPerToken(context.Background(), client, "model", 0); ok {
 		t.Fatal("expected ok=false for an out-of-range ratio")
 	}
 }
 
 func TestRunRecordsCharsPerToken(t *testing.T) {
 	client := &ratioClient{charsPerToken: 4}
-	result, err := Run(context.Background(), client, "model", "provider", "runtime")
+	result, err := Run(context.Background(), client, "model", "provider", "runtime", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

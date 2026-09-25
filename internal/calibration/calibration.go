@@ -45,7 +45,11 @@ func (r Result) Score() float64 {
 	return float64(r.Correct) / float64(r.Runs)
 }
 
-func Run(ctx context.Context, client Client, model, provider, runtime string) (Result, error) {
+// Run probes the model's tool behavior and measures its chars-per-token ratio.
+// numCtx is the num_ctx the chat sends this model; the probes send the same
+// value, since Ollama reloads a model whenever num_ctx changes and a probe
+// without it would bounce the chat model out of its window twice. 0 sends none.
+func Run(ctx context.Context, client Client, model, provider, runtime string, numCtx int) (Result, error) {
 	result := Result{SuiteVersion: SuiteVersion, Model: model, Provider: provider, Runtime: runtime, CreatedAt: time.Now().UTC()}
 	registry := calibrationRegistry()
 	probes := []struct {
@@ -60,7 +64,7 @@ func Run(ctx context.Context, client Client, model, provider, runtime string) (R
 		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		resp, err := client.ChatOnce(requestCtx, api.ChatRequest{Model: model,
 			Messages: []api.Message{{Role: "system", Content: "Follow the user's tool instruction exactly."}, {Role: "user", Content: probe.prompt}},
-			Tools:    registry.Definitions(), Options: map[string]any{"temperature": 0}})
+			Tools:    registry.Definitions(), Options: probeOptions(numCtx, nil)})
 		cancel()
 		if err != nil {
 			return result, err
@@ -90,7 +94,7 @@ func Run(ctx context.Context, client Client, model, provider, runtime string) (R
 	} else {
 		result.Recommended = "small"
 	}
-	if ratio, ok := measureCharsPerToken(ctx, client, model); ok {
+	if ratio, ok := measureCharsPerToken(ctx, client, model, numCtx); ok {
 		result.CharsPerToken = ratio
 	}
 	return result, nil
@@ -109,13 +113,13 @@ var ratioSamples = []string{
 // the known-length ratioSamples and dividing by the summed prompt_eval_count.
 // ok is false when the host errors or reports no prompt_eval_count (some
 // OpenAI-compatible endpoints), leaving callers on their default heuristic.
-func measureCharsPerToken(ctx context.Context, client Client, model string) (ratio float64, ok bool) {
+func measureCharsPerToken(ctx context.Context, client Client, model string, numCtx int) (ratio float64, ok bool) {
 	var chars, tokens int
 	for _, sample := range ratioSamples {
 		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		resp, err := client.ChatOnce(requestCtx, api.ChatRequest{Model: model,
 			Messages: []api.Message{{Role: "user", Content: sample}},
-			Options:  map[string]any{"temperature": 0, "num_predict": 1}})
+			Options:  probeOptions(numCtx, map[string]any{"num_predict": 1})})
 		cancel()
 		if err != nil || resp.PromptEval <= 0 {
 			return 0, false
@@ -190,4 +194,16 @@ func Load(model, provider, runtime, digest string) (Result, error) {
 		return Result{}, fmt.Errorf("calibration suite changed; run calibration again")
 	}
 	return result, nil
+}
+
+// probeOptions is greedy decoding plus extra, with num_ctx pinned when known.
+func probeOptions(numCtx int, extra map[string]any) map[string]any {
+	opts := map[string]any{"temperature": 0}
+	if numCtx > 0 {
+		opts["num_ctx"] = numCtx
+	}
+	for k, v := range extra {
+		opts[k] = v
+	}
+	return opts
 }

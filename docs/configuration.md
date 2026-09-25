@@ -43,6 +43,7 @@ outranks a stored key. Prefer that over typing the key.
 | `trace_path` | Optional trace destination; defaults to the OS cache directory |
 | `shell_sandbox` | `false` disables the OS-level sandbox around `run_shell` (sandbox-exec on macOS, bwrap on Linux); on by default |
 | `context_delta` | `true` sends the stable half of the per-turn context block (mode rules, security note, batching rule, archive summary, long-term memory) once and re-sends it only when it changes, instead of every turn; off by default until `cmd/eval` shows mode adherence holds |
+| `compact_threshold` | Fraction of the context window (0.3–0.9) at which history is compacted; default 0.6. Small models are also capped at 20K tokens |
 | `jail_allowlist` | List of extra absolute directory roots the file tools may touch and the shell sandbox may write, beyond the workspace |
 | `face` | `false` hides the mascot overlay |
 | `welcome` | `false` hides the startup panel |
@@ -142,9 +143,9 @@ actual model rather than a hardcoded guess. Edit to override.
 | `supports_tools` | Whether tools are sent at all |
 | `supports_thinking` | Whether the reasoning stream is requested |
 | `supports_vision` | Whether the model accepts images (`@image` mentions and `read_image`). Discovered from `/api/show` on Ollama; set it by hand for an OpenAI-compatible provider |
-| `params_b` | Parameter count in billions. Under 15 triggers the small-model tier: compact prompt, lean toolset, temperature 0 on tool-capable turns and 0.2 on tool-less prose turns. `0` means unknown and is treated as large |
+| `params_b` | Parameter count in billions. Under 15 triggers the small-model tier: compact prompt, lean toolset, and (for an unknown family without a Modelfile preset) temperature 0 on tool-capable turns and 0.2 on tool-less prose turns. `0` means unknown and is treated as large |
 | `capability_tier` | Optional `small`, `capable`, or `strong` override for size-based tiering |
-| `max_visible_tools` | Optional cap used by task-aware tool selection |
+| `max_visible_tools` | Cap on the tools sent per request; small models default to 18. The selection is kept stable between requests for the prompt cache (see [Tools](tools.md)) |
 | profile `max_steps` | Per-model tool-round budget, overriding the top-level default |
 | `parallel_tool_calls` | Override whether the model is instructed to batch independent calls |
 | `max_parallel_tools` | Maximum tool calls executed concurrently; defaults to 1 for small models and 4 otherwise |
@@ -153,8 +154,41 @@ actual model rather than a hardcoded guess. Edit to override.
 | `action_temperature`, `prose_temperature` | Separate sampling controls for tool-capable and tool-less turns |
 | `review_pass` | Run an adversarial post-build review; defaults on for the explicit `strong` tier |
 | `temperature`, `top_p`, `num_predict` | Sampling overrides; omit to use the model's defaults |
+| `compact_threshold`, `compact_tokens` | Per-model compaction point: a fraction of the window, and a cap in tokens (small models default to 20000) |
+| `modelfile_sampling` | Discovered: whether the model's Modelfile sets sampling parameters |
 
 `/model ctx` and `/model temp` write here.
+
+### Sampling
+
+Each request's sampling settings come from the first of these that applies
+(`/stats` shows which one did):
+
+1. The profile's `temperature`, or `action_temperature` / `prose_temperature`.
+2. The model's Modelfile, when it sets any of `temperature`, `top_p`, `top_k`
+   or `min_p`. ocode sends nothing and Ollama applies them. Library models
+   usually carry the vendor's recommended values there.
+3. The vendor's recommended settings for the model family:
+
+   | Family | temperature | top_p | top_k | min_p |
+   |---|---|---|---|---|
+   | Qwen (thinking) | 0.6 | 0.95 | 20 | 0 |
+   | Qwen (instruct) | 0.7 | 0.8 | 20 | 0 |
+   | Qwen Coder | 0.7 | 0.8 | 20 | |
+   | gpt-oss | 1.0 | 1.0 | | |
+   | Devstral | 0.15 | | | |
+   | DeepSeek R1 | 0.6 | 0.95 | | |
+   | Gemma | 1.0 | 0.95 | 64 | |
+   | GLM | 0.7 | 1.0 | | |
+
+4. A thinking model of any other family: 0.6 / 0.95 / 20. Vendors warn that
+   greedy decoding makes thinking models loop.
+5. A small model of any other family: temperature 0 on tool turns, 0.2 in prose.
+6. Otherwise nothing, and Ollama's defaults apply.
+
+Sub-agents and `ocode -p` use the same rules. To get greedy tool turns back
+on a model, set `"action_temperature": 0` in its profile. Ollama ignores
+repetition penalties, so none are sent.
 
 ### Token estimation
 

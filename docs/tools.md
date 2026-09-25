@@ -4,6 +4,14 @@ The model acts only through tools. Which tools exist is decided by the
 [mode](modes.md) — a tool the mode disallows is never sent to the model, and a
 call for it is rejected before dispatch.
 
+Models under 15B (or any profile with `max_visible_tools`) see a capped list,
+18 tools by default: core tools plus the ones the request asks for (web, git,
+symbols, processes, editing, or a tool named outright). The list is sticky.
+A new request keeps the previous list unless it needs a tool the list lacks,
+and then only that tool is swapped in, replacing the least relevant one.
+Ollama renders tools near the start of the prompt, so an unchanged list keeps
+the cached prompt usable instead of forcing a re-read of the conversation.
+
 Legend: **E** explore · **P** plan · **W** write · **A** auto
 
 ## Files
@@ -40,6 +48,18 @@ with one level of string escaping undone (`\n`, `\t`, `\"` sent literally by a
 model that escaped its arguments twice), applying the same unescape to
 `new_string`; and finally by fuzzy line similarity. The result notes when a
 match needed normalizing.
+
+When nothing matches in a small file (up to 300 lines and 10 KiB), the failure
+carries the file's current contents and suggests rewriting it whole with
+`write_file`. On Aider's benchmark, whole-file edits beat search-and-replace
+for every Qwen3 setup, and the model already read the file, so the write is
+allowed.
+
+`edit_file`, `multi_edit` and `write_file` (over an existing file) refuse new
+text containing a lazy placeholder: a comment standing in for code, such as
+`// ... existing code ...` or `# rest of the file unchanged`, or a bare `...`
+outside Python. A line that is already in the file passes, and prose files
+(`.md`, `.txt`, `.rst`) are not checked.
 
 `multi_edit` applies several `old_string`/`new_string` replacements to one
 file as a single atomic change: edits apply in order (each sees the file as the

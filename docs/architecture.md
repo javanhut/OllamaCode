@@ -90,7 +90,7 @@ Three parsing hazards, all covered by tests against captured real output:
 ```
 submit()
   ├── append user message, reset per-turn guards
-  ├── proactive compaction if history crossed 80% of budget
+  ├── proactive compaction if history crossed the compaction threshold (60% of budget by default)
   ├── cold-start router — may hold the message for a y/N
   └── startStreamWithRAGGate()
         ├── embed the query, inject retrieved code

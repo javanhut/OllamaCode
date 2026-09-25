@@ -29,7 +29,7 @@ func TestRunRecommendsStrongForExactBehavior(t *testing.T) {
 		return api.ChatResponse{Message: api.Message{ToolCalls: []tools.ToolCall{{Function: tools.ToolCallFunction{Name: name, Arguments: []byte(args)}}}}}
 	}
 	client := &fakeClient{responses: []api.ChatResponse{call("inspect_file", `{"path":"main.go"}`), call("web_lookup", `{"query":"official documentation"}`), {Message: api.Message{Content: "4"}}}}
-	result, err := Run(context.Background(), client, "model", "provider", "runtime")
+	result, err := Run(context.Background(), client, "model", "provider", "runtime", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,5 +44,29 @@ func TestCacheKeyChangesWithRuntime(t *testing.T) {
 	}
 	if CacheKey("m", "p", "one", "d1") == CacheKey("m", "p", "one", "d2") {
 		t.Fatal("digest was not included")
+	}
+}
+
+type recordingClient struct{ numCtx []any }
+
+func (r *recordingClient) ChatOnce(_ context.Context, req api.ChatRequest) (api.ChatResponse, error) {
+	r.numCtx = append(r.numCtx, req.Options["num_ctx"])
+	return api.ChatResponse{PromptEval: 100}, nil
+}
+
+// Every probe, behavior and ratio alike, must carry the chat's num_ctx, or
+// Ollama reloads the model for the probe and again for the next chat turn.
+func TestRunPinsNumCtxOnEveryProbe(t *testing.T) {
+	client := &recordingClient{}
+	if _, err := Run(context.Background(), client, "model", "provider", "runtime", 65536); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.numCtx) < 4 {
+		t.Fatalf("only %d probes seen", len(client.numCtx))
+	}
+	for i, v := range client.numCtx {
+		if v != 65536 {
+			t.Fatalf("probe %d num_ctx = %v, want 65536", i, v)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/javanhut/ollama_code/api"
@@ -27,6 +28,7 @@ type Options struct {
 	System            string
 	MaxSteps          int                    // tool-call rounds before giving up (default 8)
 	NumCtx            int                    // num_ctx option, if > 0
+	Sampling          map[string]any         // sampling options (temperature, top_p, ...); nil leaves the model's defaults
 	ToolFilter        func(name string) bool // which tools the agent may see/call (nil = all)
 	Trace             *tracepkg.Recorder     // optional redacted JSONL recorder
 	StructuredResults *bool                  // nil/true=envelopes; false for A/B evaluation
@@ -121,6 +123,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		_ = opts.Trace.Record(tracepkg.Event{Kind: "turn_start", Model: opts.Model, Metadata: map[string]any{"tools": names, "task": task}})
 	}
 	options := map[string]any{}
+	maps.Copy(options, opts.Sampling)
 	if opts.NumCtx > 0 {
 		options["num_ctx"] = opts.NumCtx
 	}

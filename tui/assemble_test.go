@@ -124,7 +124,7 @@ func TestShouldCompactUsesMeasuredPromptTokens(t *testing.T) {
 	}
 	m.lastPromptEval, m.prevPromptEval = 9000, 9000
 	if !m.shouldCompact() {
-		t.Fatal("the real prompt count crossed 80% and must decide")
+		t.Fatal("the real prompt count crossed the threshold and must decide")
 	}
 }
 
@@ -320,5 +320,50 @@ func TestDeriveModelMessagesStripsThinking(t *testing.T) {
 	}
 	if strings.Contains(string(body), reasoning) {
 		t.Fatalf("reasoning serialized into the request: %s", body)
+	}
+}
+
+func TestCompactAt(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     float64
+		profile ModelProfile
+		limit   int
+		want    int
+	}{
+		{"default is 60% of the window", 0, ModelProfile{ParamsB: 27}, 65536, 39321},
+		{"config fraction", 0.7, ModelProfile{ParamsB: 27}, 65536, 45875},
+		{"profile fraction beats config", 0.7, ModelProfile{ParamsB: 27, CompactThreshold: 0.5}, 65536, 32768},
+		{"clamped low", 0.1, ModelProfile{ParamsB: 27}, 10000, 3000},
+		{"clamped high", 0.99, ModelProfile{ParamsB: 27}, 10000, 9000},
+		{"small models are capped in tokens", 0, ModelProfile{ParamsB: 8}, 131072, smallModelCompactTokens},
+		{"small cap never raises the threshold", 0, ModelProfile{ParamsB: 8}, 8192, 4915},
+		{"profile token cap", 0, ModelProfile{ParamsB: 27, CompactTokens: 24000}, 65536, 24000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := &Model{contextLimit: c.limit, profile: c.profile}
+			m.cfg.CompactThreshold = c.cfg
+			if got := m.compactAt(); got != c.want {
+				t.Fatalf("compactAt = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// 65% used to sit comfortably under the old 80% mark; it is now past the
+// point where models start losing track of their context.
+func TestShouldCompactAtSixtyFivePercent(t *testing.T) {
+	m := &Model{contextLimit: 10000}
+	for range 6 {
+		m.history = append(m.history, msg("user", "short"))
+	}
+	m.lastPromptEval, m.prevPromptEval = 6500, 6500
+	if !m.shouldCompact() {
+		t.Fatal("65% of the window should compact under the 60% default")
+	}
+	m.cfg.CompactThreshold = 0.8
+	if m.shouldCompact() {
+		t.Fatal("compact_threshold 0.8 should restore the old behavior")
 	}
 }

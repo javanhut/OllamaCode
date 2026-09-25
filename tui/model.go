@@ -137,28 +137,29 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 40)
-	PromptFamily  string                     `json:"prompt_family,omitempty"`  // force a prompt family section; "none"/"default" = base prompt only
-	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
-	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
-	Dream         *bool                      `json:"dream,omitempty"`          // nil/true = dream mode enabled
-	Face          *bool                      `json:"face,omitempty"`           // nil/true = mascot overlay shown
-	Welcome       *bool                      `json:"welcome,omitempty"`        // nil/true = show welcome panel on empty chat
-	Verify        *bool                      `json:"verify,omitempty"`         // nil/true = auto compile-check on file edits
-	VerifyCmd     string                     `json:"verify_cmd,omitempty"`     // override the auto-detected check
-	Format        *bool                      `json:"format,omitempty"`         // nil/true = run the file's formatter on write
-	LSP           *bool                      `json:"lsp,omitempty"`            // nil/true = use installed language servers for code intelligence
-	LSPServers    map[string]lsp.Server      `json:"lsp_servers,omitempty"`    // extra/override language servers, keyed by name
-	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
-	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
-	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
-	ContextDelta  bool                       `json:"context_delta,omitempty"`  // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
-	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
-	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
-	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by provider-qualified model identity
-	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
-	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
-	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
+	MaxSteps         int                        `json:"max_steps,omitempty"`         // tool-call budget per user turn (default 40)
+	PromptFamily     string                     `json:"prompt_family,omitempty"`     // force a prompt family section; "none"/"default" = base prompt only
+	EmbedModel       string                     `json:"embed_model,omitempty"`       // model for auto-RAG embeddings
+	AutoRAG          *bool                      `json:"auto_rag,omitempty"`          // nil/true = enabled
+	Dream            *bool                      `json:"dream,omitempty"`             // nil/true = dream mode enabled
+	Face             *bool                      `json:"face,omitempty"`              // nil/true = mascot overlay shown
+	Welcome          *bool                      `json:"welcome,omitempty"`           // nil/true = show welcome panel on empty chat
+	Verify           *bool                      `json:"verify,omitempty"`            // nil/true = auto compile-check on file edits
+	VerifyCmd        string                     `json:"verify_cmd,omitempty"`        // override the auto-detected check
+	Format           *bool                      `json:"format,omitempty"`            // nil/true = run the file's formatter on write
+	LSP              *bool                      `json:"lsp,omitempty"`               // nil/true = use installed language servers for code intelligence
+	LSPServers       map[string]lsp.Server      `json:"lsp_servers,omitempty"`       // extra/override language servers, keyed by name
+	Trace            bool                       `json:"trace,omitempty"`             // opt-in redacted JSONL execution trace
+	TracePath        string                     `json:"trace_path,omitempty"`        // optional trace destination
+	ShellSandbox     *bool                      `json:"shell_sandbox,omitempty"`     // nil/true = wrap run_shell in the OS sandbox
+	ContextDelta     bool                       `json:"context_delta,omitempty"`     // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
+	CompactThreshold float64                    `json:"compact_threshold,omitempty"` // fraction of the context window at which history is compacted (default 0.6)
+	JailAllowlist    []string                   `json:"jail_allowlist,omitempty"`    // extra absolute roots the fs tools and shell sandbox may write
+	Permissions      []tools.PermissionRule     `json:"permissions,omitempty"`       // per-tool allow/ask/deny rules; deny outranks everything
+	Profiles         map[string]ModelProfile    `json:"profiles,omitempty"`          // per-model, keyed by provider-qualified model identity
+	Routes           map[string]string          `json:"routes,omitempty"`            // mode name -> model spec; empty disables routing
+	Providers        map[string]providerConfig  `json:"providers,omitempty"`         // extra endpoints, referenced as "<name>:<model>"
+	MCPServers       map[string]mcpServerConfig `json:"mcp_servers,omitempty"`       // external MCP servers (stdio or Streamable HTTP)
 
 	Instructions        []string `json:"instructions,omitempty"`         // extra instruction files, loaded after the global AGENTS.md
 	ProjectInstructions *bool    `json:"project_instructions,omitempty"` // nil/true = load AGENTS.md/OLLAMA.md/CLAUDE.md files
@@ -206,11 +207,19 @@ type ModelProfile struct {
 	SupportsThinking bool `json:"supports_thinking,omitempty"`
 	// SupportsVision is nil until probed, so profiles cached before vision
 	// detection existed get re-probed once instead of reading as "no".
-	SupportsVision    *bool    `json:"supports_vision,omitempty"`
-	ParamsB           float64  `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
-	CapabilityTier    string   `json:"capability_tier,omitempty"` // small, capable, or strong; overrides ParamsB tiering
-	MaxVisibleTools   int      `json:"max_visible_tools,omitempty"`
-	ProfileMaxSteps   int      `json:"max_steps,omitempty"`
+	SupportsVision *bool `json:"supports_vision,omitempty"`
+	// ModelfileSampling records whether the model's Modelfile sets sampling
+	// parameters. When it does, ocode sends none and Ollama applies them.
+	ModelfileSampling *bool   `json:"modelfile_sampling,omitempty"`
+	ParamsB           float64 `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
+	CapabilityTier    string  `json:"capability_tier,omitempty"` // small, capable, or strong; overrides ParamsB tiering
+	MaxVisibleTools   int     `json:"max_visible_tools,omitempty"`
+	ProfileMaxSteps   int     `json:"max_steps,omitempty"`
+	// CompactThreshold overrides the config-wide fraction for this model, and
+	// CompactTokens caps the threshold in tokens (small models default to
+	// smallModelCompactTokens).
+	CompactThreshold  float64  `json:"compact_threshold,omitempty"`
+	CompactTokens     int      `json:"compact_tokens,omitempty"`
 	ParallelTools     *bool    `json:"parallel_tool_calls,omitempty"`
 	MaxParallelTools  int      `json:"max_parallel_tools,omitempty"`
 	Delegation        *bool    `json:"delegation,omitempty"`
@@ -441,6 +450,8 @@ type Model struct {
 	// one-off RAG block, a provider hiccup) can't fire a compaction on its own.
 	// 0 means "not measured yet" — the char estimate carries the decision.
 	lastPromptEval int
+	cache          cacheMonitor  // prompt-cache reuse, reloads, GPU placement (cache.go)
+	selection      toolSelection // capped tool set last sent, kept stable for the prompt cache (mode.go)
 	prevPromptEval int
 
 	archiveSummary string // rolling summary of compacted-away history (volatile tail)

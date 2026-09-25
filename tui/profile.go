@@ -1,6 +1,9 @@
 package tui
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+)
 
 // maxContextBudget caps how much context we ask Ollama to allocate, even if the
 // model reports a larger window — keeps memory/latency sane on local hardware.
@@ -55,7 +58,7 @@ func (m *Model) resolveProfile() {
 	if m.cfg.Profiles != nil {
 		// ParamsB == 0 also re-probes profiles cached before tier detection
 		// existed; one /api/show per model switch is cheap and self-heals.
-		if p, ok := m.cfg.Profiles[key]; ok && p.NumCtx > 0 && p.ParamsB > 0 && p.SupportsVision != nil {
+		if p, ok := m.cfg.Profiles[key]; ok && p.NumCtx > 0 && p.ParamsB > 0 && p.SupportsVision != nil && p.ModelfileSampling != nil {
 			m.applyProfile(p)
 			return
 		}
@@ -75,6 +78,8 @@ func (m *Model) resolveProfile() {
 			p.SupportsVision = &vision
 		}
 		p.ParamsB = show.ParamsB()
+		sets := show.SetsSampling()
+		p.ModelfileSampling = &sets
 	}
 	if cached, ok := m.cfg.Profiles[key]; ok {
 		p = preserveProfileOverrides(p, cached)
@@ -95,6 +100,8 @@ func preserveProfileOverrides(discovered, configured ModelProfile) ModelProfile 
 	discovered.CapabilityTier = configured.CapabilityTier
 	discovered.MaxVisibleTools = configured.MaxVisibleTools
 	discovered.ProfileMaxSteps = configured.ProfileMaxSteps
+	discovered.CompactThreshold = configured.CompactThreshold
+	discovered.CompactTokens = configured.CompactTokens
 	discovered.ParallelTools = configured.ParallelTools
 	discovered.MaxParallelTools = configured.MaxParallelTools
 	discovered.Delegation = configured.Delegation
@@ -124,21 +131,7 @@ func (m *Model) applyProfile(p ModelProfile) {
 // chatOptions builds the Ollama Options map from the active profile.
 func (m *Model) chatOptions(action bool) map[string]any {
 	opts := map[string]any{"num_ctx": m.contextLimit}
-	if m.profile.Temperature != nil {
-		opts["temperature"] = *m.profile.Temperature
-	} else if action && m.profile.ActionTemperature != nil {
-		opts["temperature"] = *m.profile.ActionTemperature
-	} else if !action && m.profile.ProseTemperature != nil {
-		opts["temperature"] = *m.profile.ProseTemperature
-	} else if m.profile.smallModel() {
-		// Greedy decoding improves tool selection and argument stability. A
-		// tool-less finalization pass may be slightly freer without risking calls.
-		if action {
-			opts["temperature"] = 0.0
-		} else {
-			opts["temperature"] = 0.2
-		}
-	}
+	maps.Copy(opts, m.samplingOptions(action))
 	if m.profile.TopP != nil {
 		opts["top_p"] = *m.profile.TopP
 	}

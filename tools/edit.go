@@ -407,6 +407,42 @@ type editArgs struct {
 	EndLine    int    `json:"end_line"`
 }
 
+// noMatchError is an edit whose old_string matched nowhere, carrying the file
+// content it was matched against.
+type noMatchError struct {
+	err     error
+	content string
+}
+
+func (e *noMatchError) Error() string { return e.err.Error() }
+func (e *noMatchError) Unwrap() error { return e.err }
+
+// Whole-file fallback limits. On Aider's benchmark whole-file edits beat
+// search/replace for every Qwen3 configuration tested (32B: 45.8% vs 41.3%),
+// so once matching has failed on a small file, rewriting it is the better
+// next move. The contents ride the failure as output, and must fit in one
+// result without spilling to a file the model would then have to read.
+const (
+	wholeFileMaxLines = 300
+	wholeFileMaxBytes = 10 * 1024
+)
+
+// wholeFileFallback turns a failed match on a small file into an invitation
+// to rewrite it with write_file, returning the current contents as the
+// failure's output. ok is false when err is not a match failure or the file
+// is too large to rewrite whole.
+func wholeFileFallback(err error) (out string, wrapped error, ok bool) {
+	nm, isNoMatch := errors.AsType[*noMatchError](err)
+	if !isNoMatch || len(nm.content) > wholeFileMaxBytes {
+		return "", err, false
+	}
+	lines := strings.Count(nm.content, "\n") + 1
+	if lines > wholeFileMaxLines {
+		return "", err, false
+	}
+	return nm.content, fmt.Errorf("%w\nThe file is small (%d lines), so rather than retrying edit_file you can rewrite it with write_file: send the complete new file, every line, with no placeholders like \"... rest unchanged\". Its exact current contents are in this result's output", err, lines), true
+}
+
 // resolveEdit computes what edit_file would write, without writing it: the
 // start_line/end_line branch, the old_string branch via applyEdit, the
 // verify-before-write syntax gate, and the formatter. The permission preview
@@ -448,6 +484,9 @@ func resolveEdit(a editArgs) (oldContent, updated string, count, tier int, err e
 // syntax gate, no formatting — resolveEdit and multi_edit layer those on top,
 // so both tools share one matcher and one set of error messages.
 func applyOneEdit(content string, a editArgs) (updated string, count, tier int, err error) {
+	if p := findPlaceholder(a.Path, a.NewString, content); p != "" {
+		return "", 0, 0, placeholderError(a.Path, p)
+	}
 	if a.StartLine != 0 || a.EndLine != 0 {
 		if a.StartLine < 1 || a.EndLine < 1 {
 			return "", 0, 0, fmt.Errorf("start_line and end_line must be 1-indexed (got start_line=%d, end_line=%d)", a.StartLine, a.EndLine)
@@ -474,9 +513,16 @@ func applyOneEdit(content string, a editArgs) (updated string, count, tier int, 
 		updated, count, tier, editErr = applyEdit(content, a.OldString, a.NewString, a.ReplaceAll)
 		if editErr != nil {
 			if tier >= 2 {
-				return "", count, tier, fmt.Errorf("%w in %s", editErr, a.Path)
+				editErr = fmt.Errorf("%w in %s", editErr, a.Path)
+			} else {
+				editErr = fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
 			}
-			return "", count, tier, fmt.Errorf("%s: %w. If matching fails, consider reading the file with line numbers and using start_line/end_line for precise editing.", a.Path, editErr)
+			if count == 0 {
+				// Nothing matched, as opposed to too many matches: the case
+				// where rewriting the whole file is the better next move.
+				editErr = &noMatchError{err: editErr, content: content}
+			}
+			return "", count, tier, editErr
 		}
 	}
 	return updated, count, tier, nil
@@ -540,6 +586,9 @@ func EditFileTool() Tool {
 			}
 			data, updated, count, tier, err := resolveEdit(a)
 			if err != nil {
+				if out, wrapped, ok := wholeFileFallback(err); ok {
+					return out, wrapped
+				}
 				return "", err
 			}
 			info, err := os.Stat(a.Path)

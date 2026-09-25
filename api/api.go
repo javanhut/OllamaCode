@@ -52,6 +52,62 @@ type ChatResponse struct {
 	Total      int64   `json:"total_duration,omitempty"`
 	PromptEval int     `json:"prompt_eval_count,omitempty"`
 	EvalCount  int     `json:"eval_count,omitempty"`
+	// PromptEvalCached is how many prompt tokens Ollama reused from its KV
+	// cache instead of processing. Older servers and OpenAI-compatible
+	// providers leave it out, so zero means "unknown" until a nonzero value
+	// has been seen from the host.
+	PromptEvalCached int `json:"prompt_eval_cached_count,omitempty"`
+	// LoadDuration is time spent loading the model (ns). Nonzero on a model
+	// that was already loaded means the request forced a reload.
+	LoadDuration int64 `json:"load_duration,omitempty"`
+}
+
+// RunningModel is one entry of Ollama's /api/ps.
+type RunningModel struct {
+	Name          string `json:"name"`
+	Model         string `json:"model"`
+	Size          int64  `json:"size"`      // bytes the loaded model occupies
+	SizeVRAM      int64  `json:"size_vram"` // of which in GPU memory; less than Size means part runs on CPU
+	ContextLength int    `json:"context_length"`
+}
+
+type runningModelsResponse struct {
+	Models []RunningModel `json:"models"`
+}
+
+// RunningModel reports how the host has loaded model, from /api/ps. ok is
+// false when the model is not loaded or the host has no /api/ps.
+func (o OllamaHost) RunningModel(model string) (rm RunningModel, ok bool, err error) {
+	if o.IsCursor() || o.IsOpenAI() {
+		return RunningModel{}, false, nil
+	}
+	resp, err := o.get(generatePath("runningModels", o))
+	if err != nil {
+		return RunningModel{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return RunningModel{}, false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	var list runningModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return RunningModel{}, false, fmt.Errorf("failed to decode /api/ps: %v", err)
+	}
+	want := withDefaultTag(model)
+	for _, r := range list.Models {
+		if withDefaultTag(r.Name) == want || withDefaultTag(r.Model) == want {
+			return r, true, nil
+		}
+	}
+	return RunningModel{}, false, nil
+}
+
+// withDefaultTag spells a bare model name the way Ollama lists it.
+func withDefaultTag(name string) string {
+	if name != "" && !strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
+		return name + ":latest"
+	}
+	return name
 }
 
 type GenerateRequest struct {
@@ -99,7 +155,9 @@ type ShowModelRequest struct {
 type ShowModelResponse struct {
 	Capabilities []string       `json:"capabilities"`
 	ModelInfo    map[string]any `json:"model_info"`
-	Details      struct {
+	// Parameters is the Modelfile's PARAMETER block, one "name value" per line.
+	Parameters string `json:"parameters"`
+	Details    struct {
 		Family        string `json:"family"`
 		ParameterSize string `json:"parameter_size"` // e.g. "12.4B", "756b", "1t"
 	} `json:"details"`
@@ -134,6 +192,18 @@ func (r *ShowModelResponse) SupportsTools() bool {
 // SupportsThinking reports whether the model advertises a reasoning stream.
 func (r *ShowModelResponse) SupportsThinking() bool {
 	return slices.Contains(r.Capabilities, "thinking")
+}
+
+// SetsSampling reports whether the Modelfile sets any sampling parameter.
+// Library models usually carry the vendor's recommended values there.
+func (r *ShowModelResponse) SetsSampling() bool {
+	for line := range strings.SplitSeq(r.Parameters, "\n") {
+		switch strings.ToLower(strings.TrimSpace(strings.SplitN(strings.TrimSpace(line), " ", 2)[0])) {
+		case "temperature", "top_p", "top_k", "min_p":
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsVision reports whether the model accepts image input.

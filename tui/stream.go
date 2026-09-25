@@ -461,6 +461,7 @@ func (m *Model) waitForStream() tea.Cmd {
 					thinking:   chunk.Message.Thinking,
 					promptEval: chunk.PromptEval,
 					evalCount:  chunk.EvalCount,
+					stats:      statsOf(chunk),
 				}
 			}
 			return chatChunkMsg{gen: s.gen, content: chunk.Message.Content}
@@ -504,6 +505,7 @@ func drainToolCallStream(resp <-chan api.ChatResponse, out *chatToolCallsMsg, ch
 		}
 	}
 	out.promptEval, out.evalCount = chunk.PromptEval, chunk.EvalCount
+	out.stats = statsOf(chunk)
 }
 
 func (m *Model) recordModelResponse(gen int, content string, calls []tools.ToolCall, promptTokens, completionTokens int) {
