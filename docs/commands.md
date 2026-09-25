@@ -152,6 +152,10 @@ file paths from a menu (`↑`/`↓` to move, `Enter` to accept, `Esc` to dismiss
   (contains `/` or `.`), so `@handles` are left alone.
 - The transcript shows your message as typed; the file contents are attached
   to the turn sent to the model.
+- Image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) are attached as images
+  to your message when the model supports vision (up to 4 per message, 10 MiB
+  each), e.g. `why does this look wrong? @screenshot.png`. With a model that
+  doesn't, the model is told the image was not attached.
 
 ## Keys
 

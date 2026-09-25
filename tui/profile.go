@@ -55,7 +55,7 @@ func (m *Model) resolveProfile() {
 	if m.cfg.Profiles != nil {
 		// ParamsB == 0 also re-probes profiles cached before tier detection
 		// existed; one /api/show per model switch is cheap and self-heals.
-		if p, ok := m.cfg.Profiles[key]; ok && p.NumCtx > 0 && p.ParamsB > 0 {
+		if p, ok := m.cfg.Profiles[key]; ok && p.NumCtx > 0 && p.ParamsB > 0 && p.SupportsVision != nil {
 			m.applyProfile(p)
 			return
 		}
@@ -71,6 +71,8 @@ func (m *Model) resolveProfile() {
 		if len(show.Capabilities) > 0 {
 			p.SupportsTools = show.SupportsTools()
 			p.SupportsThinking = show.SupportsThinking()
+			vision := show.SupportsVision()
+			p.SupportsVision = &vision
 		}
 		p.ParamsB = show.ParamsB()
 	}

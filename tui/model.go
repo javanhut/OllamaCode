@@ -201,9 +201,12 @@ func providerKindLabel(kind string) string {
 // plus optional sampling overrides, so num_ctx and tool support adapt to the
 // actual model instead of a hardcoded value.
 type ModelProfile struct {
-	NumCtx            int      `json:"num_ctx"`
-	SupportsTools     bool     `json:"supports_tools"`
-	SupportsThinking  bool     `json:"supports_thinking,omitempty"`
+	NumCtx           int  `json:"num_ctx"`
+	SupportsTools    bool `json:"supports_tools"`
+	SupportsThinking bool `json:"supports_thinking,omitempty"`
+	// SupportsVision is nil until probed, so profiles cached before vision
+	// detection existed get re-probed once instead of reading as "no".
+	SupportsVision    *bool    `json:"supports_vision,omitempty"`
 	ParamsB           float64  `json:"params_b,omitempty"`        // parameter count in billions; 0 = unknown
 	CapabilityTier    string   `json:"capability_tier,omitempty"` // small, capable, or strong; overrides ParamsB tiering
 	MaxVisibleTools   int      `json:"max_visible_tools,omitempty"`
@@ -225,6 +228,11 @@ type ModelProfile struct {
 // parameters get the compact prompt, lean toolset, and low-temperature
 // defaults. Unknown size (0) is treated as big — current behavior.
 const smallModelParamsB = 15
+
+// vision reports whether the model is known to accept image input.
+func (p ModelProfile) vision() bool {
+	return p.SupportsVision != nil && *p.SupportsVision
+}
 
 func (p ModelProfile) smallModel() bool {
 	switch strings.ToLower(strings.TrimSpace(p.CapabilityTier)) {
@@ -800,6 +808,7 @@ func New() *Model {
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
 	registry.Register(m.parallelEditTool())
+	registry.Register(tools.ReadImageTool())
 	// Push background-shell completions into the update loop (see shell_bg.go).
 	// The closure captures the channel, not the Model. Buffered (64) with a
 	// drop fallback so a wedged update loop never blocks a job's watcher.

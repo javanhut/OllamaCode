@@ -21,6 +21,9 @@ type ExecutionEvent struct {
 	RepairSucceeded bool
 	ExitCode        int // nonzero when a command ran and failed; Err stays nil
 	Duration        time.Duration
+	// Images are attached to the tool message: a successful read_image
+	// carries the image it described, which no string result can.
+	Images []string
 }
 
 // Executor is the single tool-dispatch implementation used by interactive and
@@ -125,6 +128,16 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 		event.Result = tools.RepairHint(call, err)
 	} else {
 		event.Result = out
+	}
+	if err == nil && call.Function.Name == "read_image" {
+		// The handler just validated this path; a file swapped in between
+		// fails here and the result says so instead of promising an image.
+		if b64, _, _, lerr := tools.LoadImage(tools.ImagePathArg(call.Function.Arguments)); lerr == nil {
+			event.Images = []string{b64}
+		} else {
+			event.Err = lerr
+			event.Result = tools.EncodeToolFailure("read_image failed", lerr.Error(), false)
+		}
 	}
 	if e.Observe != nil {
 		event.Duration = time.Since(started)

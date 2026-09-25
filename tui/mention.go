@@ -119,6 +119,13 @@ func expandFileMentions(text string) string {
 // fully attached file to observe, so an @-mention satisfies read-before-edit
 // just as a read_file would.
 func expandFileMentionsObserved(text string, observe func(path string)) string {
+	return expandMentions(text, observe, nil)
+}
+
+// expandMentions is expandFileMentionsObserved with image handling: when image
+// is set, a whole-file mention of an image goes to it instead of being read as
+// text, and the note it returns stands in for the file's contents.
+func expandMentions(text string, observe func(path string), image func(path string) string) string {
 	paths := findMentions(text)
 	if len(paths) == 0 {
 		return ""
@@ -136,6 +143,10 @@ func expandFileMentionsObserved(text string, observe func(path string)) string {
 			}
 		} else {
 			fmt.Fprintf(&b, "\n===== %s =====\n", path)
+		}
+		if image != nil && !ranged && tools.IsImagePath(path) {
+			b.WriteString(image(path) + "\n")
+			continue
 		}
 		if total >= mentionMaxTotalBytes {
 			b.WriteString("[not attached: per-message attachment budget exhausted]\n")
@@ -168,6 +179,32 @@ func expandFileMentionsObserved(text string, observe func(path string)) string {
 		}
 	}
 	return b.String()
+}
+
+// maxMentionImages caps the images one message can attach; each costs the
+// vision encoder hundreds to thousands of tokens.
+const maxMentionImages = 4
+
+// attachMentions expands the @-mentions in a message the user is sending: the
+// text block for the dynamic context, and the mentioned images, which ride the
+// user message itself because only a message can carry them.
+func (m *Model) attachMentions(text string) (block string, images []string) {
+	image := func(path string) string {
+		if !m.profile.vision() {
+			return "[not attached: image file, and the current model does not accept images]"
+		}
+		if len(images) >= maxMentionImages {
+			return fmt.Sprintf("[not attached: at most %d images per message]", maxMentionImages)
+		}
+		b64, mime, size, err := tools.LoadImage(path)
+		if err != nil {
+			return "[not attached: " + err.Error() + "]"
+		}
+		images = append(images, b64)
+		return fmt.Sprintf("[image (%s, %d KB) attached to the user's message]", mime, (size+1023)/1024)
+	}
+	block = expandMentions(text, m.freshnessLedger().ObserveRead, image)
+	return block, images
 }
 
 // checkMentionPath runs the containment checks shared by both read paths

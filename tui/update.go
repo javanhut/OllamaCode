@@ -62,6 +62,8 @@ type toolResultMsg struct {
 type compactDoneMsg struct {
 	summary string
 	index   int
+	// reason explains a pass that produced no usable summary.
+	reason string
 }
 
 type modelsLoadedMsg struct {
@@ -1108,8 +1110,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// would hide half the history behind nothing, so leave it and surface
 		// any overflow the turn was waiting on.
 		if strings.TrimSpace(msg.summary) == "" {
-			m.toast = "compaction failed: empty summary, history kept"
-			m.logActivity("compaction returned an empty summary; archive boundary not moved")
+			reason := msg.reason
+			if reason == "" {
+				reason = "empty summary"
+			}
+			m.toast = "compaction failed: " + reason + ", history kept"
+			m.logActivity("compaction failed (" + reason + "); archive boundary not moved")
 			if err := m.overflowErr; err != nil {
 				m.overflowErr = nil
 				gen := m.turnGen

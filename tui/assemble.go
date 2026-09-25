@@ -136,6 +136,7 @@ func (m *Model) deriveModelMessages() []api.Message {
 		msg.Thinking = ""
 		if msg.Role == "tool" && i < m.prunedThrough {
 			msg.Content = prunedToolContent(msg.Content)
+			msg.Images = nil // an aged read_image result is the priciest thing to keep
 		}
 		out = append(out, msg)
 	}

@@ -18,6 +18,7 @@ Legend: **E** explore · **P** plan · **W** write · **A** auto
 | `get_project_tree` | ✓ | ✓ | ✓ | ✓ |
 | `get_working_directory` | ✓ | ✓ | ✓ | ✓ |
 | `hash_file` | ✓ | ✓ | ✓ | ✓ |
+| `read_image` | ✓ | ✓ | ✓ | ✓ |
 | `write_file` | | | ✓ | ✓ |
 | `edit_file` | | | ✓ | ✓ |
 | `multi_edit` | | | ✓ | ✓ |
@@ -26,6 +27,19 @@ Legend: **E** explore · **P** plan · **W** write · **A** auto
 | `move_file` / `copy_file` | | | ✓ | ✓ |
 | `make_directory` / `touch` | | | ✓ | ✓ |
 | `parallel_edit` | | | ✓ | ✓ |
+
+`read_image` attaches a PNG, JPEG, GIF or WebP file (up to 10 MiB, inside the
+workspace) to its tool result so the model can see it. It is offered only to
+models whose `/api/show` capabilities include `vision` (or whose profile sets
+`supports_vision`), and not to sub-agents.
+
+`edit_file` matches `old_string` in tiers: exactly; then line by line ignoring
+indentation and CRLF; then with typographic punctuation folded to ASCII (curly
+quotes, en/em dashes, ellipses, non-breaking spaces), in either direction; then
+with one level of string escaping undone (`\n`, `\t`, `\"` sent literally by a
+model that escaped its arguments twice), applying the same unescape to
+`new_string`; and finally by fuzzy line similarity. The result notes when a
+match needed normalizing.
 
 `multi_edit` applies several `old_string`/`new_string` replacements to one
 file as a single atomic change: edits apply in order (each sees the file as the

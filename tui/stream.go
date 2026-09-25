@@ -88,7 +88,8 @@ func (m *Model) submit() tea.Cmd {
 	// Attach any @-mentioned files to this turn (injected via the dynamic
 	// context; the user's message stays as typed). Computed before the
 	// escalation hold so a confirmed message still carries its attachments.
-	m.mentionBlock = expandFileMentionsObserved(value, m.freshnessLedger().ObserveRead)
+	var images []string
+	m.mentionBlock, images = m.attachMentions(value)
 
 	// If we dreamt while the user was away, hand those thoughts to the model so
 	// it can mention them in its reply.
@@ -96,7 +97,7 @@ func (m *Model) submit() tea.Cmd {
 		m.history = append(m.history, api.Message{Role: "system", Content: dctx})
 	}
 
-	m.history = append(m.history, api.Message{Role: "user", Content: value})
+	m.history = append(m.history, api.Message{Role: "user", Content: value, Images: images})
 	m.userHistory = appendHistory(m.userHistory, value)
 	m.historyIndex = len(m.userHistory)
 	m.persistHistory()
@@ -157,8 +158,9 @@ func (m *Model) submit() tea.Cmd {
 func (m *Model) dequeueNext() tea.Cmd {
 	next := m.queue[0]
 	m.queue = m.queue[1:]
-	m.mentionBlock = expandFileMentionsObserved(next, m.freshnessLedger().ObserveRead) // attachments belong to the dequeued message
-	m.history = append(m.history, api.Message{Role: "user", Content: next})
+	var images []string
+	m.mentionBlock, images = m.attachMentions(next) // attachments belong to the dequeued message
+	m.history = append(m.history, api.Message{Role: "user", Content: next, Images: images})
 	m.logActivity("Message (dequeued): " + next)
 	m.resetTurnGuards()
 	m.clarificationOnly = needsTaskClarification(next)
@@ -269,7 +271,7 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 
 	// Halve the MODEL's view, and report the boundary as an index into the log,
 	// since that is what compactDoneMsg moves. The log itself is untouched.
-	half := len(visible) / 2
+	half := compactionCut(visible)
 	mid := m.archivedThrough + half
 	toCompact := visible[:half]
 
@@ -289,31 +291,130 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 		m.kvStore.Set(key, conversation.String())
 	}
 
-	var b strings.Builder
-	b.WriteString("Summarize the following conversation history concisely for context management. Focus on key decisions, file changes, and project state. (Note: The full history has been archived in KV storage with key: " + key + ")\n\n")
-	b.WriteString(conversation.String())
-
-	// Without num_ctx the host falls back to its small default window and
-	// silently truncates the very history being summarized.
-	req := api.GenerateRequest{
-		Model:   m.modelName,
-		Prompt:  b.String(),
-		Stream:  false,
-		Options: map[string]any{"num_ctx": m.contextLimit},
-	}
+	req := m.compactionRequest(toCompact, key)
+	sourceTokens := estimateMsgsTokens(toCompact) + estimateTokens(m.archiveSummary)
 
 	host := m.host
 	gen := m.turnGen
 	return func() tea.Msg {
-		resp, err := host.GenerateResponse(req)
+		ctx, cancel := context.WithTimeout(context.Background(), compactionTimeout)
+		defer cancel()
+		resp, err := host.ChatOnce(ctx, req)
+		// The tools ride along only to keep the cached prefix intact. A model
+		// that answers the summary request with a call instead of text gets one
+		// retry without them: uncached, but it cannot call anything.
+		if err == nil && strings.TrimSpace(resp.Message.Content) == "" && len(req.Tools) > 0 {
+			req.Tools = nil
+			resp, err = host.ChatOnce(ctx, req)
+		}
 		if err != nil {
 			return chatErrMsg{gen: gen, err: err}
 		}
+		summary := stripThinkBlock(resp.Message.Content)
+		// A summary that is no shorter than what it replaces reclaims nothing;
+		// moving the boundary on it would only trade history for paraphrase.
+		if estimateTokens(summary) >= sourceTokens {
+			return compactDoneMsg{index: mid, reason: "summary was not shorter than the history it replaced"}
+		}
 		return compactDoneMsg{
-			summary: resp.Response,
+			summary: summary,
 			index:   mid,
 		}
 	}
+}
+
+// compactionTimeout bounds one summarization pass. It covers prefill of up to a
+// full window on a local GPU, which a cache miss can make slow.
+const compactionTimeout = 10 * time.Minute
+
+// compactionSummaryPrompt is the instruction appended after the history being
+// compacted. The fixed headings keep summaries from different passes (and from
+// different models) the same shape, so merging a prior summary is mechanical.
+const compactionSummaryPrompt = `[SYSTEM] Context compaction. Do not call any tools; reply with text only.
+
+Summarize the conversation above so it can replace that history. Everything above this message will be removed from your context and replaced by your summary; newer messages stay as they are. The full raw history is archived under key %s.
+%s
+Use exactly these headings, and keep each one short and concrete:
+
+## Objective
+What the user wants overall, in their own terms.
+
+## Important details
+Decisions made, constraints, user preferences, commands and exact values that must not be lost.
+
+## Work state
+- Completed: what is done, including files changed and how.
+- Active: what was in progress when this history ends.
+- Blocked: open problems, failing checks, unanswered questions.
+
+## Next move
+The single next step to take.
+
+## Relevant files
+Paths that matter, one per line, with a few words on why.`
+
+// compactionMergeNote is added when a prior summary exists. It sits behind the
+// archive boundary, so the model only sees it here.
+const compactionMergeNote = `
+An earlier summary covers what came before the conversation above. Merge it into yours: keep what is still true, and where it conflicts with the conversation above, the conversation wins.
+
+<earlier_summary>
+%s
+</earlier_summary>
+`
+
+// compactionRequest builds the summarization request as a continuation of the
+// normal chat request: the same system prompt, tools, options and history
+// messages, byte for byte, with the instruction as one extra message at the
+// end. Ollama reuses its KV cache for a matching prefix, so the host only has
+// to process the instruction rather than re-reading the whole history, and the
+// identical options (num_ctx above all) keep it from reloading the model.
+func (m *Model) compactionRequest(toCompact []api.Message, archiveKey string) api.ChatRequest {
+	msgs := make([]api.Message, 0, len(toCompact)+2)
+	msgs = append(msgs, api.Message{Role: "system", Content: m.activeSystemPrompt()})
+	for _, msg := range toCompact {
+		msgs = append(msgs, demoteSystem(msg))
+	}
+	merge := ""
+	if m.archiveSummary != "" {
+		merge = fmt.Sprintf(compactionMergeNote, m.archiveSummary)
+	}
+	msgs = append(msgs, api.Message{Role: "user", Content: fmt.Sprintf(compactionSummaryPrompt, archiveKey, merge)})
+
+	var defs []tools.Tool
+	if m.profile.SupportsTools && m.tools != nil && !m.host.IsCursor() {
+		defs = m.toolsForMode()
+	}
+	return api.ChatRequest{
+		Model:    m.modelName,
+		Messages: msgs,
+		Tools:    defs,
+		Options:  m.chatOptions(len(defs) > 0),
+	}
+}
+
+// compactionCut picks where the compacted half ends. It moves the cut forward
+// past tool results, so that no result is split from the assistant call that
+// produced it: the summarized half never ends on an unanswered call, and the
+// kept half never starts with an orphaned result.
+func compactionCut(visible []api.Message) int {
+	cut := len(visible) / 2
+	for cut < len(visible)-1 && visible[cut].Role == "tool" {
+		cut++
+	}
+	return cut
+}
+
+// stripThinkBlock drops a leading <think>…</think> block, which models without
+// a separate reasoning stream leave in the content.
+func stripThinkBlock(s string) string {
+	t := strings.TrimSpace(s)
+	if strings.HasPrefix(t, "<think>") {
+		if end := strings.Index(t, "</think>"); end >= 0 {
+			t = t[end+len("</think>"):]
+		}
+	}
+	return strings.TrimSpace(t)
 }
 
 func (m *Model) waitForStream() tea.Cmd {

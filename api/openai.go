@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,6 +49,44 @@ type oaMessage struct {
 	Content    string       `json:"content"`
 	ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string       `json:"tool_call_id,omitempty"`
+	// Parts, when set, replaces Content on the wire with a content-part array,
+	// the only form the OpenAI API accepts images in.
+	Parts []oaPart `json:"-"`
+}
+
+type oaPart struct {
+	Type     string      `json:"type"`
+	Text     string      `json:"text,omitempty"`
+	ImageURL *oaImageURL `json:"image_url,omitempty"`
+}
+
+type oaImageURL struct {
+	URL string `json:"url"`
+}
+
+func (m oaMessage) MarshalJSON() ([]byte, error) {
+	type plain oaMessage
+	if len(m.Parts) == 0 {
+		return json.Marshal(plain(m))
+	}
+	// The outer Content is shallower than the embedded one, so it wins.
+	return json.Marshal(struct {
+		plain
+		Content []oaPart `json:"content"`
+	}{plain(m), m.Parts})
+}
+
+// imageParts builds a content-part array: the text, then each image as a data
+// URL. The media type is sniffed from the decoded bytes, since Ollama-style
+// images carry none.
+func imageParts(text string, images []string) []oaPart {
+	parts := []oaPart{{Type: "text", Text: text}}
+	for _, img := range images {
+		head, _ := base64.StdEncoding.DecodeString(img[:min(len(img), 700)/4*4])
+		mime := http.DetectContentType(head)
+		parts = append(parts, oaPart{Type: "image_url", ImageURL: &oaImageURL{URL: "data:" + mime + ";base64," + img}})
+	}
+	return parts
 }
 
 type oaStreamOptions struct {
@@ -120,8 +159,21 @@ type oaCompletion struct {
 func toOpenAIMessages(msgs []Message) []oaMessage {
 	out := make([]oaMessage, 0, len(msgs))
 	var outstanding []string // ids awaiting a result, oldest first
+	// A tool message cannot carry images in the OpenAI format, and nothing may
+	// come between a call and its results, so images from a run of results ride
+	// one user message placed right after the run.
+	var toolImages []string
+	flushToolImages := func() {
+		if len(toolImages) > 0 {
+			out = append(out, oaMessage{Role: "user", Parts: imageParts("[SYSTEM] Images returned by the tool results above.", toolImages)})
+			toolImages = nil
+		}
+	}
 
 	for i, msg := range msgs {
+		if msg.Role != "tool" {
+			flushToolImages()
+		}
 		switch msg.Role {
 		case "tool":
 			if len(outstanding) == 0 {
@@ -129,6 +181,7 @@ func toOpenAIMessages(msgs []Message) []oaMessage {
 			}
 			out = append(out, oaMessage{Role: "tool", Content: msg.Content, ToolCallID: outstanding[0]})
 			outstanding = outstanding[1:]
+			toolImages = append(toolImages, msg.Images...)
 
 		case "assistant":
 			m := oaMessage{Role: "assistant", Content: msg.Content}
@@ -150,9 +203,14 @@ func toOpenAIMessages(msgs []Message) []oaMessage {
 			out = append(out, m)
 
 		default:
-			out = append(out, oaMessage{Role: msg.Role, Content: msg.Content})
+			m := oaMessage{Role: msg.Role, Content: msg.Content}
+			if len(msg.Images) > 0 {
+				m.Parts = imageParts(msg.Content, msg.Images)
+			}
+			out = append(out, m)
 		}
 	}
+	flushToolImages()
 	return out
 }
 

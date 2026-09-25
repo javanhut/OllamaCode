@@ -107,6 +107,7 @@ func (m *Model) invokeTool(ctx context.Context, call tools.ToolCall) api.Message
 		Role:     "tool",
 		ToolName: call.Function.Name,
 		Content:  event.Result,
+		Images:   event.Images,
 	}
 }
 

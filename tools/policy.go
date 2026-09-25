@@ -84,7 +84,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 	for _, name := range []string{
 		"read_file", "list_directory", "find_files", "grep", "file_info",
 		"get_working_directory", "get_project_tree", "git_status", "git_diff",
-		"git_log",
+		"git_log", "read_image",
 	} {
 		m[name] = leanRead
 	}
@@ -158,7 +158,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 	}
 
 	setTimeout(m, inspectTimeout,
-		"read_file", "list_directory", "find_files", "grep", "file_info",
+		"read_image", "read_file", "list_directory", "find_files", "grep", "file_info",
 		"get_working_directory", "git_status", "git_diff", "git_log", "git_branch",
 		"find_symbol", "process_list", "disk_usage", "read_session_notes", "recall")
 	setTimeout(m, mutateTimeout,
@@ -431,7 +431,7 @@ func shellCallTimeout(args json.RawMessage) time.Duration {
 var concurrentSafeTools = map[string]bool{
 	"read_file": true, "list_directory": true, "find_files": true, "grep": true,
 	"file_info": true, "get_working_directory": true, "get_project_tree": true,
-	"hash_file": true, "git_status": true, "git_diff": true, "git_log": true,
+	"read_image": true, "hash_file": true, "git_status": true, "git_diff": true, "git_log": true,
 	"find_symbol": true, "code_definition": true, "code_references": true,
 	"code_hover": true, "semantic_search": true, "web_fetch": true,
 	"web_search": true, "web_search_api": true, "todo_read": true,

@@ -80,8 +80,13 @@ func estimateMsgTokens(m api.Message) int {
 	for _, c := range m.ToolCalls {
 		n += estimateTokens(c.Function.Name) + estimateTokens(string(c.Function.Arguments)) + 4
 	}
-	return n
+	return n + len(m.Images)*imageTokenEstimate
 }
+
+// imageTokenEstimate is what one image costs in context. It varies by model
+// (gemma3 uses a fixed 256, qwen2.5-vl scales with resolution into the
+// thousands); this errs high so the budget never undercounts badly.
+const imageTokenEstimate = 1024
 
 // estimateMsgsTokens sums the estimated tokens of a message slice.
 func estimateMsgsTokens(msgs []api.Message) int {

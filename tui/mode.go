@@ -352,6 +352,9 @@ func (m *Model) toolsForMode() []tools.Tool {
 		if t.Function.Name == "spawn_subagent" && !m.profile.canDelegate() {
 			continue
 		}
+		if t.Function.Name == "read_image" && !m.profile.vision() {
+			continue
+		}
 		if !t.Policy.Allows(toolMode(m.mode)) {
 			continue
 		}

@@ -22,6 +22,9 @@ type Message struct {
 	Thinking  string           `json:"thinking,omitempty"` // reasoning stream from thinking-capable models; never sent back
 	ToolName  string           `json:"tool_name,omitempty"`
 	ToolCalls []tools.ToolCall `json:"tool_calls,omitempty"`
+	// Images are base64-encoded image files (no data: prefix), as Ollama's chat
+	// API takes them. Only vision models accept them.
+	Images []string `json:"images,omitempty"`
 	// Advisory marks a harness-authored turn message riding the "user" role —
 	// the loop guards' [LOOP BROKEN] style nudges. Every backwards scan for
 	// "the last thing the human asked for" has to step over these, and the flag
@@ -131,6 +134,11 @@ func (r *ShowModelResponse) SupportsTools() bool {
 // SupportsThinking reports whether the model advertises a reasoning stream.
 func (r *ShowModelResponse) SupportsThinking() bool {
 	return slices.Contains(r.Capabilities, "thinking")
+}
+
+// SupportsVision reports whether the model accepts image input.
+func (r *ShowModelResponse) SupportsVision() bool {
+	return slices.Contains(r.Capabilities, "vision")
 }
 
 // ParamsB returns the model's parameter count in billions, or 0 if unknown.

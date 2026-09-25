@@ -141,6 +141,7 @@ actual model rather than a hardcoded guess. Edit to override.
 | `num_ctx` | Context window. Capped at 131072 regardless of what the model reports |
 | `supports_tools` | Whether tools are sent at all |
 | `supports_thinking` | Whether the reasoning stream is requested |
+| `supports_vision` | Whether the model accepts images (`@image` mentions and `read_image`). Discovered from `/api/show` on Ollama; set it by hand for an OpenAI-compatible provider |
 | `params_b` | Parameter count in billions. Under 15 triggers the small-model tier: compact prompt, lean toolset, temperature 0 on tool-capable turns and 0.2 on tool-less prose turns. `0` means unknown and is treated as large |
 | `capability_tier` | Optional `small`, `capable`, or `strong` override for size-based tiering |
 | `max_visible_tools` | Optional cap used by task-aware tool selection |

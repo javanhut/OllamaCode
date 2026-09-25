@@ -306,6 +306,16 @@ the cut is nudged back past leading tool messages. Anything dropped is
 recoverable from the KV archive via `/archive`, and a rolling summary of
 compacted history rides along in the volatile tail.
 
+Compaction first stubs old tool results; only if that is not enough does it
+summarize the older half. The summary request repeats the normal chat request
+(the same system prompt, tools, options and history messages) with the instruction
+appended as a final message, so Ollama reuses its KV cache and only processes
+the instruction, not the whole history again. The summary uses fixed headings
+(Objective, Important details, Work state, Next move, Relevant files) and merges
+the previous summary, with the newer conversation winning on conflicts. A
+summary that is not shorter than what it replaces is rejected and the history
+kept.
+
 ## Secret handling
 
 - The API key field is masked

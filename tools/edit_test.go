@@ -177,3 +177,68 @@ func TestApplyEdit_FragmentAmbiguous(t *testing.T) {
 		t.Fatal("expected refusal for a fragment that matches two spans equally")
 	}
 }
+
+func TestApplyEditFoldsTypographicPunctuation(t *testing.T) {
+	content := "func greet() {\n\tfmt.Println(\"it's done - ok\")\n}\n"
+	old := "fmt.Println(“it’s done — ok”)"
+	got, count, tier, err := applyEdit(content, old, "fmt.Println(“finished”)", false)
+	if err != nil || count != 1 || tier != 2 {
+		t.Fatalf("count=%d tier=%d err=%v", count, tier, err)
+	}
+	// The file had straight quotes, so the replacement's curly ones are folded too.
+	if want := "func greet() {\n\tfmt.Println(\"finished\")\n}\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestApplyEditMatchesCurlyQuotesInFile(t *testing.T) {
+	content := "// It’s the “main” loop.\nrun()\n"
+	got, _, tier, err := applyEdit(content, "// It's the \"main\" loop.", "// The main loop.", false)
+	if err != nil || tier != 2 {
+		t.Fatalf("tier=%d err=%v", tier, err)
+	}
+	if got != "// The main loop.\nrun()\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestApplyEditUndoesDoubleEscaping(t *testing.T) {
+	content := "if err != nil {\n\treturn fmt.Errorf(\"bad: %v\\n\", err)\n}\n"
+	// Whole argument escaped one level too deep: newlines, tabs, quotes, and
+	// the literal \n inside the Go string all carry an extra backslash.
+	old := `if err != nil {\n\treturn fmt.Errorf(\"bad: %v\\n\", err)\n}`
+	newStr := `if err != nil {\n\treturn fmt.Errorf(\"worse: %v\\n\", err)\n}`
+	got, count, tier, err := applyEdit(content, old, newStr, false)
+	if err != nil || count != 1 || tier != 2 {
+		t.Fatalf("count=%d tier=%d err=%v", count, tier, err)
+	}
+	if want := "if err != nil {\n\treturn fmt.Errorf(\"worse: %v\\n\", err)\n}\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestApplyEditLeavesRealEscapesAlone(t *testing.T) {
+	// The file really contains \n inside a string; an exact match must not be
+	// second-guessed by the unescape pass.
+	content := "s := \"a\\nb\"\n"
+	got, _, tier, err := applyEdit(content, `"a\nb"`, `"a\tb"`, false)
+	if err != nil || tier != 1 || got != "s := \"a\\tb\"\n" {
+		t.Fatalf("got %q tier=%d err=%v", got, tier, err)
+	}
+}
+
+func TestUnescapeArg(t *testing.T) {
+	cases := map[string]string{
+		`a\nb`:     "a\nb",
+		`\"q\"`:    `"q"`,
+		`\\n`:      `\n`,
+		`\d+ \w`:   `\d+ \w`,
+		`trail\`:   `trail\`,
+		"no slash": "no slash",
+	}
+	for in, want := range cases {
+		if got := unescapeArg(in); got != want {
+			t.Errorf("unescapeArg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -35,11 +35,15 @@ func reindentBlock(newStr, oldIndent, fileIndent string) string {
 // applyEdit replaces oldStr with newStr in content using a tiered matcher:
 //
 //	tier 1: exact substring match (whitespace must match exactly)
-//	tier 2: whitespace-normalized, line-based match (tolerates indentation and
-//	        CRLF/LF differences; re-indents newStr to the file's real indentation)
+//	tier 2: normalized, line-based match: indentation and CRLF/LF differences,
+//	        then typographic punctuation (smart quotes, dashes, ellipses,
+//	        non-breaking spaces), then arguments the model escaped one level
+//	        too deep (literal \n, \t, \" in old_string). Re-indents newStr to the
+//	        file's real indentation.
+//	tier 3: fuzzy line similarity (see fuzzyEdit, fuzzySubEdit)
 //
 // It returns the updated content, the number of replacements, and the tier that
-// matched. Tier 2 is only attempted when tier 1 finds nothing.
+// matched. Each tier is only attempted when the ones before it find nothing.
 func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string, count, tier int, err error) {
 	// Tier 1: exact.
 	if c := strings.Count(content, oldStr); c > 0 {
@@ -52,66 +56,115 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 		return strings.Replace(content, oldStr, newStr, 1), c, 1, nil
 	}
 
-	// Tier 2: whitespace-normalized line match.
 	crlf := strings.Count(content, "\r\n")
 	useCRLF := crlf > (strings.Count(content, "\n") - crlf)
 	norm := strings.ReplaceAll(content, "\r\n", "\n")
 	oldNorm := strings.ReplaceAll(oldStr, "\r\n", "\n")
 	newNorm := strings.ReplaceAll(newStr, "\r\n", "\n")
-
 	cLines := strings.Split(norm, "\n")
-	oLines := strings.Split(oldNorm, "\n")
-	for len(oLines) > 1 && strings.TrimSpace(oLines[len(oLines)-1]) == "" {
-		oLines = oLines[:len(oLines)-1]
-	}
-	k := len(oLines)
-	if k == 0 {
+	oLines := trimTrailingBlank(strings.Split(oldNorm, "\n"))
+	if len(oLines) == 0 {
 		return "", 0, 2, fmt.Errorf("old_string is empty")
 	}
 
-	// Find all window start indices whose trimmed lines match oLines exactly.
-	var starts []int
-	if k <= len(cLines) {
-		for i := 0; i+k <= len(cLines); i++ {
-			match := true
-			for j := range k {
-				if strings.TrimSpace(cLines[i+j]) != strings.TrimSpace(oLines[j]) {
-					match = false
-					break
-				}
+	// Tier 2: normalized line matches, strictest first.
+	trimEq := func(a, b string) bool { return strings.TrimSpace(a) == strings.TrimSpace(b) }
+	if out, n, ok, err := lineReplace(cLines, oLines, newNorm, replaceAll, trimEq, useCRLF); ok {
+		return out, n, 2, err
+	}
+	punctEq := func(a, b string) bool {
+		return normalizePunct(strings.TrimSpace(a)) == normalizePunct(strings.TrimSpace(b))
+	}
+	if normalizePunct(oldNorm) != oldNorm || normalizePunct(norm) != norm {
+		repl := newNorm
+		// The model typed curly quotes where the file has straight ones; its
+		// replacement carries the same substitution, so undo it there too.
+		if normalizePunct(norm) == norm {
+			repl = normalizePunct(newNorm)
+		}
+		if out, n, ok, err := lineReplace(cLines, oLines, repl, replaceAll, punctEq, useCRLF); ok {
+			return out, n, 2, err
+		}
+	}
+	if u := unescapeArg(oldNorm); u != oldNorm {
+		// Doubly escaped arguments are escaped throughout: a real "\n" inside a
+		// string literal reached us as "\\n" and unescapes back to "\n", so the
+		// same transform restores new_string.
+		uLines := trimTrailingBlank(strings.Split(u, "\n"))
+		repl := unescapeArg(newNorm)
+		if c := strings.Count(norm, u); c > 0 && len(uLines) > 0 {
+			if c > 1 && !replaceAll {
+				return "", c, 2, fmt.Errorf("old_string matches %d locations (after unescaping); pass replace_all=true or use a more specific snippet", c)
 			}
-			if match {
-				starts = append(starts, i)
+			n := 1
+			if replaceAll {
+				n = -1
 			}
+			out := strings.Replace(norm, u, repl, n)
+			if useCRLF {
+				out = strings.ReplaceAll(out, "\n", "\r\n")
+			}
+			return out, c, 2, nil
+		}
+		if out, n, ok, err := lineReplace(cLines, uLines, repl, replaceAll, trimEq, useCRLF); ok {
+			return out, n, 2, err
 		}
 	}
 
-	if len(starts) == 0 {
-		// Tier 3: fuzzy line-block match.
-		joined, n, t, ferr := fuzzyEdit(cLines, oLines, newNorm, useCRLF)
-		if ferr != nil && k == 1 {
-			// Tier 3b: old_string may be a fragment of a long line.
-			sub, serr := fuzzySubEdit(norm, oldNorm, newNorm)
-			if serr == nil {
-				if useCRLF {
-					sub = strings.ReplaceAll(sub, "\n", "\r\n")
-				}
-				return sub, 1, 3, nil
+	// Tier 3: fuzzy line-block match.
+	joined, n, t, ferr := fuzzyEdit(cLines, oLines, newNorm, useCRLF)
+	if ferr != nil && len(oLines) == 1 {
+		// Tier 3b: old_string may be a fragment of a long line.
+		sub, serr := fuzzySubEdit(norm, oldNorm, newNorm)
+		if serr == nil {
+			if useCRLF {
+				sub = strings.ReplaceAll(sub, "\n", "\r\n")
 			}
-			if !errors.Is(serr, errNoSubAnchor) {
-				return "", 0, 3, serr
+			return sub, 1, 3, nil
+		}
+		if !errors.Is(serr, errNoSubAnchor) {
+			return "", 0, 3, serr
+		}
+	}
+	return joined, n, t, ferr
+}
+
+// trimTrailingBlank drops trailing whitespace-only lines, keeping at least one.
+func trimTrailingBlank(lines []string) []string {
+	for len(lines) > 1 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// lineReplace finds every window of cLines whose lines match oLines under eq
+// and replaces it with newNorm, re-indented to the file. ok reports whether
+// any window matched; err is set when several did and replaceAll is off.
+func lineReplace(cLines, oLines []string, newNorm string, replaceAll bool, eq func(a, b string) bool, useCRLF bool) (string, int, bool, error) {
+	k := len(oLines)
+	var starts []int
+	for i := 0; i+k <= len(cLines); i++ {
+		match := true
+		for j := range k {
+			if !eq(cLines[i+j], oLines[j]) {
+				match = false
+				break
 			}
 		}
-		return joined, n, t, ferr
+		if match {
+			starts = append(starts, i)
+		}
+	}
+	if len(starts) == 0 {
+		return "", 0, false, nil
 	}
 	if len(starts) > 1 && !replaceAll {
-		return "", len(starts), 2, fmt.Errorf("old_string matches %d locations (after whitespace-normalization); pass replace_all=true or use a more specific snippet", len(starts))
+		return "", len(starts), true, fmt.Errorf("old_string matches %d locations (after whitespace-normalization); pass replace_all=true or use a more specific snippet", len(starts))
 	}
 
 	// Apply replacements from the bottom up so earlier indices stay valid.
 	out := append([]string(nil), cLines...)
 	for _, i := range slices.Backward(starts) {
-
 		fileIndent := leadingWS(out[i])
 		oldIndent := leadingWS(oLines[0])
 		repl := strings.Split(reindentBlock(newNorm, oldIndent, fileIndent), "\n")
@@ -124,7 +177,50 @@ func applyEdit(content, oldStr, newStr string, replaceAll bool) (updated string,
 	if useCRLF {
 		joined = strings.ReplaceAll(joined, "\n", "\r\n")
 	}
-	return joined, len(starts), 2, nil
+	return joined, len(starts), true, nil
+}
+
+// punctReplacer folds typographic punctuation to ASCII. Models trained on prose
+// substitute these freely, and a file may hold either form.
+var punctReplacer = strings.NewReplacer(
+	"\u2018", "'", "\u2019", "'", "\u201a", "'", "\u201b", "'",
+	"\u201c", `"`, "\u201d", `"`, "\u201e", `"`, "\u201f", `"`,
+	"\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-", "\u2014", "-", "\u2015", "-",
+	"\u2026", "...",
+	"\u00a0", " ",
+)
+
+func normalizePunct(s string) string { return punctReplacer.Replace(s) }
+
+// unescapeArg undoes one level of string escaping: \n, \t, \r, \", \', \`, \\
+// and \$ become the characters they stand for. Anything else is left alone.
+func unescapeArg(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 == len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch c := s[i+1]; c {
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case '"', '\'', '`', '\\', '$':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('\\')
+			continue
+		}
+		i++
+	}
+	return b.String()
 }
 
 // fuzzyEdit performs a similarity-based single-best-window replacement. It only
@@ -461,7 +557,7 @@ func EditFileTool() Tool {
 			} else {
 				switch tier {
 				case 2:
-					tierNote = " (matched after whitespace-normalization; copy exact text next time for precision)"
+					tierNote = " (matched after normalizing whitespace, quotes or escapes; copy exact text next time for precision)"
 				case 3:
 					tierNote = " (matched by fuzzy similarity — verify the diff carefully)"
 				}

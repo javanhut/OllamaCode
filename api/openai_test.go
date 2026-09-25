@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -294,5 +295,64 @@ func TestOpenAIErrorBodyIsSurfaced(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tool_call_id not found") {
 		t.Errorf("error = %q, want the provider's message included", err)
+	}
+}
+
+func TestToOpenAIMessagesSendsUserImagesAsParts(t *testing.T) {
+	png := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n0000"))
+	out := toOpenAIMessages([]Message{{Role: "user", Content: "what is this?", Images: []string{png}}})
+
+	raw, err := json.Marshal(out[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("content is not a part array: %s", raw)
+	}
+	if len(wire.Content) != 2 || wire.Content[0].Text != "what is this?" ||
+		wire.Content[1].ImageURL.URL != "data:image/png;base64,"+png {
+		t.Fatalf("wire = %s", raw)
+	}
+}
+
+func TestToOpenAIMessagesMovesToolImagesAfterTheResults(t *testing.T) {
+	img := base64.StdEncoding.EncodeToString([]byte("\xff\xd8\xff\xe0jpeg"))
+	calls := []tools.ToolCall{
+		{Function: tools.ToolCallFunction{Name: "read_image", Arguments: json.RawMessage(`{}`)}},
+		{Function: tools.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{}`)}},
+	}
+	out := toOpenAIMessages([]Message{
+		{Role: "user", Content: "look"},
+		{Role: "assistant", ToolCalls: calls},
+		{Role: "tool", Content: "image attached", Images: []string{img}},
+		{Role: "tool", Content: "file text"},
+		{Role: "assistant", Content: "it is a cat"},
+	})
+
+	roles := []string{}
+	for _, m := range out {
+		roles = append(roles, m.Role)
+	}
+	if got := strings.Join(roles, ","); got != "user,assistant,tool,tool,user,assistant" {
+		t.Fatalf("roles = %s", got)
+	}
+	if len(out[4].Parts) != 2 || !strings.HasPrefix(out[4].Parts[1].ImageURL.URL, "data:image/jpeg;base64,") {
+		t.Fatalf("image message = %+v", out[4])
+	}
+}
+
+func TestOAMessageWithoutPartsKeepsStringContent(t *testing.T) {
+	raw, _ := json.Marshal(oaMessage{Role: "assistant", Content: ""})
+	if !strings.Contains(string(raw), `"content":""`) {
+		t.Fatalf("plain message lost its string content: %s", raw)
 	}
 }
