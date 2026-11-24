@@ -35,6 +35,10 @@ type Options struct {
 	AugmentResult func(call tools.ToolCall, result string) string
 	// NumCtx is the num_ctx to request; 0 leaves the host's default window.
 	NumCtx int
+	// Verify and VerifyCmd are forwarded to agent.Options: a run that changed
+	// files must pass the project's check before it can finish.
+	Verify    bool
+	VerifyCmd string
 }
 
 // Report is the -json output shape: the final answer plus run metadata, one
@@ -47,6 +51,7 @@ type Report struct {
 	ToolErrors       int      `json:"tool_errors"`
 	ToolsUsed        []string `json:"tools_used,omitempty"`
 	HitLimit         bool     `json:"hit_limit,omitempty"`
+	Verification     string   `json:"verification,omitempty"` // "passed" or "failed"; absent when nothing was checked
 	PromptTokens     int      `json:"prompt_tokens"`
 	CompletionTokens int      `json:"completion_tokens"`
 }
@@ -68,6 +73,8 @@ func Run(ctx context.Context, host agent.ChatClient, reg *tools.Registry, prompt
 		Permissions:   opts.Permissions,
 		AugmentResult: opts.AugmentResult,
 		NumCtx:        opts.NumCtx,
+		Verify:        opts.Verify,
+		VerifyCmd:     opts.VerifyCmd,
 	}
 	if opts.Stream != nil {
 		aopts.OnAssistant = opts.Stream.Assistant
@@ -86,6 +93,7 @@ func NewReport(res agent.Result, model string) Report {
 		ToolErrors:       res.ToolErrors,
 		ToolsUsed:        res.ToolsUsed,
 		HitLimit:         res.HitLimit,
+		Verification:     res.Verification,
 		PromptTokens:     res.PromptTokens,
 		CompletionTokens: res.CompletionTokens,
 	}

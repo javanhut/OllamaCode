@@ -125,6 +125,8 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 		Trace:       recorder,
 		Permissions: cfg.Permissions,
 		NumCtx:      headlessNumCtx(cfg, host, spec, model),
+		Verify:      cfg.Verify == nil || *cfg.Verify,
+		VerifyCmd:   cfg.VerifyCmd,
 	}
 	if cfg.ProjectInstructions == nil || *cfg.ProjectInstructions {
 		cwd, _ := os.Getwd()

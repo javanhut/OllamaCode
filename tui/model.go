@@ -365,7 +365,7 @@ type Model struct {
 	// freshness is the stale-edit ledger: it remembers the hash of every file
 	// this session read or wrote, and tools-layer dispatch refuses a mutation
 	// whose target drifted since (see tools/freshness.go). Session-scoped, so
-	// it is NOT cleared by resetTurnGuards the way turnReads is.
+	// it is NOT cleared by resetTurnGuards the way guard.TurnReads is.
 	freshness *tools.FreshnessLedger
 	// deferredAdvisory holds a harness message that arrived while a tool batch
 	// was in flight (an /undo typed mid-turn). It is appended once the batch's
@@ -462,46 +462,31 @@ type Model struct {
 	retrieving      bool // RAG retrieval is gating the model call for this turn
 
 	// Loop safety (reset each user turn).
-	turnGen             int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
-	turnFirstGen        int             // first generation of the turn in flight; /rate covers the whole span, not just the last round
-	streamRetries       int             // transient stream errors retried this turn
-	overflowErr         error           // the context-overflow error a forced compaction is running for; non-nil means a retry is owed when it lands
-	overflowTokens      int             // ditto, in estimated tokens
-	overflowRetried     bool            // one forced compaction per turn; overflow recovery can never loop
-	stepCount           int             // tool-call rounds since the last user message
-	autoContinues       int             // times we've nudged the model to keep going on open todos this turn
-	maxSteps            int             // budget per turn (cfg.MaxSteps, default 25)
-	recentOutcomes      []string        // round-level call+result identities (state-aware oscillation)
-	seenOutcomes        map[string]bool // evidence already observed this turn
-	oscillationStreak   int             // consecutive round endings that still form A/B alternation
-	stagnantRounds      int             // consecutive rounds that produced no evidence this turn had not already seen
-	failedCalls         map[string]int  // fingerprint -> consecutive failure count
-	oscillationWarned   bool            // corrective nudge emitted once per turn
-	suppressToolsOnce   bool            // next stream sends no tools (step budget hit)
-	endTurnAfterReply   bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
-	turnStoppedByGuard  bool            // a guard ended this turn, so its last reply is a blocker report, not work
-	lastStepRepeatKey   string          // semantic identity of the previous single-tool batch
-	sameToolStreak      int             // consecutive steps repeating that identity
-	sameToolWarned      bool            // early repeat warning emitted this user turn
-	stopWarnedTool      string          // tool the hard-stop already fired for this turn
-	bannedTools         map[string]bool // tools withdrawn for the rest of this turn by the repeat guard
-	loopEscalation      *loopEscalation // doom-loop stop parked on the user's choice in the escalation modal
-	loopGuardCursor     int             // highlighted choice in the loop-guard modal
-	loopContinues       map[string]int  // "continue anyway" grants per detector this user turn
-	turnTouchedFiles    bool            // a file-mutating tool succeeded this turn
-	turnChangedPaths    map[string]bool // exact files covered by targeted verification
-	fetchedContent      bool            // untrusted web content entered the conversation this turn
-	verifying           bool            // a compile check is running
-	verifyAttempts      int             // failed compile checks this turn
-	lastVerification    string          // exact command/evidence from the latest gate
-	challengedThisTurn  bool            // self-check challenge already issued this turn
-	reviewedThisTurn    bool            // optional adversarial review already issued this turn
-	turnReads           map[string]int  // read tool + cleaned path -> times read this turn
-	rereadEvents        int             // re-reads of unchanged files this turn
-	rereadStopAnnounced bool            // hard-stop explanation for re-read loops emitted
-	lastPreamble        string          // normalized previous assistant preamble this turn
-	preambleStreak      int             // consecutive near-duplicate preambles
-	preambleWarned      bool            // preamble-echo warning emitted this turn
+	turnGen            int             // bumped on every stream start and cancel; stale async msgs are dropped by gen mismatch
+	turnFirstGen       int             // first generation of the turn in flight; /rate covers the whole span, not just the last round
+	streamRetries      int             // transient stream errors retried this turn
+	overflowErr        error           // the context-overflow error a forced compaction is running for; non-nil means a retry is owed when it lands
+	overflowTokens     int             // ditto, in estimated tokens
+	overflowRetried    bool            // one forced compaction per turn; overflow recovery can never loop
+	stepCount          int             // tool-call rounds since the last user message
+	autoContinues      int             // times we've nudged the model to keep going on open todos this turn
+	maxSteps           int             // budget per turn (cfg.MaxSteps, default 25)
+	failedCalls        map[string]int  // fingerprint -> consecutive failure count
+	guard              agent.LoopGuard // repeat/oscillation/stagnation/re-read/preamble detectors
+	suppressToolsOnce  bool            // next stream sends no tools (step budget hit)
+	endTurnAfterReply  bool            // stagnation stop: next reply ends the turn — no [CONTINUE], no citation re-ask
+	turnStoppedByGuard bool            // a guard ended this turn, so its last reply is a blocker report, not work
+	loopEscalation     *loopEscalation // doom-loop stop parked on the user's choice in the escalation modal
+	loopGuardCursor    int             // highlighted choice in the loop-guard modal
+	loopContinues      map[string]int  // "continue anyway" grants per detector this user turn
+	turnTouchedFiles   bool            // a file-mutating tool succeeded this turn
+	turnChangedPaths   map[string]bool // exact files covered by targeted verification
+	fetchedContent     bool            // untrusted web content entered the conversation this turn
+	verifying          bool            // a compile check is running
+	verifyAttempts     int             // failed compile checks this turn
+	lastVerification   string          // exact command/evidence from the latest gate
+	challengedThisTurn bool            // self-check challenge already issued this turn
+	reviewedThisTurn   bool            // optional adversarial review already issued this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.

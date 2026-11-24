@@ -11,6 +11,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	"github.com/javanhut/ollama_code/internal/companion"
 	"github.com/javanhut/ollama_code/internal/session"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
@@ -723,7 +724,7 @@ func (m *Model) updateLoopGuard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // stagnation has no single culprit to take away.
 func loopEscalationOptions(esc *loopEscalation) []string {
 	options := []string{"Stop turn", "Continue anyway"}
-	if loopBanAllowed(esc.tool) {
+	if agent.LoopBanAllowed(esc.tool) {
 		options = append(options, fmt.Sprintf("Ban %s & continue", esc.tool))
 	}
 	return options
@@ -762,15 +763,15 @@ func (m *Model) resolveLoopEscalation(choice int) (tea.Model, tea.Cmd) {
 	case 0: // Stop turn — exactly the automatic path.
 		m.applyLoopGuardStops(esc)
 	case 2: // Ban the tool for the rest of the turn, then keep working.
-		m.bannedTools[esc.tool] = true
-		m.resetLoopDetector(esc.kind)
+		m.guard.Ban(esc.tool)
+		m.guard.ResetDetector(esc.kind)
 		m.history = append(m.history, advisory(fmt.Sprintf("[TOOL DISABLED] You called %q %d times in a row without making progress, so it is removed from your tools for the rest of this turn — calling it in text will be refused too. Finish with the tools you still have, or answer the user in plain text.", esc.tool, esc.streak)))
 	default: // Continue anyway — reset only the detector that fired.
 		if m.loopContinues == nil {
 			m.loopContinues = map[string]int{}
 		}
 		m.loopContinues[esc.kind]++
-		m.resetLoopDetector(esc.kind)
+		m.guard.ResetDetector(esc.kind)
 	}
 	cmd := m.startStream()
 	m.refreshTranscript()

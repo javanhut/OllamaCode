@@ -35,7 +35,7 @@ answer to stdout — no TUI, for scripts, git hooks, and CI. Without `-p`,
 |---|---|
 | `-p`, `--prompt` | Run one prompt headless and print the final answer |
 | `--output-format` | `text` (default), `json` (one object at the end), or `stream-json` (newline-delimited events as the run progresses) |
-| `-json` | Same as `--output-format json`: a single JSON object (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, token counts) |
+| `-json` | Same as `--output-format json`: a single JSON object (`output`, `model`, `steps`, `tool_calls`, `tool_errors`, `tools_used`, `hit_limit`, `verification`, token counts) |
 | `-model` | Model for the run (default: the configured model); accepts `provider:model` |
 | `-max-steps` | Cap tool-call rounds (default: configured `max_steps`) |
 | `--debug` | Replace `./ocode.log` with a redacted model/tool execution trace |

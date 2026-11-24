@@ -109,7 +109,7 @@ func (m *Model) submit() tea.Cmd {
 	// rejected tool out of that response even if a small model ignores the chat
 	// history and tries the same request again. A later user turn starts clean.
 	if m.denialFeedbackTool != "" {
-		m.bannedTools[m.denialFeedbackTool] = true
+		m.guard.Ban(m.denialFeedbackTool)
 		m.denialFeedbackTool = ""
 	}
 	approvedOffloadedPlan := m.approveOffloadedPlan(value)

@@ -118,10 +118,11 @@ func runGNUGrep(ctx context.Context, q grepQuery) (string, error) {
 	}
 	// Skip dot files and dot directories so the model doesn't waste
 	// context on hidden/config files unless explicitly needed. The glob is
-	// .?* rather than .*: some greps (ugrep) test the command-line root
-	// against --exclude-dir too, and ".*" matches "." itself, which made
-	// every search of the default path return nothing.
-	argv = append(argv, "--exclude-dir=.?*", "--exclude=.?*")
+	// .[!./]* rather than .* or .?*: ugrep tests the command-line root
+	// against --exclude-dir (".*" matches "."), and BSD grep (macOS) matches
+	// against the whole path (".?*" matches "./main.go"). Either way every
+	// search of the default path returned nothing.
+	argv = append(argv, "--exclude-dir=.[!./]*", "--exclude=.[!./]*")
 	// An explicitly named ignored dir (grep build/) is still searched.
 	filterIgnored := q.Recursive && !pathInSkippedDir(q.Path)
 	if filterIgnored {

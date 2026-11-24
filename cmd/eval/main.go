@@ -27,6 +27,9 @@ type toolExpectation struct {
 	Optional  []string
 	Forbidden []string
 	Ordered   []string
+	// AnyOf passes when at least one of these tools was used: "inspect the
+	// workspace somehow" without dictating which of several valid tools.
+	AnyOf []string
 }
 
 type task struct {
@@ -62,6 +65,8 @@ type runResult struct {
 	RepairAttempts   int      `json:"repair_attempts"`
 	RepairsSucceeded int      `json:"repairs_succeeded"`
 	RepeatedBlocked  int      `json:"repeated_blocked"`
+	Verification     string   `json:"verification,omitempty"`
+	VerifyFailures   int      `json:"verify_failures,omitempty"`
 	PromptTokens     int      `json:"prompt_tokens"`
 	CompletionTokens int      `json:"completion_tokens"`
 	DurationMS       int64    `json:"duration_ms"`
@@ -110,7 +115,7 @@ type taskSummary struct {
 
 func evalTasks() []task {
 	readOnly := func(name string) bool { return tools.PolicyForName(name).Allows(tools.ModeExplore) }
-	return []task{
+	return append([]task{
 		{
 			Name: "create-file", Prompt: "Create hello.txt whose entire contents are exactly: Hello, World!",
 			Tools: toolExpectation{Required: []string{"write_file"}},
@@ -144,7 +149,9 @@ func evalTasks() []task {
 		{
 			Name: "investigate", Prompt: "How many files ending in .go are in the current directory, non-recursively? Respond with ONLY the number.",
 			Setup: map[string]string{"a.go": "package x\n", "b.go": "package x\n", "notes.txt": "not go\n"},
-			Tools: toolExpectation{Required: []string{"list_directory"}, Optional: []string{"find_files"}, Forbidden: []string{"write_file", "edit_file", "run_shell"}},
+			// Listing, globbing and `ls | wc -l` are all honest ways to count;
+			// the contract only requires that the model looked.
+			Tools: toolExpectation{AnyOf: []string{"list_directory", "find_files", "run_shell", "get_project_tree"}, Forbidden: []string{"write_file", "edit_file"}},
 			Check: func(_ string, output string) (bool, string) {
 				return strings.TrimSpace(output) == "2", "expected exact answer 2"
 			},
@@ -374,7 +381,7 @@ func evalTasks() []task {
 				{Content: "done"},
 			},
 		},
-	}
+	}, codingTasks()...)
 }
 
 func main() {
@@ -391,6 +398,7 @@ func main() {
 	legacyResults := flag.Bool("legacy-results", false, "use pre-envelope prose tool results for A/B comparison")
 	constrain := flag.Bool("constrain", false, "first-pass schema-constrained tool output (small-model posture; native Ollama only)")
 	taskName := flag.String("task", "", "run only the named fixture")
+	verify := flag.Bool("verify", true, "run the verification gate (targeted tests + build) before a file-changing run may finish, as ocode -p does")
 	selftest := flag.Bool("selftest", false, "hermetic mode: run fixtures against an in-process scripted model; no Ollama host needed")
 	flag.Parse()
 	if *promoteTrace != "" {
@@ -424,7 +432,7 @@ func main() {
 		defer recorder.Close()
 	}
 	structured := !*legacyResults
-	r, err := runEvaluation(*model, *host, *steps, trials, !*jsonOutput, recorder, &structured, *taskName, *constrain, *selftest)
+	r, err := runEvaluation(*model, *host, *steps, trials, !*jsonOutput, recorder, &structured, *taskName, *constrain, *selftest, *verify)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -449,7 +457,7 @@ func resolveTrials(runs, samples int) int {
 	return runs
 }
 
-func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string, constrain, selftest bool) (report, error) {
+func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string, constrain, selftest, verify bool) (report, error) {
 	h := api.OllamaHost{}
 	h.SetURI(host)
 	rep := report{Version: 1, Model: model, Host: host, StartedAt: time.Now().UTC(), TrialsPerTask: trials}
@@ -478,7 +486,7 @@ func runEvaluation(model, host string, steps, trials int, verbose bool, recorder
 	var durations []int64
 	for trial := 1; trial <= trials; trial++ {
 		for _, t := range tasks {
-			result, err := runTask(h, model, steps, trial, t, recorder, structured, constrain && !selftest, constraintCache, selftest)
+			result, err := runTask(h, model, steps, trial, t, recorder, structured, constrain && !selftest, constraintCache, selftest, verify)
 			if err != nil {
 				return rep, err
 			}
@@ -501,7 +509,7 @@ func runEvaluation(model, host string, steps, trials int, verbose bool, recorder
 	return rep, nil
 }
 
-func runTask(host api.OllamaHost, model string, steps, trial int, t task, recorder *tracepkg.Recorder, structured *bool, constrain bool, constraintCache *agent.ConstraintCache, selftest bool) (runResult, error) {
+func runTask(host api.OllamaHost, model string, steps, trial int, t task, recorder *tracepkg.Recorder, structured *bool, constrain bool, constraintCache *agent.ConstraintCache, selftest, verify bool) (runResult, error) {
 	dir, err := os.MkdirTemp("", "ollamacode-eval-")
 	if err != nil {
 		return runResult{}, err
@@ -540,7 +548,7 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 	start := time.Now()
 	res, runErr := agent.Run(ctx, client, tools.DefaultRegistry(), t.Prompt, agent.Options{
 		Model: model, System: evalSystem, MaxSteps: steps, ToolFilter: t.Filter, Trace: recorder, StructuredResults: structured,
-		ConstrainToolCalls: constrain, Constraints: constraintCache,
+		ConstrainToolCalls: constrain, Constraints: constraintCache, Verify: verify,
 	})
 	cancel()
 
@@ -557,6 +565,7 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 		ToolsUsed: res.ToolsUsed, Steps: res.Steps, Calls: res.ToolCalls, Errors: res.ToolErrors,
 		ArgumentFailures: res.ArgumentFailures, RepairAttempts: res.RepairAttempts,
 		RepairsSucceeded: res.RepairsSucceeded, RepeatedBlocked: res.RepeatedBlocked,
+		Verification: res.Verification, VerifyFailures: res.VerifyFailures,
 		PromptTokens: res.PromptTokens, CompletionTokens: res.CompletionTokens,
 		DurationMS: time.Since(start).Milliseconds(),
 	}, nil
@@ -579,6 +588,9 @@ func checkToolContract(got []string, want toolExpectation) (bool, string) {
 		} else if counts[name] > 0 {
 			failures = append(failures, "forbidden "+name)
 		}
+	}
+	if len(want.AnyOf) > 0 && !slices.ContainsFunc(want.AnyOf, func(name string) bool { return counts[name] > 0 }) {
+		failures = append(failures, "used none of "+strings.Join(want.AnyOf, ", "))
 	}
 	if len(want.Ordered) > 0 && !isSubsequence(got, want.Ordered) {
 		failures = append(failures, "wrong order; expected "+strings.Join(want.Ordered, " -> "))

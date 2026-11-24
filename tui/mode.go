@@ -358,7 +358,7 @@ func (m *Model) toolsForMode() []tools.Tool {
 		// Withdrawn by the repeat guard for the rest of this turn (loopguard.go).
 		// A ban can never empty the toolset: switch_mode is allowed in every mode,
 		// is small-model safe, and the repeat guard refuses to ban it.
-		if m.bannedTools[t.Function.Name] {
+		if m.guard.BannedTools[t.Function.Name] {
 			continue
 		}
 		out = append(out, t)

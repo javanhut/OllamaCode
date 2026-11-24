@@ -91,6 +91,15 @@ counts as a read; `grep`, `file_info` and `list_directory` do not, since they
 never showed the contents. Creating a new file, and `append_file`,
 `delete_file`, `move_file` and `copy_file`, are not gated.
 
+One exception: `edit_file` and `multi_edit` may change an unread file when every
+`old_string` appears in it **verbatim** — exactly once, or at least once with
+`replace_all`. The risk the rule guards against is a guessed snippet landing
+through the fuzzy tier; a verbatim unique match can only land on text that is
+really there, so the fuzzy tier never engages. A model that found the line with
+`grep` edits it directly instead of spending a round on `read_file`. Such an edit
+does not count as reading the file: the next edit must anchor verbatim again or
+read first. `write_file` never gets the exception.
+
 File writes are atomic (temp file, then rename), so an interrupted edit leaves
 the old contents rather than a truncated file. Symlinks are followed and kept.
 
@@ -276,6 +285,13 @@ the same way.
 
 When no objective check exists for the project, the model is challenged once to
 prove it actually verified its work rather than accepting an unevidenced "done".
+
+Headless runs (`ocode -p`) use the same check, following the same `verify` /
+`verify_cmd` settings: a run that changed files cannot finish until the check
+passes, with up to 3 failures handed back. If a loop guard or the step limit
+ends the run first, the check runs once more and its verdict goes into the
+forced final report, so that report cannot claim success on failing code. The
+`-json` report carries `verification: "passed" | "failed"`.
 
 ## Loop guards
 

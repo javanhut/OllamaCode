@@ -895,7 +895,7 @@ func TestRequireReadBeforeEdit(t *testing.T) {
 		m := routedModel(nil, "small")
 		m.planNeedsVerify = true
 		m.planPaths = map[string]bool{"tui/route.go": true}
-		m.turnReads = map[string]int{}
+		m.guard.TurnReads = map[string]int{}
 		return m
 	}
 
@@ -912,7 +912,7 @@ func TestRequireReadBeforeEdit(t *testing.T) {
 
 	t.Run("allowed once read", func(t *testing.T) {
 		m := arm(t)
-		m.turnReads["read_file\x01tui/route.go"] = 1
+		m.guard.TurnReads["read_file\x01tui/route.go"] = 1
 		if reason := m.requireReadBeforeEdit("edit_file", []string{"tui/route.go"}); reason != "" {
 			t.Errorf("refused after the file was read: %s", reason)
 		}

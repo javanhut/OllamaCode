@@ -107,7 +107,7 @@ type pullDoneMsg struct {
 // parsed-from-text — because a withholding enforced on only one of them is a
 // suggestion on the other.
 func droppedToolCallNotice(calls []tools.ToolCall) string {
-	name := batchSingleTool(calls)
+	name := agent.BatchSingleTool(calls)
 	if name == "" {
 		name = "tool"
 	}
@@ -208,9 +208,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.verifyAttempts, msg.label, repairDetail(msg.output, msg.lint))))
 			m.stopForBlockerReport()
 		} else {
-			m.history = append(m.history, advisory(fmt.Sprintf(
-				"[VERIFICATION FAILED] You are NOT done — `%s` failed. Read the errors, fix the actual cause (don't blame the tools), then it will be re-checked:\n\n%s",
-				msg.label, repairDetail(msg.output, msg.lint))))
+			m.history = append(m.history, advisory(agent.VerificationFailed(msg.label, repairDetail(msg.output, msg.lint))))
 		}
 		m.busySince = time.Now()
 		cmds = append(cmds, m.startStream())
@@ -757,7 +755,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Preamble echo guard: a stuck model re-announces the same intent in
 		// slightly different words before every tool call. Call it out once;
 		// if it keeps going, force a plain-text answer.
-		if warn, stopEcho := m.observePreamble(preamble); warn {
+		if warn, stopEcho := m.guard.ObservePreamble(preamble); warn {
 			m.history = append(m.history, advisory("[REPEATING YOURSELF] That message restates your previous one. Do not re-announce or rephrase your intent — if you need information, call the tool; if you already have the answer, give it. No narration before tool calls."))
 		} else if stopEcho {
 			m.history = append(m.history, advisory("[LOOP BROKEN] You keep restating the same message. Tools are disabled for your next response — answer the user in plain text."))
@@ -805,7 +803,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, path := range mutated {
 						m.turnChangedPaths[filepath.Clean(path)] = true
 					}
-					m.forgetReads(mutated) // re-reading a just-changed file is legitimate
+					m.guard.ForgetReads(mutated) // re-reading a just-changed file is legitimate
 					// The ledger re-stamp after a successful mutation happens
 					// inside the registry now (tools/freshness.go): the model's
 					// own write is not third-party drift.

@@ -8,10 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/javanhut/ollama_code/api"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
+	"github.com/javanhut/ollama_code/internal/verification"
 	"github.com/javanhut/ollama_code/tools"
 )
 
@@ -66,6 +69,13 @@ type Options struct {
 	// result before the model sees it (e.g. to attach instruction files the
 	// call just made relevant). Returning result unchanged is a no-op.
 	AugmentResult func(call tools.ToolCall, result string) string
+	// Verify runs the project's verification plan (see internal/verification:
+	// targeted tests plus a build, derived from known manifests) whenever the
+	// model tries to finish after changing files. A failure goes back to the
+	// model instead of ending the run, so "done" means the code builds.
+	Verify bool
+	// VerifyCmd overrides the detected plan with an explicit command.
+	VerifyCmd string
 }
 
 // Result is the outcome of a headless run.
@@ -82,6 +92,11 @@ type Result struct {
 	RepeatedBlocked  int
 	PromptTokens     int
 	CompletionTokens int
+	// Verification is the gate's verdict on the files this run changed:
+	// "passed", "failed" (still failing when the retry budget ran out), or ""
+	// when nothing was checked (no changes, no plan, or Verify off).
+	Verification   string
+	VerifyFailures int // failed checks handed back to the model
 	// Messages is the run's full conversation — any PriorMessages seed, this
 	// run's exchanges, and the final assistant answer — so the caller can
 	// retain it and later resume the child with a follow-up (see
@@ -94,7 +109,7 @@ type Result struct {
 const (
 	defaultMaxSteps   = 8
 	maxIdenticalCalls = 2 // dispatch an identical call at most this many times before refusing it
-	recentCallsKept   = 8 // fingerprint ring length for oscillation detection
+	maxVerifyAttempts = 3 // failed verifications handed back before the run ends on a failing check
 )
 
 // Run executes a bounded agent loop: prompt the model, dispatch any tool calls
@@ -156,7 +171,9 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		},
 	}
 	fpCount := map[string]int{} // call fingerprint -> times dispatched
-	var recent []string         // ring of recent fingerprints for oscillation
+	var guard LoopGuard         // same repeat/oscillation/stagnation/re-read detectors as the TUI
+	guard.Reset()
+	changed := map[string]bool{} // files mutated this run, for the verification gate
 
 	// First-pass constrained decoding is opted into by callers that know the
 	// model's tier; the loop additionally requires a native-Ollama host and a
@@ -224,6 +241,14 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 					output = prose
 				}
 			}
+			if feedback, retry := verifyGate(ctx, opts, changed, &res); retry {
+				msgs = append(msgs, api.Message{Role: "assistant", Content: output},
+					api.Message{Role: "user", Advisory: true, Content: feedback})
+				if opts.OnAssistant != nil {
+					opts.OnAssistant(output, nil)
+				}
+				continue
+			}
 			res.Output = output
 			res.Messages = append(msgs, api.Message{Role: "assistant", Content: output})
 			if opts.OnAssistant != nil {
@@ -256,7 +281,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 			}
 		}
 
-		progressed := false
+		roundStart := len(msgs)
 		for _, c := range calls {
 			res.ToolsUsed = append(res.ToolsUsed, c.Function.Name)
 			if opts.ToolFilter != nil && !opts.ToolFilter(c.Function.Name) {
@@ -264,11 +289,12 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 				toolMsg(c, "error: tool not permitted for this agent", true)
 				continue
 			}
-			fp := tools.CallFingerprint(c)
-			recent = append(recent, fp)
-			if len(recent) > recentCallsKept {
-				recent = recent[1:]
+			if guard.BannedTools[c.Function.Name] {
+				res.RepeatedBlocked++
+				toolMsg(c, BannedToolRefusal(c.Function.Name), true)
+				continue
 			}
+			fp := tools.CallFingerprint(c)
 			// Stuck-guard: refuse an identical call the model keeps re-issuing
 			// rather than re-running it, so a weak model can't burn the budget
 			// looping on one action.
@@ -278,7 +304,6 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 				continue
 			}
 			fpCount[fp]++
-			progressed = true
 
 			// Same tool-call robustness as the TUI loop: salvage almost-valid JSON,
 			// run with a per-call timeout + panic recovery, escalate argument
@@ -301,19 +326,30 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 				result = opts.AugmentResult(event.Call, result)
 			}
 			toolMsg(event.Call, result, event.Err != nil || event.ExitCode != 0)
+			if event.Err == nil {
+				if mutated := tools.MutatedPaths(event.Call.Function.Name, event.Call.Function.Arguments); len(mutated) > 0 {
+					guard.ForgetReads(mutated) // re-reading a just-changed file is legitimate
+					for _, p := range mutated {
+						changed[p] = true
+					}
+					res.Verification = "" // new changes void an earlier pass
+				}
+			}
 		}
 
-		// No forward motion — every call this round was a refused repeat, or the
-		// model is oscillating A/B/A/B. Stop and synthesize what we have.
-		if !progressed || tools.IsOscillating(recent) {
+		if stop, advisories := observeRound(&guard, calls, msgs[roundStart:]); stop {
 			break
+		} else {
+			for _, text := range advisories {
+				msgs = append(msgs, api.Message{Role: "user", Advisory: true, Content: text})
+			}
 		}
 	}
 
 	// Didn't answer on its own: force one tool-less pass so partial findings come
 	// back instead of a useless "hit the limit" sentinel.
 	res.HitLimit = true
-	output, history, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs)
+	output, history, promptTokens, completionTokens := finalize(ctx, host, opts, options, msgs, verifyBeforeReport(ctx, opts, changed, &res))
 	res.Output = output
 	res.Messages = history
 	if opts.OnAssistant != nil {
@@ -332,11 +368,15 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 // call. It also returns the full history — the loop's messages plus the
 // advisory nudge and the model's reply — so the caller can retain the child's
 // conversation for a later follow-up.
-func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message) (string, []api.Message, int, int) {
+func finalize(ctx context.Context, host ChatClient, opts Options, options map[string]any, msgs []api.Message, verdict string) (string, []api.Message, int, int) {
 	// Advisory: the harness wrote this, not the user. Without the flag the trace
 	// exporter reads it as the sub-agent's task and every limit-hitting
 	// trajectory trains on the nudge instead of the real prompt.
-	msgs = append(msgs, api.Message{Role: "user", Advisory: true, Content: "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."})
+	content := "Stop. Do NOT call any more tools. Based on everything above, write your final report now: a direct answer to the task plus the concrete file paths, line references, and commands you used. If you couldn't finish, say what you found and what remains."
+	if verdict != "" {
+		content += "\n\n" + verdict
+	}
+	msgs = append(msgs, api.Message{Role: "user", Advisory: true, Content: content})
 	req := api.ChatRequest{
 		Model:    opts.Model,
 		Messages: msgs,
@@ -382,4 +422,111 @@ func filterTools(all []tools.Tool, f func(string) bool) []tools.Tool {
 		}
 	}
 	return out
+}
+
+// observeRound feeds one finished tool round through the loop guards. It
+// returns stop when a detector crossed its hard threshold — the caller then
+// forces the final synthesis — and otherwise the warnings to show the model.
+func observeRound(g *LoopGuard, calls []tools.ToolCall, results []api.Message) (stop bool, advisories []string) {
+	progress, warnOscillation, stopOscillation := g.ObserveRoundProgress(calls, results)
+	warnStagnant, stopStagnant := g.ObserveStagnation(progress)
+	tool, warnRepeat, stopRepeat, _ := g.ObserveRepeatedBatch(calls, progress)
+	rereads, stopRereads := g.ObserveFileReads(calls)
+	if stopOscillation || stopStagnant || stopRepeat || stopRereads {
+		return true, nil
+	}
+	if warnOscillation && !g.OscillationWarned {
+		g.OscillationWarned = true
+		advisories = append(advisories, AdvisoryOscillation)
+	}
+	if warnStagnant {
+		advisories = append(advisories, AdvisoryStagnation)
+	} else if warnRepeat {
+		// Stagnation is the stronger statement about the same round; only one speaks.
+		advisories = append(advisories, AdvisoryRepeat(tool, g.SameToolStreak))
+	}
+	if len(rereads) > 0 {
+		advisories = append(advisories, AdvisoryReread(rereads))
+	}
+	return false, advisories
+}
+
+// VerificationFailed is the message that hands a failed check back to the
+// model. Shared with the interactive gate so both loops say the same thing.
+func VerificationFailed(command, output string) string {
+	return fmt.Sprintf("[VERIFICATION FAILED] You are NOT done — `%s` failed. Read the errors, fix the actual cause (don't blame the tools, and don't weaken or delete tests), then it will be re-checked:\n\n%s", command, output)
+}
+
+// runVerification runs the project's check over the files this run changed.
+// ran is false when there is nothing to check: Verify off, no changes, or no
+// plan detectable for this project.
+func runVerification(ctx context.Context, opts Options, changed map[string]bool) (command, output string, passed, ran bool) {
+	if !opts.Verify || len(changed) == 0 {
+		return "", "", false, false
+	}
+	paths := make([]string, 0, len(changed))
+	for p := range changed {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	plan, ok := verification.Detect(".", paths, opts.VerifyCmd)
+	if !ok {
+		return "", "", false, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	out, err := tools.NewShellCommand(cctx, plan.Command).CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if len(text) > 4000 {
+		text = "…\n" + text[len(text)-4000:] // compiler and test errors cluster at the end
+	}
+	if opts.Trace != nil {
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		_ = opts.Trace.Record(tracepkg.Event{Kind: "verification", Model: opts.Model, Result: text, Error: errText,
+			Metadata: map[string]any{"command": plan.Command, "label": plan.Label, "ok": err == nil}})
+	}
+	return plan.Command, text, err == nil, true
+}
+
+// verifyGate runs when the model tries to finish. On a failing check, while
+// budget remains, it returns the feedback to hand back and retry=true.
+func verifyGate(ctx context.Context, opts Options, changed map[string]bool, res *Result) (feedback string, retry bool) {
+	if res.Verification == "passed" {
+		return "", false
+	}
+	command, output, passed, ran := runVerification(ctx, opts, changed)
+	switch {
+	case !ran:
+		return "", false
+	case passed:
+		res.Verification = "passed"
+		return "", false
+	case res.VerifyFailures >= maxVerifyAttempts:
+		res.Verification = "failed"
+		return "", false
+	}
+	res.VerifyFailures++
+	return VerificationFailed(command, output), true
+}
+
+// verifyBeforeReport checks the changed files once more when a guard or the
+// step limit ended the run, so the forced report cannot claim success on code
+// that fails: the verdict goes into the report prompt. No retry — the run is over.
+func verifyBeforeReport(ctx context.Context, opts Options, changed map[string]bool, res *Result) string {
+	if res.Verification == "passed" {
+		return ""
+	}
+	command, output, passed, ran := runVerification(ctx, opts, changed)
+	if !ran {
+		return ""
+	}
+	if passed {
+		res.Verification = "passed"
+		return fmt.Sprintf("Verification (`%s`) passes on the files you changed.", command)
+	}
+	res.Verification = "failed"
+	return fmt.Sprintf("Verification (`%s`) FAILS on the files you changed — the task is NOT complete. Say so plainly in your report and include what is still failing:\n\n%s", command, output)
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"
@@ -63,7 +65,7 @@ func TestResolveTrials(t *testing.T) {
 
 func TestRunEvaluationRejectsUnknownTask(t *testing.T) {
 	structured := true
-	_, err := runEvaluation("unused", "http://localhost:11434", 1, 1, false, nil, &structured, "missing", false, false)
+	_, err := runEvaluation("unused", "http://localhost:11434", 1, 1, false, nil, &structured, "missing", false, false, false)
 	if err == nil {
 		t.Fatal("expected unknown task to fail before contacting the provider")
 	}
@@ -114,7 +116,7 @@ func TestEveryFixtureHasScript(t *testing.T) {
 
 func TestSelftestEvaluationPasses(t *testing.T) {
 	structured := true
-	rep, err := runEvaluation("scripted-selftest", "", 15, 2, false, nil, &structured, "", false, true)
+	rep, err := runEvaluation("scripted-selftest", "", 15, 2, false, nil, &structured, "", false, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +143,7 @@ func TestSelftestEvaluationPasses(t *testing.T) {
 
 func TestSelftestExercisesArgumentRepair(t *testing.T) {
 	structured := true
-	rep, err := runEvaluation("scripted-selftest", "", 15, 1, false, nil, &structured, "repair-args", false, true)
+	rep, err := runEvaluation("scripted-selftest", "", 15, 1, false, nil, &structured, "repair-args", false, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +164,28 @@ func TestSelftestRejectsFixtureWithoutScript(t *testing.T) {
 			tasks[i].Script = nil
 		}
 	}
-	_, err := runTask(api.OllamaHost{}, "scripted-selftest", 15, 1, tasks[0], nil, &structured, false, nil, true)
+	_, err := runTask(api.OllamaHost{}, "scripted-selftest", 15, 1, tasks[0], nil, &structured, false, nil, true, true)
 	if err == nil {
 		t.Fatal("expected -selftest to reject a fixture with no script")
+	}
+}
+
+// A coding fixture whose untouched setup already passes its check measures
+// nothing. Every one must start broken.
+func TestCodingTasksStartBroken(t *testing.T) {
+	for _, tk := range codingTasks() {
+		dir := t.TempDir()
+		for rel, content := range tk.Setup {
+			p := filepath.Join(dir, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ok, _ := tk.Check(dir, ""); ok {
+			t.Errorf("%s: check passes before any change", tk.Name)
+		}
 	}
 }

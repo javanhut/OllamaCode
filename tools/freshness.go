@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -211,4 +212,47 @@ func observedPath(raw json.RawMessage) string {
 		return ""
 	}
 	return a.Path
+}
+
+// exactlyAnchored reports whether an edit to a file the model never read can
+// be allowed anyway: every old_string occurs in the file verbatim — exactly
+// once, or at least once with replace_all. The read-first rule exists because
+// a guessed old_string can land through the fuzzy tiers on the wrong lines; a
+// verbatim unique match can only land on text that is really there, and the
+// exact tier always takes it, so the fuzzy tiers never engage. This saves the
+// round trip of a model that located the text with grep and edits it directly.
+// write_file is never anchored: overwriting discards content the model never saw.
+func exactlyAnchored(tool string, args json.RawMessage) bool {
+	var a struct {
+		Path       string          `json:"path"`
+		OldString  string          `json:"old_string"`
+		ReplaceAll bool            `json:"replace_all"`
+		Edits      []multiEditItem `json:"edits"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.Path == "" {
+		return false
+	}
+	var edits []multiEditItem
+	switch tool {
+	case "edit_file":
+		edits = []multiEditItem{{OldString: a.OldString, ReplaceAll: a.ReplaceAll}}
+	case "multi_edit":
+		// Each old_string is checked against the ORIGINAL file, so an edit that
+		// only matches after an earlier one in the batch is not anchored.
+		edits = a.Edits
+	default:
+		return false
+	}
+	b, err := os.ReadFile(ledgerKey(a.Path))
+	if err != nil || len(edits) == 0 {
+		return false
+	}
+	content := string(b)
+	for _, e := range edits {
+		n := strings.Count(content, e.OldString)
+		if e.OldString == "" || n == 0 || (n > 1 && !e.ReplaceAll) {
+			return false
+		}
+	}
+	return true
 }

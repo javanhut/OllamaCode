@@ -9,7 +9,7 @@ For people changing the code.
 | `api/` | LLM transports. `api.go` is Ollama's native `/api/*`; `openai.go` translates `/v1/chat/completions`; `cursor.go` drives the Cursor agent subprocess |
 | `tools/` | Tool registry, schemas, handlers, JSON salvage, call fingerprinting |
 | `tui/` | Everything else — the Bubble Tea model, modes, routing, transcript, modals |
-| `internal/agent/` | Headless bounded agent loop, shared by `spawn_subagent` and the eval harness |
+| `internal/agent/` | Headless bounded agent loop (shared by `spawn_subagent` and the eval harness), the tool executor, and `LoopGuard` — the per-turn repeat/oscillation/stagnation/re-read/preamble detectors |
 | `internal/calibration/` | Versioned model capability probes and recommendation cache |
 | `internal/trace/` | Redacted JSONL recording, replay client, and eval-fixture promotion |
 | `internal/verification/` | Changed-path-aware targeted test and build plans |

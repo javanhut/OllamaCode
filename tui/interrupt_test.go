@@ -172,7 +172,7 @@ func TestDeniedCallStopsImmediatelyAndBlocksFeedbackTurn(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected feedback to start a model response")
 	}
-	if !m.bannedTools["write_file"] {
+	if !m.guard.BannedTools["write_file"] {
 		t.Fatal("denied tool must stay blocked while the model handles feedback")
 	}
 	if m.denialFeedbackTool != "" {

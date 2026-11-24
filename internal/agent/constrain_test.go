@@ -391,12 +391,8 @@ func TestRun_FinalizeIsNeverConstrained(t *testing.T) {
 	var seen string
 	reg := echoRegistry(&seen)
 	// Repeat one call until the stuck-guard breaks to the tool-less finalize.
-	host := &fakeOllama{responses: []api.ChatResponse{
-		toolResp("echo", `{"text":"same"}`),
-		toolResp("echo", `{"text":"same"}`),
-		toolResp("echo", `{"text":"same"}`),
-		textResp("final report"),
-	}}
+	same := toolResp("echo", `{"text":"same"}`)
+	host := &fakeOllama{responses: []api.ChatResponse{same, same, same, same, same, textResp("final report")}}
 	res, err := Run(context.Background(), host, reg, "task", Options{Model: "m", MaxSteps: 8, ConstrainToolCalls: true})
 	if err != nil {
 		t.Fatal(err)
@@ -404,15 +400,15 @@ func TestRun_FinalizeIsNeverConstrained(t *testing.T) {
 	if res.Output != "final report" {
 		t.Fatalf("output = %q", res.Output)
 	}
-	if len(host.requests) != 4 {
-		t.Fatalf("expected 3 action rounds + finalize, got %d requests", len(host.requests))
+	if len(host.requests) != 6 {
+		t.Fatalf("expected 5 action rounds + finalize, got %d requests", len(host.requests))
 	}
-	for i, req := range host.requests[:3] {
+	for i, req := range host.requests[:5] {
 		if len(req.Format) == 0 {
 			t.Fatalf("action round %d should be constrained", i)
 		}
 	}
-	if last := host.requests[3]; len(last.Format) != 0 || len(last.Tools) != 0 {
+	if last := host.requests[5]; len(last.Format) != 0 || len(last.Tools) != 0 {
 		t.Fatal("the forced final synthesis is a prose turn: no tools, no format")
 	}
 }

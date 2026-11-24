@@ -284,18 +284,18 @@ func (m *Model) processPendingTools() tea.Cmd {
 			return nil
 		}
 
-		madeProgress, warnOscillation, stopOscillation := m.observeRoundProgress(batchCalls, batchResults)
-		warnStagnant, stopStagnant := m.observeStagnation(madeProgress)
+		madeProgress, warnOscillation, stopOscillation := m.guard.ObserveRoundProgress(batchCalls, batchResults)
+		warnStagnant, stopStagnant := m.guard.ObserveStagnation(madeProgress)
 
 		// Outcomes include both the calls and their results, so A/B/A/B only
 		// trips when the observable evidence is repeating, not merely when the
 		// model uses the same pair of tools productively.
-		if warnOscillation && !m.oscillationWarned {
-			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] You are alternating between the same actions and receiving the same results. Stop, state your blocker explicitly, and try a materially different approach."))
-			m.oscillationWarned = true
+		if warnOscillation && !m.guard.OscillationWarned {
+			m.history = append(m.history, advisory(agent.AdvisoryOscillation))
+			m.guard.OscillationWarned = true
 		}
 		if warnStagnant {
-			m.history = append(m.history, advisory("[NO PROGRESS DETECTED] Your last three rounds of tool calls returned nothing this turn has not already seen. Use the evidence you have, take a materially different action, or state the blocker."))
+			m.history = append(m.history, advisory(agent.AdvisoryStagnation))
 		}
 
 		// Inspection calls include arguments in their repeat identity, so reading
@@ -305,9 +305,9 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// and it is the stronger statement: telling the model the turn is over and
 		// then promising it a next message in the very next line is how a small
 		// model talks itself back into the loop. Whichever fires, only one speaks.
-		batchTool, warnRepeat, stopRepeat, announceStop := m.observeRepeatedBatch(batchCalls, madeProgress)
+		batchTool, warnRepeat, stopRepeat, announceStop := m.guard.ObserveRepeatedBatch(batchCalls, madeProgress)
 		if warnRepeat && !warnStagnant {
-			m.history = append(m.history, advisory(fmt.Sprintf("[REPEATING ACTION] You have called %q %d times in a row without making progress. Stop repeating it — take a different action, or if you're blocked, explain the blocker to the user in plain text.", batchTool, m.sameToolStreak)))
+			m.history = append(m.history, advisory(agent.AdvisoryRepeat(batchTool, m.guard.SameToolStreak)))
 		}
 
 		// A detector stop used to end the turn on the spot. Interactive, the
@@ -319,8 +319,8 @@ func (m *Model) processPendingTools() tea.Cmd {
 			esc := &loopEscalation{
 				kind:            kind,
 				tool:            tool,
-				streak:          m.sameToolStreak,
-				rounds:          m.stagnantRounds,
+				streak:          m.guard.SameToolStreak,
+				rounds:          m.guard.StagnantRounds,
 				stopOscillation: stopOscillation,
 				stopStagnant:    stopStagnant,
 				stopRepeat:      stopRepeat,
@@ -337,11 +337,11 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// Re-read guard: the streak guard above resets on any interleaved call,
 		// so it misses a model re-reading files it already has. Re-reading a
 		// file nothing has mutated is always wasted work.
-		if rereads, stopRereads := m.observeFileReads(batchCalls); len(rereads) > 0 {
-			m.history = append(m.history, advisory(fmt.Sprintf("[RE-READ DETECTED] You already read \"%s\" this turn and nothing has changed it since — you have the contents. Use them, or grep for the specific thing you need instead of re-reading whole files.", strings.Join(rereads, `", "`))))
+		if rereads, stopRereads := m.guard.ObserveFileReads(batchCalls); len(rereads) > 0 {
+			m.history = append(m.history, advisory(agent.AdvisoryReread(rereads)))
 			if stopRereads {
-				if !m.rereadStopAnnounced {
-					m.rereadStopAnnounced = true
+				if !m.guard.RereadStopAnnounced {
+					m.guard.RereadStopAnnounced = true
 					m.history = append(m.history, advisory("[LOOP BROKEN] You keep re-reading files you already have the contents of. Tools are disabled for your next message — answer the user in plain text with what you know."))
 				}
 				m.stopForBlockerReport()
@@ -408,12 +408,12 @@ func (m *Model) processPendingTools() tea.Cmd {
 		// tool calls straight out of assistant prose, so the schema alone does not
 		// hold the ban. Refuse it here — the one path every call goes through —
 		// and answer with a tool result so the transcript stays well-formed.
-		if m.bannedTools[call.Function.Name] {
+		if m.guard.BannedTools[call.Function.Name] {
 			m.failedCalls[tools.CallFingerprint(call)]++
 			m.pending.results[i] = api.Message{
 				Role:     "tool",
 				ToolName: call.Function.Name,
-				Content:  fmt.Sprintf("error: %q is disabled for the rest of this turn — you called it repeatedly without making progress. Do not call it again; act on what you already know or answer the user.", call.Function.Name),
+				Content:  agent.BannedToolRefusal(call.Function.Name),
 			}
 			m.pending.started[i] = true
 			m.pending.done++

@@ -29,6 +29,20 @@ Useful flags:
 - `-min-pass-rate R` / `-min-tool-rate R` (default `1`) — exit non-zero when
   the global behavior or tool-contract rate drops below `R`.
 - `-steps N` — agent step cap per task (default 15).
+- `-verify=false` — turn off the verification gate (on by default, as in
+  `ocode -p`), for A/B comparison. Each result records `verification` and
+  `verify_failures`.
+
+## Fixture tiers
+
+The micro-fixtures in `evalTasks()` check single tool-use behaviors (create a
+file, read a fact, resist an injected instruction). The coding fixtures in
+`cmd/eval/coding_tasks.go` are small Go modules that start broken — fix two
+bugs across files, implement a function from its tests, change a signature and
+every caller, fix a root cause that lives in a different file than the failing
+test points at — and pass only when `go test ./...` passes with the test files
+untouched. `TestCodingTasksStartBroken` guarantees none of them passes before
+the model acts.
 
 The JSON report aggregates totals (steps, calls, errors, argument failures,
 repair attempts/successes, loop-guard blocks, tokens, duration mean/stddev/p95)
@@ -73,8 +87,9 @@ fixture skeleton on stdout — a starting point you edit into a deterministic
 ## Authoring fixtures
 
 Fixtures are Go literals in `evalTasks()` (`cmd/eval/main.go`): `Name`,
-`Prompt`, `Setup` (files to seed), `Tools` (required/optional/forbidden/ordered
-expectations), `Filter` (tool allow-list, e.g. read-only), `Check` (behavior
+`Prompt`, `Setup` (files to seed), `Tools` (required/optional/forbidden/ordered/
+any-of expectations — prefer `AnyOf` over `Required` when several tools are
+equally valid ways to do the job), `Filter` (tool allow-list, e.g. read-only), `Check` (behavior
 assertion over the workspace and final output), plus `Script` (and optionally
 `RepairArgs`) for `-selftest`. Keep them small and deterministic: exact-content
 checks, no network, no clock dependence. New fixtures must include a `Script`

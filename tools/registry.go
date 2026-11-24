@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -223,10 +224,15 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 	// depend on which UI dispatched the call. No ledger on the context means
 	// the caller opted out.
 	ledger := FreshnessLedgerFrom(ctx)
+	anchored := false // an unread file edited through a verbatim old_string (see exactlyAnchored)
 	if ledger != nil {
 		if paths := mutatedPaths(call.Function.Name, normalized); len(paths) > 0 {
 			if err := ledger.CheckMutation(call.Function.Name, paths); err != nil {
-				return "", err
+				var unread *UnreadFileError
+				if !errors.As(err, &unread) || !exactlyAnchored(call.Function.Name, normalized) {
+					return "", err
+				}
+				anchored = true
 			}
 		}
 	}
@@ -236,7 +242,14 @@ func (r *Registry) Invoke(ctx context.Context, call ToolCall) (string, error) {
 			if hook != nil {
 				hook(paths)
 			}
-			if ledger != nil {
+			if ledger != nil && anchored {
+				// The model saw only the text it replaced, not the file: stamp the
+				// hash for drift detection but leave it unread, so a later edit
+				// still has to anchor verbatim or read first.
+				for _, p := range paths {
+					ledger.Observe(p)
+				}
+			} else if ledger != nil {
 				ledger.RecordMutation(paths)
 			}
 		} else if ledger != nil && observingTools[call.Function.Name] {

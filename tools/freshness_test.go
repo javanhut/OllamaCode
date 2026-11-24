@@ -19,6 +19,7 @@ func freshnessRegistry() *Registry {
 	r.Register(ReadFileTool())
 	r.Register(WriteFileTool())
 	r.Register(EditFileTool())
+	r.Register(MultiEditTool())
 	r.Register(AppendFileTool())
 	r.Register(DeleteFileTool())
 	r.Register(MoveFileTool())
@@ -129,8 +130,10 @@ func TestFreshnessUnreadFileRefused(t *testing.T) {
 		args map[string]any
 	}{
 		{"write_file", map[string]any{"path": p, "content": "y\n"}},
-		{"edit_file", map[string]any{"path": p, "old_string": "x", "new_string": "y"}},
-		{"edit_file", map[string]any{"path": "existing.txt", "old_string": "x", "new_string": "y"}},
+		// Not verbatim in the file: only the fuzzy tiers could place these.
+		{"edit_file", map[string]any{"path": p, "old_string": "x \n", "new_string": "y"}},
+		{"edit_file", map[string]any{"path": "existing.txt", "old_string": " x", "new_string": "y"}},
+		{"multi_edit", map[string]any{"path": p, "edits": []map[string]any{{"old_string": "x", "new_string": "y"}, {"old_string": "y", "new_string": "z"}}}},
 	} {
 		_, err := r.Invoke(ctx, freshnessCall(t, call.name, call.args))
 		if _, ok := errors.AsType[*UnreadFileError](err); !ok {
@@ -243,7 +246,7 @@ func TestFreshnessFailedMutationSeedsNothing(t *testing.T) {
 	}
 
 	// The failed edit's internal load is not a read, so the file is still unread.
-	_, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "one", "new_string": "two"}))
+	_, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "one ", "new_string": "two"}))
 	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
 		t.Fatalf("failed edit seeded a read: got %v", err)
 	}
@@ -355,4 +358,31 @@ func TestFreshnessConcurrentInvokes(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// An unread file may be edited when every old_string is verbatim and unique:
+// the exact tier is the only one that can match. The file stays unread, so a
+// later guessed edit is still refused.
+func TestFreshnessVerbatimAnchorAllowsUnreadEdit(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	p := filepath.Join(dir, "a.go")
+	os.WriteFile(p, []byte("x := 1\ny := 1\n"), 0o644)
+	r := freshnessRegistry()
+	ctx := WithFreshnessLedger(context.Background(), NewFreshnessLedger())
+
+	if _, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "1", "new_string": "2"})); err == nil {
+		t.Fatal("ambiguous old_string on an unread file was allowed")
+	}
+	mustInvoke(t, r, ctx, "edit_file", map[string]any{"path": p, "old_string": "x := 1", "new_string": "x := 2"})
+	if b, _ := os.ReadFile(p); string(b) != "x := 2\ny := 1\n" {
+		t.Fatalf("anchored edit wrote %q", b)
+	}
+	_, err := r.Invoke(ctx, freshnessCall(t, "edit_file", map[string]any{"path": p, "old_string": "y  := 1", "new_string": "y := 3"}))
+	if _, ok := errors.AsType[*UnreadFileError](err); !ok {
+		t.Fatalf("an anchored edit counted as reading the whole file: got %v", err)
+	}
+	if _, err := r.Invoke(ctx, freshnessCall(t, "write_file", map[string]any{"path": p, "content": "gone"})); err == nil {
+		t.Fatal("write_file over an unread file must stay refused")
+	}
 }

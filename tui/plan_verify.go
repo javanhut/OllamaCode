@@ -147,7 +147,7 @@ func (m *Model) requireReadBeforeEdit(name string, paths []string) string {
 // readThisTurn reports whether any read tool has already opened a path this
 // turn, using the same ledger the re-read guard maintains.
 func (m *Model) readThisTurn(clean string) bool {
-	for key := range m.turnReads {
+	for key := range m.guard.TurnReads {
 		if _, path, ok := strings.Cut(key, "\x01"); ok && path == clean {
 			return true
 		}
