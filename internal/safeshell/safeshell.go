@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -298,10 +299,8 @@ func (c Command) MatchTexts(deny bool) []string {
 	texts := []string{strings.Join(argv, " ")}
 	add := func(a []string) {
 		t := strings.Join(a, " ")
-		for _, x := range texts {
-			if x == t {
-				return
-			}
+		if slices.Contains(texts, t) {
+			return
 		}
 		texts = append(texts, t)
 	}

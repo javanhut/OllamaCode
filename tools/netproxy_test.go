@@ -245,7 +245,7 @@ func TestProxyIPLiteral(t *testing.T) {
 
 func TestEventRingBounded(t *testing.T) {
 	var r eventRing
-	for i := 0; i < netProxyLogSize+50; i++ {
+	for i := range netProxyLogSize + 50 {
 		r.add(NetProxyEvent{Host: fmt.Sprintf("h%d", i)})
 	}
 	got := r.snapshot()
@@ -400,7 +400,7 @@ func TestServeBridgeRelaysTCPToUnix(t *testing.T) {
 	defer tln.Close()
 	go serveBridge(tln, func() (net.Conn, error) { return net.Dial("unix", sock) })
 
-	for i := 0; i < 3; i++ { // several concurrent-ish connections
+	for i := range 3 { // several concurrent-ish connections
 		c, err := net.Dial("tcp", tln.Addr().String())
 		if err != nil {
 			t.Fatal(err)

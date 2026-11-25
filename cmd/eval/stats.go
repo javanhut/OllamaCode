@@ -83,7 +83,7 @@ func passHatK(c, n, k int) float64 {
 		return 0
 	}
 	r := 1.0
-	for i := 0; i < k; i++ {
+	for i := range k {
 		r *= float64(c-i) / float64(n-i)
 	}
 	return r
@@ -99,7 +99,7 @@ func passAtK(c, n, k int) float64 {
 		return 1
 	}
 	r := 1.0
-	for i := 0; i < k; i++ {
+	for i := range k {
 		r *= float64(n-c-i) / float64(n-i)
 	}
 	return 1 - r

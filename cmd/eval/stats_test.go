@@ -122,7 +122,7 @@ func synth(model string, meta *runMeta, rates map[string]int) report {
 	r := report{Model: model, Metadata: meta}
 	for _, task := range []string{"t1", "t2", "t3", "t4", "t5"} {
 		var o []bool
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			o = append(o, i < rates[task])
 		}
 		r.Results = append(r.Results, mkResults(task, o...)...)

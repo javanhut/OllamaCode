@@ -283,9 +283,7 @@ func (c *conn) prompt(m message) {
 	}
 	s.cancel = cancel
 	s.mu.Unlock()
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
+	c.wg.Go(func() {
 		stop, err := c.turn(ctx, s, text)
 		// Release the session BEFORE responding: a client may send its next
 		// prompt the moment it sees this response, and must not be told a
@@ -299,7 +297,7 @@ func (c *conn) prompt(m message) {
 			return
 		}
 		_ = c.w.respond(m.ID, map[string]any{"stopReason": stop})
-	}()
+	})
 }
 
 // turn runs one prompt through the agent loop and maps its outcome to a

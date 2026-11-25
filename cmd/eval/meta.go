@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"runtime"
 	"runtime/debug"
@@ -165,9 +166,7 @@ type samplingClient struct {
 
 func (c *samplingClient) ChatOnce(ctx context.Context, req api.ChatRequest) (api.ChatResponse, error) {
 	opts := make(map[string]any, len(req.Options)+2)
-	for k, v := range req.Options {
-		opts[k] = v
-	}
+	maps.Copy(opts, req.Options)
 	if c.temperature != nil {
 		opts["temperature"] = *c.temperature
 	}

@@ -2,9 +2,9 @@ package agent
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/javanhut/ollama_code/api"

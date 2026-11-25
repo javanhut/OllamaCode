@@ -527,7 +527,7 @@ var hopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Pro
 
 func stripHop(h http.Header) {
 	for _, v := range h.Values("Connection") {
-		for _, tok := range strings.Split(v, ",") {
+		for tok := range strings.SplitSeq(v, ",") {
 			h.Del(strings.TrimSpace(tok))
 		}
 	}

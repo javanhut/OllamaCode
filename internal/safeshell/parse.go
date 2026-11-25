@@ -78,10 +78,8 @@ func (p Parsed) Understood() bool { return !p.Complex }
 
 func (p *Parsed) fail(reason string) {
 	p.Complex = true
-	for _, r := range p.Reasons {
-		if r == reason {
-			return
-		}
+	if slices.Contains(p.Reasons, reason) {
+		return
 	}
 	p.Reasons = append(p.Reasons, reason)
 }
@@ -324,7 +322,7 @@ func (e *extractor) redirect(r *syntax.Redirect) Redirect {
 	t := e.word(r.Word)
 	out.Target, out.Dyn = t.val, t.dyn
 	switch r.Op {
-	case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+	case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 		out.Write = true
 		out.Read = r.Op == syntax.RdrInOut
 	case syntax.RdrIn:
@@ -533,10 +531,8 @@ func ansiC(s string) (string, bool) {
 			b = append(b, '\\', d)
 		}
 	}
-	for _, c := range b {
-		if c == 0 {
-			return "", false
-		}
+	if slices.Contains(b, 0) {
+		return "", false
 	}
 	return string(b), true
 }

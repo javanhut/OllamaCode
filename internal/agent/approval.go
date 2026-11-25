@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -106,12 +107,7 @@ func Decide(in ApprovalInput) (Decision, string) {
 // TouchesProtectedPath reports whether a call names a write-protected config
 // path (tools.IsProtectedPath) in any target-path argument.
 func TouchesProtectedPath(call tools.ToolCall) bool {
-	for _, p := range pathArgs(call) {
-		if tools.IsProtectedPath(p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(pathArgs(call), tools.IsProtectedPath)
 }
 
 // pathArgs extracts the target paths from a call: the top-level path keys
