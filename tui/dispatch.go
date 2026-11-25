@@ -22,14 +22,12 @@ var diffPreviewTools = map[string]bool{
 	"write_file": true, "edit_file": true, "multi_edit": true, "append_file": true,
 }
 
-// webContentTools pull attacker-controlled bytes into the conversation. Their
-// results are wrapped as UNTRUSTED, but the model still reasons over the
-// text, so once any of these has been recorded this turn the fetched-content
-// gate (noteFetchedContent / shouldPromptPermission) treats every later
-// destructive call as potentially injected and asks the user to confirm it.
-var webContentTools = map[string]bool{
-	"web_fetch": true, "web_search": true, "web_search_api": true, "web_crawl": true,
-}
+// Content tools (agent.WebContentTools plus every network-reaching tool, i.e.
+// all MCP tools) pull attacker-controlled bytes into the conversation. Their
+// results are wrapped as UNTRUSTED, but the model still reasons over the text,
+// so once one has been recorded this turn the fetched-content gate
+// (noteFetchedContent / agent.Decide) treats every later destructive call as
+// potentially injected and asks the user to confirm it.
 
 // maxConcurrentReads caps a pure-read batch's parallelism.
 const maxConcurrentReads = 8
@@ -831,71 +829,56 @@ func simpleDiff(old, new string, context int) string {
 }
 
 // noteFetchedContent records when untrusted web bytes actually entered the
-// conversation this turn (see webContentTools). A failed fetch returns an
+// conversation this turn (see isContentTool). A failed fetch returns an
 // error string without the untrusted markers and does not trip the gate.
+// isContentTool: see agent.IsContentTool.
+func (m *Model) isContentTool(name string) bool {
+	policy := tools.PolicyForName(name)
+	if m.tools != nil {
+		if tool, ok := m.tools.Lookup(name); ok {
+			policy = tool.Policy
+		} else if !agent.WebContentTools[name] {
+			return false
+		}
+	}
+	return agent.IsContentTool(name, policy)
+}
+
 func (m *Model) noteFetchedContent(calls []tools.ToolCall, results []api.Message) {
 	if m.fetchedContent {
 		return
 	}
 	for i, call := range calls {
-		if !webContentTools[call.Function.Name] || i >= len(results) {
+		if !m.isContentTool(call.Function.Name) || i >= len(results) {
 			continue
 		}
 		if strings.Contains(results[i].Content, "UNTRUSTED EXTERNAL CONTENT") {
 			m.fetchedContent = true
+			m.sessionTainted = true
 			return
 		}
 	}
 }
 
+// shouldPromptPermission adapts the shared approval policy (agent.Decide)
+// to the interactive session: Ask becomes a prompt. Deny is handled before this
+// point (it must outrank allowAll); reaching it here would mean that check was
+// bypassed, so it prompts — the fail-safe answer.
 func (m *Model) shouldPromptPermission(call tools.ToolCall) bool {
-	// Config rules answer first, so an allow rule spares the prompt for a call
-	// the user has already blessed, and an ask rule can pull a non-destructive
-	// tool into the prompt. Deny is handled before this point (it must outrank
-	// allowAll) and reaching it here would mean that check was bypassed — prompt,
-	// which is the fail-safe answer.
-	if effect, ok := tools.EvaluatePermission(m.cfg.Permissions, call); ok {
-		return effect != tools.PermissionAllow
-	}
-	// Session rules come from the "s" key and only ever allow; config deny and
-	// ask rules have already answered above, so they still win.
-	if effect, ok := tools.EvaluatePermission(m.sessionPermissions, call); ok && effect == tools.PermissionAllow {
-		return false
-	}
-	if m.pending.allowAll {
-		return false
-	}
 	policy := tools.PolicyForName(call.Function.Name)
 	if m.tools != nil {
 		if tool, ok := m.tools.Lookup(call.Function.Name); ok {
 			policy = tool.Policy
 		}
 	}
-	if !policy.Destructive {
-		return false
-	}
-	if m.mode == AutoMode {
-		// Fetched-content gate: once untrusted web bytes have entered the
-		// conversation this turn, any destructive call may be carrying out an
-		// injected instruction — confirm with the user even for in-workspace
-		// paths. (Write mode already prompts for every destructive call.)
-		if m.fetchedContent {
-			return true
-		}
-		var args map[string]any
-		if err := json.Unmarshal(call.Function.Arguments, &args); err == nil {
-			for _, key := range []string{"path", "dest", "destination", "new_path", "to", "source", "src", "working_dir"} {
-				if p, ok := args[key].(string); ok && p != "" {
-					if !m.isPathInTrustedFolder(p) {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-	// For all other modes (Explore, Plan, Write), prompt for all destructive tools
-	return true
+	allowAll := m.pending != nil && m.pending.allowAll
+	decision, _ := agent.Decide(agent.ApprovalInput{
+		Call: call, Policy: policy,
+		ConfigRules: m.cfg.Permissions, SessionRules: m.sessionPermissions,
+		AllowAllBatch: allowAll, Auto: m.mode == AutoMode, Untrusted: m.fetchedContent,
+		InWorkspace: m.isPathInTrustedFolder,
+	})
+	return decision != agent.Allow
 }
 
 func (m *Model) isPathInTrustedFolder(targetPath string) bool {

@@ -20,6 +20,7 @@ expensive thinking somewhere else.
 | [Training](training.md) | Export traces as a dataset and LoRA-tune a model on them |
 | [Evals](eval.md) | Running cmd/eval, multi-sample pass rates, and the CI self-test gate |
 | [Research](research.md) | Guided web research with deduped sources and citations |
+| [Editor integration (ACP)](acp.md) | Drive ocode from Zed, JetBrains, Neovim, Emacs over the Agent Client Protocol |
 
 ## The 60-second version
 

@@ -1,12 +1,10 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
-	"slices"
 
 	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/tools"
+	"github.com/javanhut/ollama_code/internal/agent"
 )
 
 // generationReserve is how many tokens we hold back from num_ctx for the model's
@@ -142,26 +140,9 @@ func (m *Model) deriveModelMessages() []api.Message {
 	return out
 }
 
-// historyWindow returns the index at which the kept (newest-fitting) slice of
-// history begins, given a token budget. It includes whole messages newest-first
-// until the budget is exhausted (always keeping at least the most recent one),
-// then nudges the cut back past any leading "tool" messages so a tool result is
-// never sent without its originating assistant tool-call.
+// historyWindow: see agent.HistoryWindow, with the calibrated estimator.
 func historyWindow(history []api.Message, budget int) int {
-	remaining := budget
-	start := len(history)
-	for i, h := range slices.Backward(history) {
-		cost := estimateMsgTokens(h)
-		if remaining-cost < 0 && start < len(history) {
-			break // keep at least the most recent message even if oversized
-		}
-		remaining -= cost
-		start = i
-	}
-	for start > 0 && history[start].Role == "tool" {
-		start--
-	}
-	return start
+	return agent.HistoryWindow(history, budget, estimateMsgTokens)
 }
 
 // observePromptEval records the provider's real prompt token count for the
@@ -173,10 +154,16 @@ func (m *Model) observePromptEval(n int) {
 		return
 	}
 	m.prevPromptEval, m.lastPromptEval = m.lastPromptEval, n
+	// Ollama truncates an over-long prompt to num_ctx without an error, and it
+	// cuts from the front, i.e. the system prompt. A request that measured at
+	// the window's edge was probably cut; say so rather than letting the model
+	// behave mysteriously without its instructions.
+	if m.contextLimit > 0 && n >= m.contextLimit*98/100 {
+		m.toast = fmt.Sprintf("prompt hit the context window (%d/%d tokens) — the provider may have truncated it; consider a larger num_ctx", n, m.contextLimit)
+	}
 }
 
-// shouldCompact reports whether context pressure has crossed the proactive
-// compaction threshold (80% of the limit).
+// contextPressure is the best available size of the request we send.
 //
 // Apples-to-apples: prompt_eval_count is the size of the request we actually
 // sent — system prompt + windowed history + the volatile dynamic tail — which
@@ -189,15 +176,48 @@ func (m *Model) observePromptEval(n int) {
 // carries the first turns and any provider that reports no usage, and it wins
 // whenever it is larger, because it sees the messages appended since the last
 // measurement.
-func (m *Model) shouldCompact() bool {
-	if len(m.history)-m.archivedThrough < 6 {
-		return false
-	}
+func (m *Model) contextPressure() int {
 	pressure := estimateMsgsTokens(m.deriveModelMessages())
 	if measured := min(m.lastPromptEval, m.prevPromptEval); measured > pressure {
 		pressure = measured
 	}
-	return pressure > m.contextLimit*8/10
+	return pressure
+}
+
+// shouldCompact reports whether context pressure has crossed the proactive
+// summarization threshold (profile compactAtPct of the limit; 80% by default,
+// 70% for small models).
+func (m *Model) shouldCompact() bool {
+	if len(m.history)-m.archivedThrough < 6 {
+		return false
+	}
+	return m.contextPressure() > m.contextLimit*m.profile.compactAtPct()/100
+}
+
+// shouldMask reports whether pressure has crossed the masking threshold
+// (profile maskAtPct), at which old tool output is stubbed without a model
+// call. Below the summarization threshold by construction.
+func (m *Model) shouldMask() bool {
+	return m.contextLimit > 0 && m.contextPressure() > m.contextLimit*m.profile.maskAtPct()/100
+}
+
+// maskOldToolResults advances the prune boundary and keeps the measured
+// counts honest. The measured counts describe the PRE-prune request, but
+// zeroing them hands the decision back to the estimate — which, whenever the
+// measurement is what fired this pass, is BY DEFINITION below the threshold. A
+// 43-token prune would then cancel a 28k/32k compaction, and keep cancelling it
+// every time, while the real context grew to the provider's hard refusal.
+// Subtract what pruning actually reclaimed and let the measurement stay
+// authoritative. Reports whether anything was masked.
+func (m *Model) maskOldToolResults() bool {
+	before := estimateMsgsTokens(m.deriveModelMessages())
+	if !m.pruneToolResults() {
+		return false
+	}
+	reclaimed := before - estimateMsgsTokens(m.deriveModelMessages())
+	m.lastPromptEval = max(0, m.lastPromptEval-reclaimed)
+	m.prevPromptEval = max(0, m.prevPromptEval-reclaimed)
+	return true
 }
 
 // requestEstimate sizes the parts of the request a compaction pass can move:
@@ -213,34 +233,16 @@ func (m *Model) requestEstimate() int {
 	return estimateMsgsTokens(m.deriveModelMessages()) + estimateTokens(m.archiveSummary)
 }
 
-// keepIntactToolResults is how many of the newest tool results survive pruning
-// untouched: the model is actively reasoning about the round it just ran, and
-// this covers two full parallel batches (maxParallelToolCalls tops out at 4)
-// with room to spare.
-const keepIntactToolResults = 8
+// keepIntactToolResults: see agent.KeepIntactToolResults.
+const keepIntactToolResults = agent.KeepIntactToolResults
 
-// pruneToolResults advances the prune boundary past everything older than the
-// newest keepIntactToolResults tool results. Old tool output is where a long
-// session's tokens actually go, and reclaiming it costs no model round-trip.
-//
-// A boundary, not a rewrite: the log keeps the full result, so the transcript
-// still shows what the tool said, /undo and a saved session still carry it, and
-// re-pruning is idempotent by construction rather than by a marker check. The
+// pruneToolResults advances the mask boundary (agent.MaskBoundary). A
+// boundary, not a rewrite: the log keeps the full result, so the transcript,
+// /undo and saved sessions still carry it, and re-masking is idempotent. The
 // projection stubs; the record never loses anything. Reports whether the
 // boundary moved.
 func (m *Model) pruneToolResults() bool {
-	boundary := 0
-	kept := 0
-	for i, v := range slices.Backward(m.history) {
-		if v.Role != "tool" {
-			continue
-		}
-		kept++
-		if kept > keepIntactToolResults {
-			boundary = i + 1
-			break
-		}
-	}
+	boundary := agent.MaskBoundary(m.history, keepIntactToolResults)
 	if boundary <= m.prunedThrough {
 		return false
 	}
@@ -248,21 +250,5 @@ func (m *Model) pruneToolResults() bool {
 	return true
 }
 
-// prunedToolContent is the projected form of an aged tool result: the
-// envelope's ok+summary, plus the spill path when the full output was saved to
-// disk, so the model still knows the call happened, how it went, and where to
-// read the detail back from. Content it cannot decode as an envelope is passed
-// through — better a large unpruned result than a mangled one.
-func prunedToolContent(content string) string {
-	env, ok := tools.DecodeToolResult(content)
-	if !ok || (len(env.Evidence) == 0 && len(env.Data) == 0 && env.Hint == "") {
-		return content
-	}
-	stub, err := json.Marshal(tools.ResultEnvelope{
-		OK: env.OK, Summary: env.Summary, Truncated: true, SpillPath: env.SpillPath,
-	})
-	if err != nil || len(stub) >= len(content) {
-		return content
-	}
-	return string(stub)
-}
+// prunedToolContent: see agent.StubToolResult.
+func prunedToolContent(content string) string { return agent.StubToolResult(content) }

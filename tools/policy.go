@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"github.com/javanhut/ollama_code/internal/safeshell"
 	"path"
 	"path/filepath"
 	"strings"
@@ -84,7 +85,7 @@ var toolPolicies = func() map[string]ToolPolicy {
 	for _, name := range []string{
 		"read_file", "list_directory", "find_files", "grep", "file_info",
 		"get_working_directory", "get_project_tree", "git_status", "git_diff",
-		"git_log",
+		"git_log", "repo_map",
 	} {
 		m[name] = leanRead
 	}
@@ -274,13 +275,26 @@ func EvaluatePermission(rules []PermissionRule, call ToolCall) (effect string, m
 // a bare tool-name rule. Callers show the result to the user before saving it —
 // this is a widening of the safety boundary and should never be silent.
 func PermissionRuleFor(call ToolCall) PermissionRule {
+	rule, _ := ScopedPermissionRuleFor(call)
+	return rule
+}
+
+// ScopedPermissionRuleFor is PermissionRuleFor plus whether the rule is safe
+// to reuse. A run_shell command the parser cannot reduce to a prefix ($CMD x,
+// a subshell, an unparseable line) would otherwise yield a bare run_shell rule
+// — "allow every shell command" — from a key the user pressed to approve one.
+// ok=false means: approve this call once, save nothing.
+func ScopedPermissionRuleFor(call ToolCall) (PermissionRule, bool) {
 	rule := PermissionRule{Tool: call.Function.Name, Effect: PermissionAllow}
 	if call.Function.Name == "run_shell" {
-		if prefix := ShellRulePrefix(shellCallCommand(call.Function.Arguments)); prefix != "" {
-			rule.Cmd = prefix + " *"
+		command := shellCallCommand(call.Function.Arguments)
+		prefix := ShellRulePrefix(command)
+		if prefix == "" || safeshell.Parse(command).Complex {
+			return rule, false
 		}
+		rule.Cmd = prefix + " *"
 	}
-	return rule
+	return rule, true
 }
 
 // String renders a rule the way it is shown in the permission modal.
@@ -435,7 +449,7 @@ var concurrentSafeTools = map[string]bool{
 	"find_symbol": true, "code_definition": true, "code_references": true,
 	"code_hover": true, "semantic_search": true, "web_fetch": true,
 	"web_search": true, "web_search_api": true, "todo_read": true,
-	"read_session_notes": true,
+	"read_session_notes": true, "repo_map": true,
 }
 
 // BatchIsConcurrentSafe reports whether every call in a batch is a pure read,

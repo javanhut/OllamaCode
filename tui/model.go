@@ -137,28 +137,31 @@ type config struct {
 	Verbose  bool     `json:"verbose,omitempty"`
 	Thinking bool     `json:"show_thinking,omitempty"` // replay the reasoning stream in the transcript
 
-	MaxSteps      int                        `json:"max_steps,omitempty"`      // tool-call budget per user turn (default 40)
-	PromptFamily  string                     `json:"prompt_family,omitempty"`  // force a prompt family section; "none"/"default" = base prompt only
-	EmbedModel    string                     `json:"embed_model,omitempty"`    // model for auto-RAG embeddings
-	AutoRAG       *bool                      `json:"auto_rag,omitempty"`       // nil/true = enabled
-	Dream         *bool                      `json:"dream,omitempty"`          // nil/true = dream mode enabled
-	Face          *bool                      `json:"face,omitempty"`           // nil/true = mascot overlay shown
-	Welcome       *bool                      `json:"welcome,omitempty"`        // nil/true = show welcome panel on empty chat
-	Verify        *bool                      `json:"verify,omitempty"`         // nil/true = auto compile-check on file edits
-	VerifyCmd     string                     `json:"verify_cmd,omitempty"`     // override the auto-detected check
-	Format        *bool                      `json:"format,omitempty"`         // nil/true = run the file's formatter on write
-	LSP           *bool                      `json:"lsp,omitempty"`            // nil/true = use installed language servers for code intelligence
-	LSPServers    map[string]lsp.Server      `json:"lsp_servers,omitempty"`    // extra/override language servers, keyed by name
-	Trace         bool                       `json:"trace,omitempty"`          // opt-in redacted JSONL execution trace
-	TracePath     string                     `json:"trace_path,omitempty"`     // optional trace destination
-	ShellSandbox  *bool                      `json:"shell_sandbox,omitempty"`  // nil/true = wrap run_shell in the OS sandbox
-	ContextDelta  bool                       `json:"context_delta,omitempty"`  // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
-	JailAllowlist []string                   `json:"jail_allowlist,omitempty"` // extra absolute roots the fs tools and shell sandbox may write
-	Permissions   []tools.PermissionRule     `json:"permissions,omitempty"`    // per-tool allow/ask/deny rules; deny outranks everything
-	Profiles      map[string]ModelProfile    `json:"profiles,omitempty"`       // per-model, keyed by provider-qualified model identity
-	Routes        map[string]string          `json:"routes,omitempty"`         // mode name -> model spec; empty disables routing
-	Providers     map[string]providerConfig  `json:"providers,omitempty"`      // extra endpoints, referenced as "<name>:<model>"
-	MCPServers    map[string]mcpServerConfig `json:"mcp_servers,omitempty"`    // external MCP servers (stdio or Streamable HTTP)
+	MaxSteps          int                        `json:"max_steps,omitempty"`           // tool-call budget per user turn (default 40)
+	PromptFamily      string                     `json:"prompt_family,omitempty"`       // force a prompt family section; "none"/"default" = base prompt only
+	EmbedModel        string                     `json:"embed_model,omitempty"`         // model for auto-RAG embeddings
+	AutoRAG           *bool                      `json:"auto_rag,omitempty"`            // nil/true = enabled
+	Dream             *bool                      `json:"dream,omitempty"`               // nil/true = dream mode enabled
+	Face              *bool                      `json:"face,omitempty"`                // nil/true = mascot overlay shown
+	Welcome           *bool                      `json:"welcome,omitempty"`             // nil/true = show welcome panel on empty chat
+	Verify            *bool                      `json:"verify,omitempty"`              // nil/true = auto compile-check on file edits
+	VerifyCmd         string                     `json:"verify_cmd,omitempty"`          // override the auto-detected check
+	Format            *bool                      `json:"format,omitempty"`              // nil/true = run the file's formatter on write
+	LSP               *bool                      `json:"lsp,omitempty"`                 // nil/true = use installed language servers for code intelligence
+	LSPServers        map[string]lsp.Server      `json:"lsp_servers,omitempty"`         // extra/override language servers, keyed by name
+	Trace             bool                       `json:"trace,omitempty"`               // opt-in redacted JSONL execution trace
+	TracePath         string                     `json:"trace_path,omitempty"`          // optional trace destination
+	ShellSandbox      *bool                      `json:"shell_sandbox,omitempty"`       // nil/true = wrap run_shell in the OS sandbox
+	ShellNetwork      bool                       `json:"shell_network,omitempty"`       // true = sandboxed shell may reach the network (default: loopback only)
+	ShellNetworkAllow []string                   `json:"shell_network_allow,omitempty"` // domains the sandboxed shell may reach through the egress proxy
+	ParallelEdit      bool                       `json:"parallel_edit,omitempty"`       // true = expose the parallel_edit tool (off by default)
+	ContextDelta      bool                       `json:"context_delta,omitempty"`       // stable context sources ride history as delta messages instead of the per-turn tail; off until cmd/eval says otherwise
+	JailAllowlist     []string                   `json:"jail_allowlist,omitempty"`      // extra absolute roots the fs tools and shell sandbox may write
+	Permissions       []tools.PermissionRule     `json:"permissions,omitempty"`         // per-tool allow/ask/deny rules; deny outranks everything
+	Profiles          map[string]ModelProfile    `json:"profiles,omitempty"`            // per-model, keyed by provider-qualified model identity
+	Routes            map[string]string          `json:"routes,omitempty"`              // mode name -> model spec; empty disables routing
+	Providers         map[string]providerConfig  `json:"providers,omitempty"`           // extra endpoints, referenced as "<name>:<model>"
+	MCPServers        map[string]mcpServerConfig `json:"mcp_servers,omitempty"`         // external MCP servers (stdio or Streamable HTTP)
 
 	Instructions        []string `json:"instructions,omitempty"`         // extra instruction files, loaded after the global AGENTS.md
 	ProjectInstructions *bool    `json:"project_instructions,omitempty"` // nil/true = load AGENTS.md/OLLAMA.md/CLAUDE.md files
@@ -219,6 +222,31 @@ type ModelProfile struct {
 	Temperature       *float64 `json:"temperature,omitempty"`
 	TopP              *float64 `json:"top_p,omitempty"`
 	NumPredict        *int     `json:"num_predict,omitempty"`
+	// Context thresholds as a percentage of num_ctx. Masking (stubbing old tool
+	// output, free) fires at MaskAtPct; LLM summarization at CompactAtPct.
+	// 0 = tier default (maskAtPct / compactAtPct).
+	MaskAtPct    int `json:"mask_at_pct,omitempty"`
+	CompactAtPct int `json:"compact_at_pct,omitempty"`
+	// ResampleOnStuck: when the verification gate gives up on a turn, revert
+	// the turn's file changes to the pre-turn snapshot and let the model try
+	// once more at a higher temperature, instead of ending on a blocker
+	// report. Off by default — best-of-n gains are measured on 32B-class
+	// systems, not small local models (see docs/safety.md).
+	ResampleOnStuck *bool `json:"resample_on_stuck,omitempty"`
+	// ConstrainedToolCalls opts a small model into first-pass schema-
+	// constrained tool calls (see constrain.go for why it is not the default).
+	ConstrainedToolCalls *bool `json:"constrained_tool_calls,omitempty"`
+}
+
+// maskAtPct / compactAtPct: see agent.ContextThresholds.
+func (p ModelProfile) maskAtPct() int {
+	mask, _ := agent.ContextThresholds(p.smallModel(), p.MaskAtPct, p.CompactAtPct)
+	return mask
+}
+
+func (p ModelProfile) compactAtPct() int {
+	_, compact := agent.ContextThresholds(p.smallModel(), p.MaskAtPct, p.CompactAtPct)
+	return compact
 }
 
 // smallModelParamsB is the tier cutoff: models under this many billion
@@ -482,11 +510,17 @@ type Model struct {
 	turnTouchedFiles   bool            // a file-mutating tool succeeded this turn
 	turnChangedPaths   map[string]bool // exact files covered by targeted verification
 	fetchedContent     bool            // untrusted web content entered the conversation this turn
-	verifying          bool            // a compile check is running
-	verifyAttempts     int             // failed compile checks this turn
-	lastVerification   string          // exact command/evidence from the latest gate
-	challengedThisTurn bool            // self-check challenge already issued this turn
-	reviewedThisTurn   bool            // optional adversarial review already issued this turn
+	sessionTainted     bool            // untrusted content has entered the conversation at any point this session
+	// Verification-loop state, reset per turn.
+	verifyTracker            agent.VerifyTracker // failed checks and the stuck signal (shared policy)
+	resampling               bool                // this turn was reverted and restarted at a higher temperature (resampleOnStuck)
+	integrityCheckedThisTurn bool                // test-integrity check already ran this turn
+	mcpPins                  *mcpPinStore        // MCP tool-definition pins (mcp_pins.json)
+	verifying                bool                // a compile check is running
+	verifyAttempts           int                 // failed compile checks this turn
+	lastVerification         string              // exact command/evidence from the latest gate
+	challengedThisTurn       bool                // self-check challenge already issued this turn
+	reviewedThisTurn         bool                // optional adversarial review already issued this turn
 
 	// Auto-RAG. Published indexes are treated immutable; background reindex
 	// works on a Clone and delivers a replacement via ragRefreshedMsg.
@@ -520,8 +554,8 @@ type Model struct {
 	dreaming         bool
 	dreamCount       int
 	lastDreamAt      time.Time
-	dreams           []dream // full session log (/dreams)
-	pendingDreams    []dream // dreams since last wake, surfaced on return
+	dreams           []dreamRecord // full session log (/dreams)
+	pendingDreams    []dreamRecord // dreams since last wake, surfaced on return
 	dreamCancel      context.CancelFunc
 	notesBackup      string // pre-consolidation notes, restorable via /notes restore
 	kvStore          *storage.KVStore
@@ -633,6 +667,8 @@ func New() *Model {
 	if cfg.ShellSandbox != nil {
 		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
 	}
+	tools.SetShellNetworkAllowed(cfg.ShellNetwork)
+	tools.SetShellNetworkAllowlist(cfg.ShellNetworkAllow)
 	if cfg.Format != nil {
 		tools.SetFormatEnabled(*cfg.Format)
 	}
@@ -784,7 +820,14 @@ func New() *Model {
 	m.customCommands = loadCustomCommands(customCommandDirs())
 	registry.Register(m.switchModeTool())
 	registry.Register(m.spawnSubagentTool())
-	registry.Register(m.parallelEditTool())
+	// parallel_edit is opt-in (config "parallel_edit": true). Several writers
+	// planning in parallel against one codebase is the pattern the evidence
+	// disfavors (Cognition, 2025-26: keep writes single-threaded; extra agents
+	// should add intelligence, not actions), and it costs a large schema in
+	// every request. Kept for users who measured a benefit on their models.
+	if cfg.ParallelEdit {
+		registry.Register(m.parallelEditTool())
+	}
 	// Push background-shell completions into the update loop (see shell_bg.go).
 	// The closure captures the channel, not the Model. Buffered (64) with a
 	// drop fallback so a wedged update loop never blocks a job's watcher.
@@ -805,7 +848,8 @@ func New() *Model {
 	registry.Register(tools.SemanticSearchTool(liveEmbedder{m}))
 	registry.SetFileChangeHook(m.noteFileChanged)
 	var mcpWarnings []string
-	m.mcpServers, mcpWarnings = connectMCPServers(cfg.MCPServers, registry)
+	m.mcpPins = loadMCPPins(mcpPinsPath())
+	m.mcpServers, mcpWarnings = connectMCPServers(cfg.MCPServers, registry, m.mcpPins)
 	if len(mcpWarnings) > 0 {
 		m.toast = strings.Join(mcpWarnings, " · ")
 	}

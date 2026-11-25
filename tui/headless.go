@@ -84,6 +84,8 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions, stdout io.Writer) (r
 	if cfg.ShellSandbox != nil {
 		tools.SetShellSandboxEnabled(*cfg.ShellSandbox)
 	}
+	tools.SetShellNetworkAllowed(cfg.ShellNetwork)
+	tools.SetShellNetworkAllowlist(cfg.ShellNetworkAllow)
 	if cfg.Format != nil {
 		tools.SetFormatEnabled(*cfg.Format)
 	}

@@ -175,6 +175,52 @@ go run ./cmd/eval -promote-trace trace.jsonl
 the generation they were produced under and are dropped on mismatch, so a
 straggler from a cancelled turn can never write into the new one.
 
+## Agent core vs TUI: what is shared, and the migration plan
+
+Two turn loops exist: the TUI's (streaming, `tui/stream.go` + `tui/dispatch.go`)
+and `agent.Run` (`internal/agent`, used by `ocode -p`, spawned subagents,
+`parallel_edit` planners, `cmd/eval` and the ACP adapter). Every coding-agent
+harness surveyed for the 2026 roadmap (Claude Code, Codex app-server, OpenHands
+V1, opencode) has converged on one UI-agnostic loop emitting typed events, with
+the TUI as one client among several. ocode is partway there. The rule for new
+work: **policy goes in `internal/agent`; the TUI only renders and answers.**
+
+Already shared (one implementation, both loops call it):
+
+| Concern | Where |
+|---|---|
+| Tool execution: salvage, validation, deadlines, repair, envelopes | `agent.Executor` |
+| Approval policy: allow / ask / deny, protected paths, untrusted content | `agent.Decide` (`approval.go`) |
+| Loop detection: repeat, oscillation, stagnation, re-read, preamble | `agent.LoopGuard` |
+| Verification repair loop: stuck signal, attempt cap, test integrity | `agent.VerifyTracker`, `agent.TestBaseline` (`verifyloop.go`) |
+| Constrained decoding ladder | `agent.ConstraintCache` |
+| Idle reflection | `internal/dream` |
+| Retrieval block | `semantic.FormatBlock` |
+
+Still TUI-only, in the order they should move:
+
+1. **Context management** — mask/compact thresholds (`ModelProfile.maskAtPct`,
+   `compactAtPct`), `pruneToolResults`, `historyWindow`. Move to an
+   `internal/agent` context manager that takes the history and a token
+   estimator; `agent.Run` gains masking for long headless runs.
+2. **Mode and plan gates** — `switch_mode` checks, the plan gate and
+   read-before-edit. Pure decisions over (mode, notes, plan-review state); move
+   them beside `Decide`.
+3. **Streaming** — `agent.Run` uses `ChatOnce`. Give it an optional streaming
+   client and an `OnEvent(Event)` hook with typed events (assistant delta,
+   tool call started/finished, approval requested, verification, turn end)
+   replacing `OnAssistant`/`OnToolResult`.
+4. **Approvals as events** — the Executor already accepts an approval callback
+   for ACP; the TUI's modal becomes another implementation of it, answered from
+   the Bubble Tea loop over a channel.
+5. **Swap the TUI onto `agent.Run`** — once 1–4 land, `tui.Model` keeps view
+   state only, and `tui/stream.go`/`dispatch.go` shrink to an event consumer.
+   The parity test (`orchestration_parity_test.go`) then becomes trivially true
+   and can be replaced by contract tests on the event stream.
+
+Each step is independently shippable and testable with `cmd/eval -compare`
+against the previous build.
+
 ## Routing
 
 `applyModeTransition` in `tui/mode.go` is the single choke point for every real

@@ -56,6 +56,8 @@ type Options struct {
 	// own system message, so System is not prepended again; task is appended
 	// as the next user message. The slice is copied before use.
 	PriorMessages []api.Message
+	// SmallModel selects the small-model context thresholds (earlier masking).
+	SmallModel bool
 	// OnAssistant, when set, observes every model reply as it arrives: the
 	// prose content plus the tool calls it made (nil for the final answer,
 	// including the forced synthesis after a step-limit stop). Headless
@@ -76,6 +78,9 @@ type Options struct {
 	Verify bool
 	// VerifyCmd overrides the detected plan with an explicit command.
 	VerifyCmd string
+	// Approve answers approval Asks instead of refusing them (see
+	// Executor.Approve). Nil keeps the non-interactive refusal.
+	Approve func(ctx context.Context, req ApprovalRequest) (bool, error)
 }
 
 // Result is the outcome of a headless run.
@@ -97,6 +102,9 @@ type Result struct {
 	// when nothing was checked (no changes, no plan, or Verify off).
 	Verification   string
 	VerifyFailures int // failed checks handed back to the model
+	// TestIntegrityWarnings lists suspicious test changes found when the check
+	// passed (deleted tests, new skips, gutted assertions); empty when clean.
+	TestIntegrityWarnings []string
 	// Messages is the run's full conversation — any PriorMessages seed, this
 	// run's exchanges, and the final assistant answer — so the caller can
 	// retain it and later resume the child with a follow-up (see
@@ -151,8 +159,18 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 	msgs = append(msgs, api.Message{Role: "user", Content: task})
 
 	var res Result
+	loop := &verifyLoop{tracker: VerifyTracker{Max: maxVerifyAttempts}}
 	executor := Executor{Registry: reg, Host: host, Model: opts.Model, NumCtx: opts.NumCtx, StructuredResults: opts.StructuredResults,
-		Before: opts.Before, Permissions: opts.Permissions,
+		Before: func(call tools.ToolCall) {
+			loop.baseline.Record(call)
+			if opts.Before != nil {
+				opts.Before(call)
+			}
+		},
+		Permissions: opts.Permissions,
+		// Every Run caller is non-interactive: ocode -p, a spawned subagent,
+		// a parallel_edit planner, cmd/eval.
+		NonInteractive: true, Approve: opts.Approve, state: &approvalState{},
 		Observe: func(event ExecutionEvent) {
 			if opts.Trace == nil {
 				return
@@ -188,10 +206,16 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 		constraintKey = ConstraintKey(host, opts.Model)
 	}
 
+	maskedThrough := 0
 	for res.Steps < opts.MaxSteps {
+		// Same masking tier as the TUI (context.go): once the request
+		// approaches the mask threshold of num_ctx, older tool results go out
+		// as stubs. msgs itself keeps every byte (Result.Messages, follow-ups).
+		var sent []api.Message
+		sent, maskedThrough = maskForRequest(msgs, opts.NumCtx, opts.SmallModel, maskedThrough)
 		req := api.ChatRequest{
 			Model:    opts.Model,
-			Messages: msgs,
+			Messages: sent,
 			Tools:    defs,
 			Options:  options,
 		}
@@ -241,7 +265,7 @@ func Run(ctx context.Context, host ChatClient, reg *tools.Registry, task string,
 					output = prose
 				}
 			}
-			if feedback, retry := verifyGate(ctx, opts, changed, &res); retry {
+			if feedback, retry := verifyGate(ctx, opts, changed, &res, loop); retry {
 				msgs = append(msgs, api.Message{Role: "assistant", Content: output},
 					api.Message{Role: "user", Advisory: true, Content: feedback})
 				if opts.OnAssistant != nil {
@@ -491,10 +515,23 @@ func runVerification(ctx context.Context, opts Options, changed map[string]bool)
 	return plan.Command, text, err == nil, true
 }
 
+// verifyLoop is one run's repair-loop state (see verifyloop.go).
+type verifyLoop struct {
+	tracker          VerifyTracker
+	baseline         TestBaseline
+	integrityChecked bool
+}
+
 // verifyGate runs when the model tries to finish. On a failing check, while
-// budget remains, it returns the feedback to hand back and retry=true.
-func verifyGate(ctx context.Context, opts Options, changed map[string]bool, res *Result) (feedback string, retry bool) {
+// the tracker allows another attempt, it returns the feedback to hand back and
+// retry=true. A passing check whose run weakened tests is handed back once
+// for the model to justify or undo (TestIntegrityAdvice).
+func verifyGate(ctx context.Context, opts Options, changed map[string]bool, res *Result, loop *verifyLoop) (feedback string, retry bool) {
 	if res.Verification == "passed" {
+		return "", false
+	}
+	if loop.tracker.Exhausted() {
+		res.Verification = "failed"
 		return "", false
 	}
 	command, output, passed, ran := runVerification(ctx, opts, changed)
@@ -503,13 +540,23 @@ func verifyGate(ctx context.Context, opts Options, changed map[string]bool, res 
 		return "", false
 	case passed:
 		res.Verification = "passed"
-		return "", false
-	case res.VerifyFailures >= maxVerifyAttempts:
-		res.Verification = "failed"
+		if !loop.integrityChecked {
+			loop.integrityChecked = true
+			if warnings := loop.baseline.Warnings(); len(warnings) > 0 {
+				res.TestIntegrityWarnings = warnings
+				return TestIntegrityAdvice(warnings), true
+			}
+		}
 		return "", false
 	}
 	res.VerifyFailures++
-	return VerificationFailed(command, output), true
+	advice, stop := loop.tracker.OnFailure(command, output)
+	if stop {
+		res.Verification = "failed"
+	}
+	// Hand the advice back either way: on stop it asks for the blocker
+	// explanation, and the next attempt to finish ends the run (Exhausted).
+	return advice, true
 }
 
 // verifyBeforeReport checks the changed files once more when a guard or the
@@ -529,4 +576,44 @@ func verifyBeforeReport(ctx context.Context, opts Options, changed map[string]bo
 	}
 	res.Verification = "failed"
 	return fmt.Sprintf("Verification (`%s`) FAILS on the files you changed — the task is NOT complete. Say so plainly in your report and include what is still failing:\n\n%s", command, output)
+}
+
+// approxMsgTokens is the ~4 chars/token estimate; headless runs have no
+// per-model calibration.
+func approxMsgTokens(m api.Message) int {
+	n := len(m.Content) + len(m.Thinking)
+	for _, c := range m.ToolCalls {
+		n += len(c.Function.Name) + len(c.Function.Arguments)
+	}
+	return n/4 + 4
+}
+
+// maskForRequest returns the messages to send, with tool results before the
+// mask boundary stubbed once pressure crosses the mask threshold. The boundary
+// only moves forward, and only in jumps, so the KV prefix cache is invalidated
+// rarely. numCtx <= 0 (unknown window) disables masking.
+func maskForRequest(msgs []api.Message, numCtx int, small bool, maskedThrough int) ([]api.Message, int) {
+	if numCtx > 0 {
+		total := 0
+		for _, m := range msgs {
+			total += approxMsgTokens(m)
+		}
+		maskPct, _ := ContextThresholds(small, 0, 0)
+		if total > numCtx*maskPct/100 {
+			if b := MaskBoundary(msgs, KeepIntactToolResults); b > maskedThrough {
+				maskedThrough = b
+			}
+		}
+	}
+	if maskedThrough == 0 {
+		return msgs, 0
+	}
+	out := make([]api.Message, len(msgs))
+	copy(out, msgs)
+	for i := 0; i < maskedThrough && i < len(out); i++ {
+		if out[i].Role == "tool" {
+			out[i].Content = StubToolResult(out[i].Content)
+		}
+	}
+	return out, maskedThrough
 }

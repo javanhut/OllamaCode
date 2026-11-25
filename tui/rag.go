@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -109,29 +108,9 @@ func (m *Model) retrieveRAGCmd(query string) tea.Cmd {
 	}
 }
 
-// formatRAGBlock renders search results into a token-budgeted system block.
+// formatRAGBlock: see semantic.FormatBlock (shared with cmd/eval).
 func formatRAGBlock(results []semantic.Result, maxTokens int) string {
-	if len(results) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("[RETRIEVED CONTEXT — auto-selected by relevance to your latest message; verify against the live files before trusting]\n")
-	used := estimateTokens(b.String())
-	included := 0
-	for _, r := range results {
-		entry := fmt.Sprintf("\n%s:%d-%d (score %.3f)\n%s\n", r.Path, r.StartLine, r.EndLine, r.Score, r.Text)
-		t := estimateTokens(entry)
-		if used+t > maxTokens && included > 0 {
-			break
-		}
-		b.WriteString(entry)
-		used += t
-		included++
-	}
-	if included == 0 {
-		return ""
-	}
-	return b.String()
+	return semantic.FormatBlock(results, maxTokens, estimateTokens)
 }
 
 // noteFileChanged records paths whose chunks need re-embedding. Safe to call

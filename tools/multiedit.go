@@ -160,8 +160,9 @@ func MultiEditTool() Tool {
 			}
 			data, updated, counts, maxTier, err := resolveMultiEdit(a)
 			if err != nil {
-				return "", err
+				return "", noteEditMatchFailure(a.Path, err)
 			}
+			editMatchFailures.reset(a.Path)
 			mode := os.FileMode(0o644)
 			if info, err := os.Stat(a.Path); err == nil {
 				mode = info.Mode().Perm()

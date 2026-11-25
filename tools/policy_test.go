@@ -188,3 +188,21 @@ func TestTerminalToolsAbsentFromReadOnlyModes(t *testing.T) {
 		t.Fatalf("terminal_send's deadline %s must outlive its own max wait %s", got, terminalMaxWait)
 	}
 }
+
+func TestScopedPermissionRuleRefusesUnscopableShell(t *testing.T) {
+	shell := func(cmd string) ToolCall {
+		args, _ := json.Marshal(map[string]string{"command": cmd})
+		return ToolCall{Function: ToolCallFunction{Name: "run_shell", Arguments: args}}
+	}
+	if rule, ok := ScopedPermissionRuleFor(shell("git status")); !ok || rule.Cmd != "git status *" {
+		t.Fatalf("a plain command must scope to its prefix: %+v ok=%v", rule, ok)
+	}
+	for _, cmd := range []string{"$CMD x", `git status "`} {
+		if rule, ok := ScopedPermissionRuleFor(shell(cmd)); ok {
+			t.Errorf("%q must not yield a reusable rule, got %+v", cmd, rule)
+		}
+	}
+	if _, ok := ScopedPermissionRuleFor(ToolCall{Function: ToolCallFunction{Name: "write_file"}}); !ok {
+		t.Error("non-shell tools always scope to the tool name")
+	}
+}

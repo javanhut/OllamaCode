@@ -202,8 +202,8 @@ func TestPruneToolResultsStubsOnlyTheProjection(t *testing.T) {
 				t.Fatalf("newest result %d (age %d) lost its evidence", i, seen)
 			}
 		} else {
-			if len(env.Evidence) != 0 || env.Hint != "" {
-				t.Fatalf("old result %d was not pruned", i)
+			if len(env.Evidence) != 0 || !strings.Contains(env.Hint, "elided") {
+				t.Fatalf("old result %d was not pruned to a stub with a recovery hint", i)
 			}
 			if !env.OK || env.Summary != "read_file completed" || !env.Truncated {
 				t.Fatalf("stub lost the verdict/summary: %+v", env)
@@ -320,5 +320,72 @@ func TestDeriveModelMessagesStripsThinking(t *testing.T) {
 	}
 	if strings.Contains(string(body), reasoning) {
 		t.Fatalf("reasoning serialized into the request: %s", body)
+	}
+}
+
+func TestProfileContextThresholds(t *testing.T) {
+	small := ModelProfile{ParamsB: 8}
+	big := ModelProfile{ParamsB: 70}
+	if small.maskAtPct() >= big.maskAtPct() || small.compactAtPct() >= big.compactAtPct() {
+		t.Fatalf("small models must compact earlier: small=(%d,%d) big=(%d,%d)",
+			small.maskAtPct(), small.compactAtPct(), big.maskAtPct(), big.compactAtPct())
+	}
+	for _, p := range []ModelProfile{small, big, {MaskAtPct: 90, CompactAtPct: 50}} {
+		if p.maskAtPct() > p.compactAtPct() {
+			t.Errorf("masking must never fire after summarization: %+v -> mask %d compact %d", p, p.maskAtPct(), p.compactAtPct())
+		}
+	}
+	if (ModelProfile{CompactAtPct: 200}).compactAtPct() > 95 {
+		t.Error("thresholds must be capped")
+	}
+}
+
+func TestMaskFiresBeforeCompact(t *testing.T) {
+	m := &Model{contextLimit: 10000, profile: ModelProfile{ParamsB: 70}} // mask 60%, compact 80%
+	for range 6 {
+		m.history = append(m.history, msg("user", "short"))
+	}
+	m.lastPromptEval, m.prevPromptEval = 7000, 7000
+	if !m.shouldMask() || m.shouldCompact() {
+		t.Fatalf("70%% pressure must mask but not summarize: mask=%v compact=%v", m.shouldMask(), m.shouldCompact())
+	}
+}
+
+func TestMaskOldToolResultsReclaimsMeasuredCount(t *testing.T) {
+	m := &Model{contextLimit: 100000}
+	m.history = toolHistory(keepIntactToolResults + 4)
+	before := estimateMsgsTokens(m.deriveModelMessages())
+	m.lastPromptEval, m.prevPromptEval = before+1000, before+1000
+	if !m.maskOldToolResults() {
+		t.Fatal("old tool results beyond the intact window must be masked")
+	}
+	after := estimateMsgsTokens(m.deriveModelMessages())
+	if after >= before {
+		t.Fatalf("masking must shrink the request: %d -> %d", before, after)
+	}
+	if want := before + 1000 - (before - after); m.lastPromptEval != want {
+		t.Fatalf("measured count must drop by what was reclaimed: got %d want %d", m.lastPromptEval, want)
+	}
+	if m.maskOldToolResults() {
+		t.Fatal("masking is idempotent: a second pass with nothing new must report false")
+	}
+	stubbed := m.deriveModelMessages()
+	for _, v := range stubbed {
+		if v.Role == "tool" && strings.Contains(v.Content, "elided") {
+			return
+		}
+	}
+	t.Fatal("a masked result must tell the model how to get the detail back")
+}
+
+func TestObservePromptEvalWarnsAtWindowEdge(t *testing.T) {
+	m := &Model{contextLimit: 8192}
+	m.observePromptEval(4000)
+	if m.toast != "" {
+		t.Fatalf("no warning below the edge: %q", m.toast)
+	}
+	m.observePromptEval(8192)
+	if !strings.Contains(m.toast, "truncated") {
+		t.Fatalf("a prompt at num_ctx must warn about truncation: %q", m.toast)
 	}
 }

@@ -246,18 +246,8 @@ func (m *Model) compactContext(force bool) tea.Cmd {
 	// free, and on a tool-heavy turn it clears the threshold on its own so the
 	// model round-trip below never has to happen. Only what pruning can't
 	// reclaim falls through to summarization.
-	if before := estimateMsgsTokens(visible); m.pruneToolResults() {
-		// The measured counts describe the PRE-prune request, but zeroing them
-		// hands the decision back to the estimate — which, whenever the
-		// measurement is what fired this pass, is BY DEFINITION below the
-		// threshold. A 43-token prune would then cancel a 28k/32k compaction, and
-		// keep cancelling it every time, while the real context grew to the
-		// provider's hard refusal. Subtract what pruning actually reclaimed and
-		// let the measurement stay authoritative.
+	if m.maskOldToolResults() {
 		visible = m.deriveModelMessages()
-		reclaimed := before - estimateMsgsTokens(visible)
-		m.lastPromptEval = max(0, m.lastPromptEval-reclaimed)
-		m.prevPromptEval = max(0, m.prevPromptEval-reclaimed)
 		if !force && !m.shouldCompact() {
 			m.toast = "context pruned — dropped old tool output"
 			return nil

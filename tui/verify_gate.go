@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/javanhut/ollama_code/api"
+	"github.com/javanhut/ollama_code/internal/agent"
 	tracepkg "github.com/javanhut/ollama_code/internal/trace"
 	"github.com/javanhut/ollama_code/internal/verification"
 	"github.com/javanhut/ollama_code/tools"
@@ -181,6 +183,12 @@ func (m *Model) endTurnTail() []tea.Cmd {
 	if c := m.maybeTitleCmd(); c != nil {
 		cmds = append(cmds, c)
 	}
+	// Mask first, between turns: stubbing old tool output is free and, batched
+	// here rather than mid-turn, invalidates the KV prefix cache at most once
+	// per turn. Summarization below only runs if masking was not enough.
+	if !m.compacting && m.shouldMask() && m.maskOldToolResults() {
+		m.toast = "context trimmed — old tool output masked"
+	}
 	if m.totalTokens > m.contextLimit*9/10 || m.shouldCompact() {
 		if c := m.compactContext(false); c != nil {
 			cmds = append(cmds, c)
@@ -190,4 +198,69 @@ func (m *Model) endTurnTail() []tea.Cmd {
 		cmds = append(cmds, m.dequeueNext())
 	}
 	return cmds
+}
+
+// testIntegrityWarnings compares this turn's changed test files against the
+// pre-turn snapshot (internal/verification.TestIntegrityWarnings).
+func (m *Model) testIntegrityWarnings() []string {
+	var changes []verification.TestFileChange
+	for _, path := range m.changedPaths() {
+		if !verification.IsTestPath(path) {
+			continue
+		}
+		before, existed, ok := m.preTurnContent(path)
+		if !ok {
+			return nil // no snapshot: nothing trustworthy to compare against
+		}
+		c := verification.TestFileChange{Path: path, Before: before, BeforeExists: existed}
+		if data, err := os.ReadFile(path); err == nil {
+			c.After, c.AfterExists = string(data), true
+		}
+		changes = append(changes, c)
+	}
+	return verification.TestIntegrityWarnings(changes)
+}
+
+// verifyErrorSignature: see agent.ErrorSignature.
+func verifyErrorSignature(output string) string { return agent.ErrorSignature(output) }
+
+// verifyFailureAdvice records a failed check and returns the advisory text for
+// the model, stopping the turn (blocker report) when retrying is pointless.
+// The policy is agent.VerifyTracker, shared with headless runs.
+func (m *Model) verifyFailureAdvice(msg verifyDoneMsg) string {
+	if m.verifyTracker.Max == 0 {
+		m.verifyTracker.Max = maxVerifyAttempts
+	}
+	advice, stop := m.verifyTracker.OnFailure(msg.label, repairDetail(msg.output, msg.lint))
+	m.verifyAttempts = m.verifyTracker.Attempts
+	if stop {
+		if resample, ok := m.resampleAfterStuck(msg); ok {
+			return resample
+		}
+		m.stopForBlockerReport()
+	}
+	return advice
+}
+
+// resampleAfterStuck is the opt-in second attempt (profile resample_on_stuck):
+// revert the turn's file changes to the pre-turn snapshot and restart the
+// repair loop once, sampling hotter. The conversation log stays append-only —
+// the failed attempt is still there, so the model knows what not to repeat —
+// but its tool output is masked to give the retry room.
+func (m *Model) resampleAfterStuck(msg verifyDoneMsg) (string, bool) {
+	if m.resampling || m.profile.ResampleOnStuck == nil || !*m.profile.ResampleOnStuck {
+		return "", false
+	}
+	summary, touched, ok := m.revertTurnToSnapshot()
+	if !ok {
+		return "", false
+	}
+	m.resampling = true
+	m.verifyTracker = agent.VerifyTracker{Max: maxVerifyAttempts}
+	m.verifyAttempts = 0
+	m.guard.ForgetReads(touched)
+	m.maskOldToolResults()
+	m.toast = "verification stuck — reverted this turn's changes (" + summary + ") and retrying once"
+	return fmt.Sprintf("[RESAMPLE] Your approach did not converge: `%s` kept failing:\n\n%s\n\nAll file changes from this turn have been REVERTED to the state before the turn (%s). Re-read the files you need — your earlier reads are stale. Start again with a genuinely different approach; do not repeat the edits that failed.",
+		msg.label, repairDetail(msg.output, msg.lint), summary), true
 }

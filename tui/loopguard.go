@@ -165,6 +165,7 @@ func (m *Model) resetTurnGuards() {
 	}
 	m.lastVerification = ""
 	m.verifyAttempts = 0
+	m.verifyTracker, m.integrityCheckedThisTurn, m.resampling = agent.VerifyTracker{Max: maxVerifyAttempts}, false, false
 	m.challengedThisTurn = false
 	m.reviewedThisTurn = false
 	m.autoContinues = 0

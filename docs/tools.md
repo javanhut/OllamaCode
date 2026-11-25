@@ -52,6 +52,7 @@ disable.
 | Tool | E | P | W | A |
 |---|:-:|:-:|:-:|:-:|
 | `find_symbol` | ✓ | ✓ | ✓ | ✓ |
+| `repo_map` | ✓ | ✓ | ✓ | ✓ |
 | `code_definition` | ✓ | ✓ | ✓ | ✓ |
 | `code_references` | ✓ | ✓ | ✓ | ✓ |
 | `code_hover` | ✓ | ✓ | ✓ | ✓ |
@@ -95,6 +96,15 @@ tier rather than erroring, so this is never a dependency. `lsp: false` in the
 config turns the tier off entirely.
 
 ### Tree-sitter precision (optional build)
+
+`repo_map` outlines the workspace in one call: files ranked by how much other
+code references them (PageRank over a definition/reference graph, as in
+Aider's repo map), each with its top-level functions, types and classes and
+their line numbers, fit to a token budget (default 1500). Passing `focus` paths
+ranks what those files depend on first. It needs no parser — definitions come
+from per-language line patterns (Go, Python, JS/TS, Rust, Java, Ruby) — so it
+works in the default build, at the cost of some precision. It is offered to
+small models too, since it replaces several list/grep/read rounds.
 
 By default `find_symbol`, `code_definition`, and `code_references` are
 grep/regex-based so the binary stays CGO-free. Building with
@@ -215,6 +225,8 @@ whichever turn's snapshot is open when each write happens — so `/undo` for
 those detached writes rewinds the later turn, not the spawning one.
 
 ### `parallel_edit`
+
+Opt-in: only registered when `"parallel_edit": true` is set in `config.json`.
 
 Splits a large change into independent subtasks planned by read-only workers in
 parallel, then applies their staged edits serially through the safe write path.

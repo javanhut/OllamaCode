@@ -35,7 +35,7 @@ func TestExternalMCPServerLifecycleAndToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "echo: hello" {
+	if got != wrapUntrustedContent("echo: hello") {
 		t.Fatalf("unexpected MCP result: %q", got)
 	}
 }

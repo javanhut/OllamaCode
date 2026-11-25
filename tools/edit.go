@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // leadingWS returns the leading run of spaces/tabs in s.
@@ -444,8 +445,9 @@ func EditFileTool() Tool {
 			}
 			data, updated, count, tier, err := resolveEdit(a)
 			if err != nil {
-				return "", err
+				return "", noteEditMatchFailure(a.Path, err)
 			}
+			editMatchFailures.reset(a.Path)
 			info, err := os.Stat(a.Path)
 			mode := os.FileMode(0o644)
 			if err == nil {
@@ -490,3 +492,55 @@ const (
 	subMaxCands = 400 // scoring cap; past this the fragment isn't distinctive
 	clipLen     = 400 // max bytes of file text quoted back in an error
 )
+
+// Whole-file fallback. After one failed edit, SWE-agent's trajectories show
+// eventual edit success dropping from about 90% to 57% (GPT-4 Turbo, 2024):
+// a model that missed once tends to keep missing with snippets of the same
+// shape. So after maxEditMatchFailures consecutive match failures on one
+// file, the error steers the model to the other format — read the file and
+// rewrite it whole — which needs no old_string at all (SWE-Edit, 2026, found
+// switching between find-replace and full rewrite worth double-digit gains for
+// an 8B model). Only for files small enough that a rewrite is cheap and safe.
+const (
+	maxEditMatchFailures   = 2
+	wholeFileFallbackBytes = 24 * 1024
+)
+
+type editFailureCounter struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+var editMatchFailures = &editFailureCounter{n: map[string]int{}}
+
+func (c *editFailureCounter) bump(path string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := resolveJailPath(path)
+	c.n[key]++
+	return c.n[key]
+}
+
+func (c *editFailureCounter) reset(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.n, resolveJailPath(path))
+}
+
+// noteEditMatchFailure counts a failed match and, at the threshold, appends
+// the whole-file advice. Errors that are not match failures (bad arguments,
+// unread file, I/O) pass through uncounted.
+func noteEditMatchFailure(path string, err error) error {
+	msg := err.Error()
+	if path == "" || !(strings.Contains(msg, "not found") || strings.Contains(msg, "no confident match") || strings.Contains(msg, "matches") || strings.Contains(msg, "appears")) {
+		return err
+	}
+	if editMatchFailures.bump(path) < maxEditMatchFailures {
+		return err
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || info.Size() > wholeFileFallbackBytes {
+		return fmt.Errorf("%w\n[repeated match failures on this file: read_file it again and copy old_string exactly from the fresh output, or use start_line/end_line from that read]", err)
+	}
+	return fmt.Errorf("%w\n[repeated match failures on this file: stop retrying snippets. read_file it, then write_file the COMPLETE new content with your change applied]", err)
+}

@@ -23,6 +23,18 @@ type ExecutionEvent struct {
 	Duration        time.Duration
 }
 
+// ApprovalRequest describes an Ask the executor hands to Executor.Approve.
+type ApprovalRequest struct {
+	Call   tools.ToolCall
+	Policy tools.ToolPolicy
+	Reason string
+	// Untrusted: web/MCP content entered this turn. Protected: the call
+	// targets agent/editor config or git hooks. Remembered "allow always"
+	// grants must not waive either.
+	Untrusted bool
+	Protected bool
+}
+
 // Executor is the single tool-dispatch implementation used by interactive and
 // headless agent entry points. UI-specific permission checks happen before it;
 // validation, timeouts, panic recovery, argument repair, and result envelopes
@@ -41,6 +53,18 @@ type Executor struct {
 	// that stopped a write in the TUI and not in a spawned subagent would be a
 	// hole in exactly the boundary it was written to close.
 	Permissions []tools.PermissionRule
+	// NonInteractive: nobody can answer a prompt (headless, subagents, eval).
+	// The full approval policy (Decide) is enforced here and an Ask is
+	// refused. Interactive callers run Decide in their own preflight and only
+	// a Deny is enforced here, after the human has answered.
+	NonInteractive bool
+	// Approve, when set on a NonInteractive executor, answers an Ask instead of
+	// the executor refusing it (the ACP adapter forwards it to the editor). It
+	// also switches Decide to Auto=false: every destructive call asks, since
+	// someone is there to answer. A false answer or an error refuses the call.
+	// Nil keeps the refuse-on-Ask default.
+	Approve func(ctx context.Context, req ApprovalRequest) (bool, error)
+	state   *approvalState // shared across copies of one run's executor
 }
 
 func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEvent {
@@ -52,19 +76,58 @@ func (e Executor) Execute(ctx context.Context, call tools.ToolCall) ExecutionEve
 		event.Result = tools.EncodeToolFailure("tool execution failed", event.Err.Error(), false)
 		return event
 	}
-	call.Function.Arguments = tools.SalvageJSON(call.Function.Arguments)
+	call.Function.Arguments = tools.UnwrapQuotedArgs(tools.SalvageJSON(call.Function.Arguments))
 	event.Call = call
 	// Salvage first, then check: a deny rule matches on the call's real
 	// arguments, not on whatever malformed JSON the model emitted around them.
-	if effect, ok := tools.EvaluatePermission(e.Permissions, call); ok && effect == tools.PermissionDeny {
-		event.Err = fmt.Errorf("denied by a permission rule in the user's config")
-		event.Result = tools.EncodeToolFailure("denied by a permission rule in the user's config",
-			"Do NOT retry this call or a minor variant — take a different approach, or tell the user which rule is in your way.", false)
+	policy := tools.PolicyForName(call.Function.Name)
+	if tool, ok := e.Registry.Lookup(call.Function.Name); ok {
+		policy = tool.Policy
+	}
+	decision, reason := Decide(ApprovalInput{
+		Call: call, Policy: policy, ConfigRules: e.Permissions,
+		Auto: e.Approve == nil, Untrusted: e.state != nil && e.state.untrusted.Load(),
+	})
+	approveFailed := ""
+	if decision == Ask && e.NonInteractive && e.Approve != nil {
+		ok, err := e.Approve(ctx, ApprovalRequest{Call: call, Policy: policy, Reason: reason,
+			Untrusted: e.state != nil && e.state.untrusted.Load(), Protected: TouchesProtectedPath(call)})
+		switch {
+		case ok && err == nil:
+			decision = Allow
+		case err != nil:
+			approveFailed = "approval failed: " + err.Error()
+		default:
+			approveFailed = "the user declined this action"
+		}
+	}
+	if approveFailed != "" {
+		reason = approveFailed
+		event.Err = fmt.Errorf("%s", reason)
+		event.Result = tools.EncodeToolFailure(reason, "Do NOT retry this call or work around it (including via run_shell). Continue without it, or tell the user what you wanted to do.", false)
 		if e.Observe != nil {
 			e.Observe(event)
 		}
 		return event
 	}
+	if decision == Deny || (decision == Ask && e.NonInteractive) {
+		hint := "Do NOT retry this call or a minor variant — take a different approach, or tell the user which rule is in your way."
+		if decision == Ask {
+			reason = "refused without a user to approve it: " + reason
+			hint = "This run cannot ask the user. Do NOT retry or work around it (including via run_shell); finish without this action and tell the user exactly what you wanted to do and why, so they can do it or add an allow rule to config.json."
+		}
+		event.Err = fmt.Errorf("%s", reason)
+		event.Result = tools.EncodeToolFailure(reason, hint, false)
+		if e.Observe != nil {
+			e.Observe(event)
+		}
+		return event
+	}
+	defer func() {
+		if e.state != nil && ResultIsUntrusted(call.Function.Name, policy, event.Result) {
+			e.state.untrusted.Store(true)
+		}
+	}()
 	if e.Before != nil {
 		e.Before(call)
 	}

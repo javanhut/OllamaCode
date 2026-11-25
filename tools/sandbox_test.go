@@ -13,7 +13,7 @@ import (
 )
 
 func TestSeatbeltProfileShape(t *testing.T) {
-	p := seatbeltProfile([]string{"/ws", "/private/tmp"})
+	p := seatbeltProfile([]string{"/ws", "/private/tmp"}, []string{"/ws/.git/hooks"}, []string{"/ws"}, false)
 
 	if !strings.HasPrefix(p, "(version 1)\n") {
 		t.Errorf("profile must open with a version declaration:\n%s", p)
@@ -38,27 +38,150 @@ func TestSeatbeltProfileShape(t *testing.T) {
 }
 
 func TestSeatbeltProfileEscapesQuotes(t *testing.T) {
-	p := seatbeltProfile([]string{`/we"ird\path`})
+	p := seatbeltProfile([]string{`/we"ird\path`}, nil, nil, true)
 	if !strings.Contains(p, `(subpath "/we\"ird\\path")`) {
 		t.Errorf("SBPL string escaping broken:\n%s", p)
 	}
 }
 
 func TestBwrapArgvShape(t *testing.T) {
-	argv := bwrapArgv("echo hi", []string{"/ws", "/tmp"})
+	argv := bwrapArgv("echo hi", []string{"/ws", "/tmp"}, []string{"/ws/.git/hooks"}, []string{"/var/run/docker.sock"}, false)
 	joined := strings.Join(argv, " ")
 
-	for _, want := range []string{"--ro-bind / /", "--dev /dev", "--proc /proc", "--bind /ws /ws", "--bind /tmp /tmp"} {
+	for _, want := range []string{"--ro-bind / /", "--dev /dev", "--proc /proc", "--bind /ws /ws", "--bind /tmp /tmp",
+		"--unshare-net", "--ro-bind /ws/.git/hooks /ws/.git/hooks", "--ro-bind /dev/null /var/run/docker.sock"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("bwrap argv missing %q: %s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "--unshare-net") {
-		t.Errorf("network must stay shared: %s", joined)
+	// Protected re-binds must come after the writable binds: later mounts win.
+	if strings.Index(joined, "--ro-bind /ws/.git/hooks") < strings.Index(joined, "--bind /ws /ws") {
+		t.Errorf("protected ro-bind must follow the writable bind: %s", joined)
 	}
 	tail := argv[len(argv)-4:]
 	if strings.Join(tail, " ") != "-- sh -c echo hi" {
 		t.Errorf("argv must end with -- sh -c <cmd>, got %v", tail)
+	}
+	if open := strings.Join(bwrapArgv("true", nil, nil, nil, true), " "); strings.Contains(open, "--unshare-net") {
+		t.Errorf("shell_network=true must keep the network shared: %s", open)
+	}
+}
+
+func TestSeatbeltProfileNetwork(t *testing.T) {
+	denied := seatbeltProfile([]string{"/ws"}, nil, nil, false)
+	for _, want := range []string{
+		"(deny network*)",
+		`(allow network-outbound (remote ip "localhost:*"))`,
+		`(allow network-bind (local ip "localhost:*"))`,
+		`(deny mach-lookup (global-name "com.apple.dnssd.service"))`,
+	} {
+		if !strings.Contains(denied, want) {
+			t.Errorf("network-denied profile missing %q:\n%s", want, denied)
+		}
+	}
+	// The broad local-ip form matches outbound sockets and re-opens egress.
+	if strings.Contains(denied, `(allow network* (local ip`) {
+		t.Errorf("profile must not use the broad network* local-ip allow:\n%s", denied)
+	}
+	allowed := seatbeltProfile([]string{"/ws"}, nil, nil, true)
+	if strings.Contains(allowed, "(deny network*)") {
+		t.Errorf("shell_network=true must not deny network:\n%s", allowed)
+	}
+	if !strings.Contains(allowed, "docker.sock") {
+		t.Errorf("docker socket must stay denied even with network allowed:\n%s", allowed)
+	}
+}
+
+func TestSeatbeltProtectedDenyFollowsAllow(t *testing.T) {
+	p := seatbeltProfile([]string{"/ws"}, []string{"/ws/.git/hooks"}, nil, true)
+	allow := strings.Index(p, `(allow file-write* (subpath "/ws"))`)
+	deny := strings.Index(p, `(deny file-write* (subpath "/ws/.git/hooks"))`)
+	if allow < 0 || deny < 0 || deny < allow {
+		t.Errorf("protected deny must come after the root allow (last match wins):\n%s", p)
+	}
+}
+
+func TestSandboxProtectedPaths(t *testing.T) {
+	root := t.TempDir()
+	pinJail(t, root)
+	resolved, _ := filepath.EvalSymlinks(root)
+	hooks := filepath.Join(resolved, ".git", "hooks")
+
+	if slices.Contains(sandboxProtectedPaths(false), hooks) {
+		t.Errorf("git paths must not be protected before they exist (git init must work)")
+	}
+	if !slices.Contains(sandboxProtectedPaths(false), filepath.Join(resolved, ".vscode")) {
+		t.Errorf("editor config must be protected even before it exists")
+	}
+	if slices.Contains(sandboxProtectedPaths(true), filepath.Join(resolved, ".vscode")) {
+		t.Errorf("existingOnly must drop paths that are not on disk (bwrap cannot bind them)")
+	}
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(sandboxProtectedPaths(true), hooks) {
+		t.Errorf("existing .git/hooks must be protected")
+	}
+	for path, want := range map[string]bool{
+		filepath.Join(resolved, "AGENTS.md"):                 true,
+		filepath.Join(resolved, "agents.md"):                 true,
+		filepath.Join(resolved, ".claude", "settings.json"):  true,
+		filepath.Join(resolved, ".git", "hooks", "pre-push"): true,
+		filepath.Join(resolved, ".git", "objects", "ab"):     false,
+		filepath.Join(resolved, "main.go"):                   false,
+		filepath.Join(resolved, "docs", "AGENTS.md.bak"):     false,
+	} {
+		if got := IsProtectedPath(path); got != want {
+			t.Errorf("IsProtectedPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// TestSandboxBlocksNetworkAndProtectedWrites runs the real wrapper: external
+// egress and DNS fail, loopback works, and a protected path refuses writes.
+func TestSandboxBlocksNetworkAndProtectedWrites(t *testing.T) {
+	if detectShellSandbox() == "" {
+		t.Skip("no OS sandbox on PATH")
+	}
+	root := t.TempDir()
+	pinJail(t, root)
+	if err := os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	SetShellNetworkAllowed(false)
+
+	run := func(command string) (string, error) {
+		cmd := newShellCommand(command)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := run("echo x > .git/hooks/pre-commit"); err == nil {
+		t.Errorf("write to .git/hooks must fail inside the sandbox, got %q", out)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if detectShellSandbox() == "sandbox-exec" {
+		if out, err := run("echo x > pkg/AGENTS.md"); err == nil {
+			t.Errorf("write to a nested AGENTS.md must fail inside the sandbox, got %q", out)
+		}
+	}
+	if out, err := run("echo x > ok.txt"); err != nil {
+		t.Errorf("ordinary workspace write must succeed: %v %s", err, out)
+	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		out, err := run(`python3 -c "import socket; socket.getaddrinfo('example.com', 443)"`)
+		if err == nil {
+			t.Errorf("DNS lookup must fail with network denied, got %q", out)
+		}
+		out, err = run(`python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(1)
+c = socket.create_connection(s.getsockname(), timeout=3); c.close()"`)
+		if err != nil {
+			t.Errorf("loopback must stay open: %v %s", err, out)
+		}
 	}
 }
 

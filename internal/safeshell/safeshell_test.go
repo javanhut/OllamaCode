@@ -123,8 +123,8 @@ func TestIsExploreReadOnlyShellAdversarial(t *testing.T) {
 		// Command substitution.
 		{"dollar-paren substitution", "echo $(rm -rf /)", false, ""},
 		{"backtick substitution", "echo `rm -rf /`", false, ""},
-		{"backticks inside quotes are a false positive", "echo 'a ` b'", false, "false positive: the backtick check scans the raw command, so it also rejects benign quoted text"},
-		{"dollar-paren inside quotes is a false positive", "echo 'cost is $(x)'", false, "false positive: the $( check scans the raw command, so it also rejects benign quoted text"},
+		{"backticks inside single quotes are literal text", "echo 'a ` b'", true, ""},
+		{"dollar-paren inside single quotes is literal text", "echo 'cost is $(x)'", true, ""},
 
 		// Chaining.
 		{"semicolon chains a mutating command", "ls; rm foo", false, ""},
@@ -156,7 +156,7 @@ func TestIsExploreReadOnlyShellAdversarial(t *testing.T) {
 
 		// Path tricks.
 		{"absolute path to rm blocked by basename", "/bin/rm x", false, ""},
-		{"relative path resolves to basename", "./ls", true, ""},
+		{"relative path names a file the model may have written", "./ls", false, ""},
 		{"absolute path to allowlisted bin", "/bin/ls -la", true, ""},
 
 		// Chaining the old splitter missed.
@@ -232,12 +232,12 @@ func TestInterceptVCSBypassAdversarial(t *testing.T) {
 		{"git later in a pipeline blocked", "cat x | git log", false, ""},
 		{"git after semicolon blocked", "echo hi; git status", false, ""},
 		{"git after || blocked", "false || git status", false, ""},
-		{"git via env wrapper misses", "env git status", true, "HOLE: the guard only inspects the leading binary, and `env` hides git behind it"},
-		{"git via command builtin misses", "command git status", true, "HOLE: the guard only inspects the leading binary, and `command` hides git behind it"},
-		{"git via xargs misses", "xargs git", true, "HOLE: git runs as an xargs argument, not a leading binary"},
-		{"git via sh -c misses", "sh -c 'git status'", true, "HOLE: git runs inside a nested shell string"},
-		{"git via command substitution misses", "echo $(git status)", true, "HOLE: git runs inside a command substitution"},
-		{"git via backticks misses", "echo `git status`", true, "HOLE: git runs inside backticks"},
+		{"git via env wrapper is seen by the AST walk", "env git status", false, ""},
+		{"git via command builtin is seen by the AST walk", "command git status", false, ""},
+		{"git via xargs is seen by the AST walk", "xargs git", false, ""},
+		{"git via sh -c is seen by the AST walk", "sh -c 'git status'", false, ""},
+		{"git via command substitution is seen by the AST walk", "echo $(git status)", false, ""},
+		{"git via backticks is seen by the AST walk", "echo `git status`", false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

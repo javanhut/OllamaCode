@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"github.com/javanhut/ollama_code/internal/acp"
 	"github.com/javanhut/ollama_code/tools"
 	"github.com/javanhut/ollama_code/tui"
 )
@@ -141,7 +144,35 @@ func stdinPiped() bool {
 	return err == nil && st.Mode()&os.ModeCharDevice == 0
 }
 
+// runACP serves the Agent Client Protocol on stdio (`ocode acp`), for editors
+// such as Zed that launch the agent as a subprocess. stdout carries protocol
+// messages only; diagnostics go to stderr.
+func runACP(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("ocode acp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	model := fs.String("model", "", "model for ACP sessions (default: configured model); accepts provider:model")
+	maxSteps := fs.Int("max-steps", 0, "cap tool-call rounds per prompt (default: configured max_steps)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	srv := &acp.Server{Run: acp.RunFunc(tui.NewACPRunner(*model, *maxSteps)), Version: tui.AppVersion()}
+	return srv.Serve(ctx, stdin, stdout)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "acp" {
+		defer tools.CleanupSpills()
+		defer tools.CloseLSP()
+		defer tools.CloseTerminals()
+		defer tools.CloseNetProxy()
+		if err := runACP(os.Args[2:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	f, err := parseFlags(os.Args[1:], os.Stderr)
 	if err != nil {
 		os.Exit(2)
@@ -157,6 +188,8 @@ func main() {
 	// Terminal sessions are child shells; closing awaits each child's exit
 	// rather than returning once the signal is sent, so nothing is left running.
 	defer tools.CloseTerminals()
+	// The egress proxy (shell_network_allow) owns a Unix socket dir on Linux.
+	defer tools.CloseNetProxy()
 	debugPath := ""
 	if f.debug {
 		debugPath, err = filepath.Abs("ocode.log")

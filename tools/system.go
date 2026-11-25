@@ -59,7 +59,7 @@ func RunShellTool() Tool {
 			// One copy of the default/cap arithmetic, shared with the deadline
 			// every caller arms on the outside (tools.ToolCallTimeout).
 			res, err := runShellCommand(ctx, a.Command, a.WorkingDir, a.Stdin, shellCallTimeout(args))
-			return withSandboxNotice(res), err
+			return withNetworkHint(withSandboxNotice(res)), err
 		},
 	}
 }

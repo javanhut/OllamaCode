@@ -137,6 +137,13 @@ func (m *Model) chatOptions(action bool) map[string]any {
 			opts["temperature"] = 0.2
 		}
 	}
+	// A resampled turn (resampleAfterStuck) must not replay the failed
+	// attempt token for token: greedy decoding of a nearly identical prompt
+	// would. Raise the temperature for the rest of the turn.
+	if m.resampling {
+		t, _ := opts["temperature"].(float64)
+		opts["temperature"] = max(t+0.4, 0.6)
+	}
 	if m.profile.TopP != nil {
 		opts["top_p"] = *m.profile.TopP
 	}

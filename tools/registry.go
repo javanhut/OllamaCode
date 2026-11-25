@@ -301,6 +301,7 @@ func DefaultRegistry() *Registry {
 	r.Register(WebSearchTool())
 	r.Register(GetProjectTreeTool())
 	r.Register(FindSymbolTool())
+	r.Register(RepoMapTool())
 	r.Register(AskUserTool())
 	r.Register(GitStatusTool())
 	r.Register(GitDiffTool())

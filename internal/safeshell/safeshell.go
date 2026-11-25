@@ -6,6 +6,7 @@ package safeshell
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -56,74 +57,262 @@ var exploreShellAllowedGoSubs = map[string]bool{
 	"version": true, "env": true, "list": true, "doc": true, "vet": true,
 }
 
+// IsExploreReadOnlyShell reports whether a command line may run in explore
+// mode. The line is parsed into an AST (see Parse); anything the parser does
+// not fully understand is rejected, and every simple command's argv is
+// checked, not just its name.
 func IsExploreReadOnlyShell(command string) (bool, string) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return false, "empty command"
 	}
-	if strings.ContainsRune(command, '`') {
-		return false, "command substitution (backticks) is not allowed in explore mode"
+	p := Parse(command)
+	if p.Complex {
+		return false, "not allowed in explore mode: " + p.Reason()
 	}
-	if strings.Contains(command, "$(") {
-		return false, "command substitution $(...) is not allowed in explore mode"
+	if len(p.Commands) == 0 {
+		return false, "empty command"
 	}
-	if HasOutputRedirect(command) {
-		return false, "output redirection (>, >>) is not allowed in explore mode"
-	}
-	if strings.Contains(command, "<(") {
-		return false, "process substitution <(...) is not allowed in explore mode"
-	}
-	segments := SplitShellSegments(command)
-	for _, seg := range segments {
-		if seg == "" {
-			continue
+	for _, c := range p.Commands {
+		if p.SetsVars && hasDyn(c) {
+			return false, "a variable assigned earlier on the line is used, so the command cannot be checked"
 		}
-		fields := strings.Fields(seg)
-		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
-			fields = fields[1:]
-		}
-		if len(fields) == 0 {
-			continue
-		}
-		bin := fields[0]
-		if idx := strings.LastIndexAny(bin, "/"); idx >= 0 {
-			bin = bin[idx+1:]
-		}
-		if !exploreShellAllowedBins[bin] {
-			return false, fmt.Sprintf("command %q is not in the explore-mode read-only allowlist", bin)
-		}
-		if ok, reason := exploreArgsReadOnly(bin, fields[1:]); !ok {
+		if ok, reason := CommandReadOnly(c); !ok {
 			return false, reason
 		}
-		switch bin {
-		case "git":
-			sub := FirstNonFlagArg(fields[1:])
-			if sub != "" && !exploreShellAllowedGitSubs[sub] {
-				return false, fmt.Sprintf("git subcommand %q is not in the explore-mode read-only allowlist", sub)
+	}
+	return true, ""
+}
+
+func hasDyn(c Command) bool {
+	for _, d := range c.Dyn {
+		if d {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedBinDirs are the directories a program may be named from. A relative
+// path (./ls) or an arbitrary one names a file the model may have written.
+var trustedBinDirs = map[string]bool{
+	"/bin": true, "/usr/bin": true, "/usr/local/bin": true, "/sbin": true,
+	"/usr/sbin": true, "/opt/homebrew/bin": true,
+}
+
+// dangerousAssign reports environment assignments that change what a program
+// runs or loads, so `PATH=/tmp/x git status` is not a read-only git status.
+func dangerousAssign(name string) bool {
+	switch name {
+	case "PATH", "IFS", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
+		"PAGER", "EDITOR", "VISUAL", "SHELL", "HOME", "TMPDIR", "CDPATH", "GOFLAGS", "GOTOOLCHAIN":
+		return true
+	}
+	return strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") || strings.HasPrefix(name, "GIT_") ||
+		strings.HasPrefix(name, "GO") && name != "GOOS" && name != "GOARCH"
+}
+
+// AssignsSafe reports whether none of the command's NAME=value prefixes change
+// what runs or loads.
+func AssignsSafe(c Command) bool {
+	for _, a := range c.Assigns {
+		if dangerousAssign(a.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// RedirectsBenign reports whether the command's redirections cannot write
+// anywhere interesting: descriptor duplication, reads, here-documents, and
+// writes to /dev/null.
+func RedirectsBenign(c Command) bool {
+	for _, r := range c.Redirects {
+		if r.Write && (r.Target != "/dev/null" || r.Dyn) {
+			return false
+		}
+	}
+	return true
+}
+
+// CommandReadOnly reports whether one simple command is on the explore-mode
+// read-only allowlist, checking its argv, assignments and redirections.
+func CommandReadOnly(c Command) (bool, string) {
+	for _, a := range c.Assigns {
+		if dangerousAssign(a.Name) {
+			return false, fmt.Sprintf("assigning %s changes what runs, so it is not allowed in explore mode", a.Name)
+		}
+	}
+	for _, r := range c.Redirects {
+		if r.Write {
+			return false, "output redirection (>, >>) is not allowed in explore mode"
+		}
+	}
+	if len(c.Argv) == 0 {
+		return true, ""
+	}
+	if c.Inner {
+		return false, "a command run through a wrapper is not allowed in explore mode"
+	}
+	first := c.Argv[0]
+	if strings.Contains(first, "/") {
+		dir, _ := path.Split(first)
+		if !trustedBinDirs[strings.TrimSuffix(dir, "/")] {
+			return false, fmt.Sprintf("command %q is run by path, which is not allowed in explore mode", first)
+		}
+	}
+	bin := c.Bin()
+	if !exploreShellAllowedBins[bin] {
+		return false, fmt.Sprintf("command %q is not in the explore-mode read-only allowlist", bin)
+	}
+	args := c.Argv[1:]
+	for i := range args {
+		if c.Glob[i+1] && strings.HasPrefix(args[i], "-") {
+			return false, "a glob that expands to a flag is not allowed in explore mode"
+		}
+	}
+	if _, checked := exploreForbiddenFlags[bin]; checked || bin == "git" || bin == "go" || bin == "ivaldi" || bin == "command" {
+		for i := range args {
+			if c.Dyn[i+1] {
+				return false, fmt.Sprintf("%s with a variable argument cannot be checked, so it is not allowed in explore mode", bin)
 			}
-			if ok, reason := gitSubReadOnly(sub, fields[1:]); !ok {
+		}
+	}
+	if ok, reason := exploreArgsReadOnly(bin, args); !ok {
+		return false, reason
+	}
+	switch bin {
+	case "git":
+		sub, idx, ok, reason := GitSubcommand(args)
+		if !ok {
+			return false, reason
+		}
+		for i := 0; i <= idx && i < len(args); i++ {
+			if c.Glob[i+1] {
+				return false, "a glob in the git subcommand position is not allowed in explore mode"
+			}
+		}
+		if sub != "" && !exploreShellAllowedGitSubs[sub] {
+			return false, fmt.Sprintf("git subcommand %q is not in the explore-mode read-only allowlist", sub)
+		}
+		if sub != "" {
+			if ok, reason := gitSubReadOnly(sub, args[idx+1:]); !ok {
 				return false, reason
 			}
-		case "go":
-			sub := FirstNonFlagArg(fields[1:])
-			if sub != "" && !exploreShellAllowedGoSubs[sub] {
-				return false, fmt.Sprintf("go subcommand %q is not in the explore-mode read-only allowlist", sub)
-			}
-		case "ivaldi":
-			sub := FirstNonFlagArg(fields[1:])
-			if sub != "" && !exploreShellAllowedIvaldiSubs[sub] {
-				return false, fmt.Sprintf("ivaldi subcommand %q is not in the explore-mode read-only allowlist", sub)
-			}
-			// ivaldi timeline has sub-actions; only 'list' is read-only.
-			if sub == "timeline" {
-				subsub := FirstNonFlagArg(fields[2:])
-				if subsub != "" && subsub != "list" {
-					return false, fmt.Sprintf("ivaldi timeline %q is not read-only; only 'list' is allowed in explore mode", subsub)
-				}
+		}
+	case "go":
+		sub := FirstNonFlagArg(args)
+		if sub != "" && !exploreShellAllowedGoSubs[sub] {
+			return false, fmt.Sprintf("go subcommand %q is not in the explore-mode read-only allowlist", sub)
+		}
+	case "ivaldi":
+		sub := FirstNonFlagArg(args)
+		if sub != "" && !exploreShellAllowedIvaldiSubs[sub] {
+			return false, fmt.Sprintf("ivaldi subcommand %q is not in the explore-mode read-only allowlist", sub)
+		}
+		// ivaldi timeline has sub-actions; only 'list' is read-only.
+		if sub == "timeline" {
+			subsub := FirstNonFlagArg(args[1:])
+			if subsub != "" && subsub != "list" {
+				return false, fmt.Sprintf("ivaldi timeline %q is not read-only; only 'list' is allowed in explore mode", subsub)
 			}
 		}
 	}
 	return true, ""
+}
+
+// gitSafeGlobals are git options that may precede the subcommand without
+// changing what runs. -C and friends take a value; the rest are flags.
+var gitSafeGlobals = map[string]bool{
+	"--no-pager": true, "-P": true, "-p": true, "--paginate": true, "--no-optional-locks": true,
+	"--no-replace-objects": true, "--literal-pathspecs": true, "--glob-pathspecs": true,
+	"--noglob-pathspecs": true, "--icase-pathspecs": true, "--no-advice": true,
+	"--version": true, "--help": true, "-h": true,
+}
+
+// gitValueGlobals take their value as the next word (the `=` form is one word).
+var gitValueGlobals = map[string]bool{
+	"-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--config-env": true, "--super-prefix": true,
+}
+
+// GitSubcommand finds the real git subcommand in args (everything after
+// `git`), skipping global options such as `-C dir` and `--no-pager`. idx is
+// the subcommand's index in args. ok is false when a global option could
+// change what runs (`-c k=v`, `--exec-path`, `--git-dir`, ...) or is unknown,
+// because then the subcommand cannot be trusted.
+func GitSubcommand(args []string) (sub string, idx int, ok bool, reason string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-C":
+			i++
+			if i >= len(args) {
+				return "", 0, false, "git -C needs a directory"
+			}
+		case gitSafeGlobals[a]:
+		case strings.HasPrefix(a, "-"):
+			return "", 0, false, fmt.Sprintf("git %s can change what git runs, so it is not allowed in explore mode", a)
+		default:
+			return a, i, true, ""
+		}
+	}
+	return "", len(args), true, ""
+}
+
+// GitStripGlobals drops git's global options so `git -C d --no-pager push`
+// reads as `git push`. With all=false only the safe ones are dropped, so a
+// line using `-c` or `--exec-path` no longer looks like a plain subcommand;
+// with all=true every global option goes, for deny rules to see the real
+// subcommand.
+func GitStripGlobals(argv []string, all bool) []string {
+	if len(argv) == 0 || path.Base(argv[0]) != "git" {
+		return argv
+	}
+	out := []string{argv[0]}
+	i := 1
+	for i < len(argv) {
+		a := argv[i]
+		switch {
+		case a == "-C" || all && gitValueGlobals[a]:
+			i += 2
+		case gitSafeGlobals[a] || all && strings.HasPrefix(a, "-"):
+			i++
+		default:
+			return append(out, argv[i:]...)
+		}
+	}
+	return out
+}
+
+// MatchTexts lists the strings a rule pattern should be tried against for
+// this command. The first is the command as written; for git it is followed
+// by the form with global options removed. For deny/ask matching the program
+// path is also reduced to its base name and git's global options are all
+// dropped, so `/usr/bin/git -c x=y push` is seen as `git push`.
+func (c Command) MatchTexts(deny bool) []string {
+	argv := c.Argv
+	if len(argv) == 0 {
+		return nil
+	}
+	texts := []string{strings.Join(argv, " ")}
+	add := func(a []string) {
+		t := strings.Join(a, " ")
+		for _, x := range texts {
+			if x == t {
+				return
+			}
+		}
+		texts = append(texts, t)
+	}
+	if deny {
+		base := append([]string{path.Base(argv[0])}, argv[1:]...)
+		add(base)
+		add(GitStripGlobals(base, true))
+	} else {
+		add(GitStripGlobals(argv, false))
+	}
+	return texts
 }
 
 // exploreForbiddenFlags are arguments that turn an allowlisted reader into a
@@ -181,19 +370,7 @@ func exploreArgsReadOnly(bin string, args []string) (bool, string) {
 // gitSubReadOnly narrows the allowlisted git subcommands that also have a
 // writing form: branch/tag create and delete, remote add/remove, reflog
 // expire/delete.
-func gitSubReadOnly(sub string, args []string) (bool, string) {
-	// Positional args after the subcommand.
-	var rest []string
-	seen := false
-	for _, a := range args {
-		if !seen {
-			if a == sub {
-				seen = true
-			}
-			continue
-		}
-		rest = append(rest, a)
-	}
+func gitSubReadOnly(sub string, rest []string) (bool, string) {
 	positional := FirstNonFlagArg(rest)
 	hasFlag := func(flags ...string) bool {
 		for _, a := range rest {
@@ -247,9 +424,9 @@ func gitSubReadOnly(sub string, args []string) (bool, string) {
 // explaining what to do instead. The vcs backend is a parameter so the
 // function is testable without touching the filesystem.
 //
-// Like IsExploreReadOnlyShell, this parses per-segment (split on |, &&, ;)
-// and only inspects the leading binary — it cannot see into nested scripts
-// or subprocesses that invoke git internally. That's an accepted limitation;
+// Like IsExploreReadOnlyShell, this parses the line into simple commands and
+// inspects each one's program name — it cannot see into scripts or
+// subprocesses that invoke git internally. That's an accepted limitation;
 // the common failure mode is the model directly typing `git status`.
 func InterceptVCSBypass(command, vcs string) (bool, string) {
 	if vcs != "ivaldi" {
@@ -259,24 +436,9 @@ func InterceptVCSBypass(command, vcs string) (bool, string) {
 	if command == "" {
 		return true, ""
 	}
-	for _, seg := range SplitShellSegments(command) {
-		if seg == "" {
-			continue
-		}
-		fields := strings.Fields(seg)
-		// Skip env-assignment prefixes (e.g. GIT_DIR=/foo git status).
-		for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
-			fields = fields[1:]
-		}
-		if len(fields) == 0 {
-			continue
-		}
-		bin := fields[0]
-		if idx := strings.LastIndexAny(bin, "/"); idx >= 0 {
-			bin = bin[idx+1:]
-		}
-		if bin == "git" {
-			sub := FirstNonFlagArg(fields[1:])
+	for _, c := range Parse(command).Commands {
+		if c.Bin() == "git" {
+			sub := FirstNonFlagArg(GitStripGlobals(c.Argv, true)[1:])
 			detail := ""
 			if sub != "" {
 				detail = fmt.Sprintf(" (subcommand %q)", sub)
@@ -362,84 +524,6 @@ func AllASCIIDigits(s string) bool {
 		}
 	}
 	return true
-}
-
-func HasOutputRedirect(s string) bool {
-	inSingle, inDouble := false, false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\\' && i+1 < len(s):
-			i++
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == '>' && !inSingle && !inDouble:
-			// `>&` is fd duplication (e.g. 2>&1), not a file write.
-			if i+1 < len(s) && s[i+1] == '&' {
-				continue
-			}
-			return true
-		}
-	}
-	return false
-}
-
-// SplitShellSegments breaks a command on |, ||, &, &&, ; and newlines while leaving the
-// contents of single- and double-quoted strings intact. This is a deliberate
-// approximation — it doesn't handle every shell edge case, just enough to
-// identify the leading binary of each pipeline segment.
-func SplitShellSegments(command string) []string {
-	var (
-		segments []string
-		cur      strings.Builder
-		inSingle bool
-		inDouble bool
-	)
-	flush := func() {
-		segments = append(segments, strings.TrimSpace(cur.String()))
-		cur.Reset()
-	}
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case c == '\\' && i+1 < len(command):
-			cur.WriteByte(c)
-			cur.WriteByte(command[i+1])
-			i++
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-			cur.WriteByte(c)
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-			cur.WriteByte(c)
-		case !inSingle && !inDouble && c == '|':
-			if i+1 < len(command) && command[i+1] == '|' {
-				i++
-			}
-			flush()
-		case !inSingle && !inDouble && c == '&':
-			if i+1 < len(command) && command[i+1] == '&' {
-				i++
-				flush()
-			} else if i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
-				// fd duplication such as 2>&1, not a separator.
-				cur.WriteByte(c)
-			} else {
-				// A lone & backgrounds the left side and starts a new command.
-				flush()
-			}
-		case !inSingle && !inDouble && (c == ';' || c == '\n'):
-			flush()
-		default:
-			cur.WriteByte(c)
-		}
-	}
-	if cur.Len() > 0 {
-		flush()
-	}
-	return segments
 }
 
 func ExtractShellCommand(raw json.RawMessage) string {

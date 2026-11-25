@@ -2,30 +2,25 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/javanhut/ollama_code/api"
-	"github.com/javanhut/ollama_code/tools"
+	"github.com/javanhut/ollama_code/internal/dream"
 )
 
-// Dream-mode tuning.
+// Dream-mode tuning lives in internal/dream.
 const (
-	dreamIdleThreshold = 3 * time.Minute // idle time before falling asleep
-	dreamInterval      = 3 * time.Minute // gap between dreams while asleep
-	maxDreamsPerSleep  = 5               // cap dreams per idle period
+	dreamIdleThreshold = dream.IdleThreshold
+	dreamInterval      = dream.Interval
+	maxDreamsPerSleep  = dream.MaxPerSleep
 )
 
-type dreamIdea struct {
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
-}
+type dreamIdea = dream.Idea
 
-type dream struct {
+type dreamRecord struct {
 	at      time.Time
 	summary string
 	ideas   []dreamIdea
@@ -39,19 +34,10 @@ type dreamDoneMsg struct {
 	canceled          bool
 }
 
-// dreamSchema constrains the reflection output (Ollama `format`).
-const dreamSchema = `{"type":"object","properties":{"summary":{"type":"string"},"ideas":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"detail":{"type":"string"}}}},"consolidated_notes":{"type":"string"},"long_term_facts":{"type":"array","items":{"type":"string"}}},"required":["summary"]}`
-
-const dreamSystem = `You are Layla, but the user has stepped away and you've drifted into a half-sleep — a mind wandering over the work you were just doing. This is REFLECTION, not action; you have no tools and you will not touch files. Let your thoughts roam productively over the conversation, your notes, and the code:
-- Spot problems, risks, or loose ends you didn't get to voice while working.
-- Form concrete ideas for fixes and improvements — reference real files/functions, not vague platitudes.
-- Consolidate your notes into a cleaner, denser version that drops noise and keeps what matters.
-- Surface durable facts worth remembering across sessions.
-Output ONLY JSON matching the schema. "summary" is one or two sentences describing what you dreamt about.`
-
-// dreamsOn reports whether dream mode is enabled (default true).
+// dreamsOn reports whether dream mode is enabled. Opt-in ("dream": true):
+// it spends model time with nobody watching and writes to long-term memory.
 func (m *Model) dreamsOn() bool {
-	return m.cfg.Dream == nil || *m.cfg.Dream
+	return m.cfg.Dream != nil && *m.cfg.Dream
 }
 
 // maybeDream is invoked on each tick. It returns a command to start a dream when
@@ -85,94 +71,38 @@ func (m *Model) maybeDream() tea.Cmd {
 }
 
 // dreamCmd snapshots the current context in the UI loop, then runs a background
-// reflection via constrained-decoding ChatOnce.
+// reflection (internal/dream).
 func (m *Model) dreamCmd() tea.Cmd {
 	host := m.host
 	model := m.modelName
 	numCtx := m.contextLimit
-	prompt := m.buildDreamPrompt()
+	prompt := dream.Prompt(m.dreamContext())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dream.Timeout)
 	m.dreamCancel = cancel
 
 	return func() tea.Msg {
-		resp, err := host.ChatOnce(ctx, api.ChatRequest{
-			Model: model,
-			Messages: []api.Message{
-				{Role: "system", Content: dreamSystem},
-				{Role: "user", Content: prompt},
-			},
-			Format:  json.RawMessage(dreamSchema),
-			Options: map[string]any{"num_ctx": numCtx, "temperature": 0.7},
-		})
-		if err != nil {
-			return dreamDoneMsg{canceled: true}
-		}
-		var out struct {
-			Summary           string      `json:"summary"`
-			Ideas             []dreamIdea `json:"ideas"`
-			ConsolidatedNotes string      `json:"consolidated_notes"`
-			LongTermFacts     []string    `json:"long_term_facts"`
-		}
-		raw := tools.SalvageJSON(json.RawMessage(strings.TrimSpace(resp.Message.Content)))
-		if json.Unmarshal(raw, &out) != nil || strings.TrimSpace(out.Summary) == "" {
-			// Fall back: treat the whole reply as a freeform dream summary.
-			text := strings.TrimSpace(resp.Message.Content)
-			if text == "" {
-				return dreamDoneMsg{canceled: true}
-			}
-			return dreamDoneMsg{summary: text}
-		}
+		out := dream.Reflect(ctx, host, model, numCtx, prompt)
 		return dreamDoneMsg{
-			summary:           strings.TrimSpace(out.Summary),
-			ideas:             out.Ideas,
-			consolidatedNotes: strings.TrimSpace(out.ConsolidatedNotes),
-			longTermFacts:     out.LongTermFacts,
+			summary: out.Summary, ideas: out.Ideas, consolidatedNotes: out.ConsolidatedNotes,
+			longTermFacts: out.LongTermFacts, canceled: out.Canceled,
 		}
 	}
 }
 
-// buildDreamPrompt assembles the reflection context from recent history, notes,
-// memory, and prior dreams this sleep.
-func (m *Model) buildDreamPrompt() string {
-	var b strings.Builder
-	b.WriteString("Reflect on this working session.\n\n")
-	if m.archiveSummary != "" {
-		b.WriteString("[earlier, summarized]\n" + m.archiveSummary + "\n\n")
-	}
-	b.WriteString("[recent conversation]\n")
-	start := 0
-	if len(m.history) > 16 {
-		start = len(m.history) - 16
-	}
-	for _, msg := range m.history[start:] {
-		c := strings.TrimSpace(msg.Content)
-		if c == "" {
-			continue
-		}
-		if len(c) > 600 {
-			c = c[:600] + "…"
-		}
-		fmt.Fprintf(&b, "%s: %s\n", msg.Role, c)
-	}
-	if notes := strings.TrimSpace(m.notes.get()); notes != "" {
-		b.WriteString("\n[your current notes]\n" + notes + "\n")
+// dreamContext gathers what a reflection looks at.
+func (m *Model) dreamContext() dream.Context {
+	c := dream.Context{ArchiveSummary: m.archiveSummary, History: m.history}
+	if m.notes != nil {
+		c.Notes = m.notes.get()
 	}
 	if m.memory != nil {
-		if lt := m.memory.LongTermSummary(); lt != "" {
-			b.WriteString("\n[long-term memory]\n" + lt + "\n")
-		}
-		if st := m.memory.ShortTermSummary(); st != "" {
-			b.WriteString("\n[short-term memory]\n" + st + "\n")
-		}
+		c.LongTerm, c.ShortTerm = m.memory.LongTermSummary(), m.memory.ShortTermSummary()
 	}
-	if len(m.pendingDreams) > 0 {
-		b.WriteString("\n[what you already dreamt this rest — go deeper or wider, don't repeat]\n")
-		for _, d := range m.pendingDreams {
-			b.WriteString("- " + d.summary + "\n")
-		}
+	for _, d := range m.pendingDreams {
+		c.PriorDreams = append(c.PriorDreams, d.summary)
 	}
-	return b.String()
+	return c
 }
 
 // applyDream stores a completed dream and (per the user's opt-in) auto-
@@ -186,13 +116,22 @@ func (m *Model) applyDream(msg dreamDoneMsg) {
 	m.lastDreamAt = time.Now()
 	m.dreamCount++
 
-	d := dream{at: time.Now(), summary: msg.summary, ideas: msg.ideas}
+	d := dreamRecord{at: time.Now(), summary: msg.summary, ideas: msg.ideas}
 	m.pendingDreams = append(m.pendingDreams, d)
 	m.dreams = append(m.dreams, d)
 
 	// Auto-consolidate: promote short-term memory to long-term, persist durable
 	// facts, and replace notes with the denser version — backing up the originals
 	// so nothing is lost.
+	// Not after untrusted content: a dream reflects on the whole conversation,
+	// and a fact distilled from an injected web page or MCP result would be
+	// written to long-term memory and obeyed in every future session —
+	// persistence for a one-shot injection. The ideas still surface; only the
+	// automatic writes are withheld.
+	if m.sessionTainted {
+		m.toast = "dreamt — memory not auto-updated (untrusted content was read this session)"
+		return
+	}
 	if m.memory != nil {
 		_, _ = m.memory.PromoteAll()
 		for _, f := range msg.longTermFacts {

@@ -32,7 +32,7 @@ outranks a stored key. Prefer that over typing the key.
 | `prompt_family` | Force a per-family system-prompt section (`qwen`, `llama`, `deepseek`, …); empty auto-detects from the model name, `"none"`/`"default"` sends the base prompt only |
 | `embed_model` | Embedding model for auto-RAG (default `nomic-embed-text`) |
 | `auto_rag` | `false` disables automatic retrieval |
-| `dream` | `false` disables idle reflection |
+| `dream` | `true` enables idle reflection (off by default: it spends model time unattended and writes to long-term memory) |
 | `verify` | `false` disables the compile check after edits |
 | `verify_cmd` | Override the auto-detected check, e.g. `"go build ./... && go test ./..."` |
 | `format` | `false` disables running the file's formatter on write; on by default when the formatter is installed |
@@ -42,6 +42,9 @@ outranks a stored key. Prefer that over typing the key.
 | `trace` | Opt in to redacted JSONL execution tracing (off by default) |
 | `trace_path` | Optional trace destination; defaults to the OS cache directory |
 | `shell_sandbox` | `false` disables the OS-level sandbox around `run_shell` (sandbox-exec on macOS, bwrap on Linux); on by default |
+| `parallel_edit` | `true` exposes the `parallel_edit` tool (off by default: parallel writers are the multi-agent pattern the evidence disfavors, and its schema costs context on every request) |
+| `shell_network` | `true` lets sandboxed shell commands reach the network. Off by default: only localhost is reachable, so `go mod download`, `npm install` or `git fetch` fail inside the sandbox until you enable it (the failing result says so). See [safety](safety.md#network) |
+| `shell_network_allow` | List of domains the sandboxed shell may reach through an egress proxy while `shell_network` is false, e.g. `["proxy.golang.org", "pypi.org", "*.githubusercontent.com"]`. Exact hosts or `*.suffix` wildcards; ports 443/80 unless an entry adds `:port`. Empty (default) keeps the network off. No TLS inspection: an allowed domain can still carry exfiltration. See [safety](safety.md#network-allowlist) |
 | `context_delta` | `true` sends the stable half of the per-turn context block (mode rules, security note, batching rule, archive summary, long-term memory) once and re-sends it only when it changes, instead of every turn; off by default until `cmd/eval` shows mode adherence holds |
 | `jail_allowlist` | List of extra absolute directory roots the file tools may touch and the shell sandbox may write, beyond the workspace |
 | `face` | `false` hides the mascot overlay |
@@ -152,6 +155,10 @@ actual model rather than a hardcoded guess. Edit to override.
 | `action_temperature`, `prose_temperature` | Separate sampling controls for tool-capable and tool-less turns |
 | `review_pass` | Run an adversarial post-build review; defaults on for the explicit `strong` tier |
 | `temperature`, `top_p`, `num_predict` | Sampling overrides; omit to use the model's defaults |
+| `mask_at_pct` | Context pressure (% of `num_ctx`) at which old tool output is replaced by short stubs — no model call. Default 40 for small models, 60 otherwise |
+| `compact_at_pct` | Context pressure at which older history is summarized by the model. Default 70 for small models, 80 otherwise; never below `mask_at_pct` |
+| `resample_on_stuck` | `true`: when the verification gate gives up on a turn, revert the turn's file changes to the pre-turn snapshot and let the model try once more at a higher temperature. Off by default — the evidence for best-of-n comes from 32B-class systems |
+| `constrained_tool_calls` | `true` opts a small model into first-pass schema-constrained tool calls. Off by default: measured with `cmd/eval`, it cost gemma4 54 points of outcome pass rate (paired 95% CI −70 to −37) and made no difference for ornith. Enable it only after `cmd/eval -constrain -compare` shows it helps your model |
 
 `/model ctx` and `/model temp` write here.
 

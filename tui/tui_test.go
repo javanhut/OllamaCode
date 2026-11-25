@@ -517,6 +517,32 @@ func TestAutoModePromptBypass(t *testing.T) {
 	}
 }
 
+// TestProtectedPathAlwaysPrompts: agent/editor config and git hooks are
+// write-then-execute targets, so neither auto mode, a session "s" rule nor the
+// batch-wide "a" may waive the prompt — only an explicit config rule.
+func TestProtectedPathAlwaysPrompts(t *testing.T) {
+	pinTempWorkspace(t) // a workspace root of its own, so .claude/ is root-level
+	m := &Model{mode: AutoMode, state: stateChat, pending: &pendingBatch{allowAll: true}}
+	m.sessionPermissions = []tools.PermissionRule{{Tool: "write_file", Effect: tools.PermissionAllow}}
+	for _, path := range []string{"AGENTS.md", "agents.md", ".claude/settings.json", ".vscode/settings.json", ".mcp.json"} {
+		call := tools.ToolCall{Function: tools.ToolCallFunction{
+			Name: "write_file", Arguments: json.RawMessage(`{"path":"` + path + `","content":"x"}`),
+		}}
+		if !m.shouldPromptPermission(call) {
+			t.Errorf("write to protected %s must prompt even in auto mode with allow-all", path)
+		}
+	}
+	read := tools.ToolCall{Function: tools.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"AGENTS.md"}`)}}
+	if m.shouldPromptPermission(read) {
+		t.Error("reading a protected path must not prompt")
+	}
+	m.cfg.Permissions = []tools.PermissionRule{{Tool: "write_file", Effect: tools.PermissionAllow}}
+	call := tools.ToolCall{Function: tools.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"AGENTS.md","content":"x"}`)}}
+	if m.shouldPromptPermission(call) {
+		t.Error("an explicit config allow rule is the one thing that may waive the protected-path prompt")
+	}
+}
+
 func TestFetchedContentGate(t *testing.T) {
 	callInside := tools.ToolCall{
 		Function: tools.ToolCallFunction{

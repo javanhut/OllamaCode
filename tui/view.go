@@ -57,6 +57,7 @@ var slashCommands = []struct {
 	{"/research", "guided web research: dedupe sources, synthesize with citations"},
 	{"/init", "generate or update AGENTS.md project instructions"},
 	{"/instructions", "list loaded AGENTS.md instruction files (reload to re-read)"},
+	{"/mcp", "list MCP servers and tool pins (repin <name> to approve changed tools)"},
 	{"/commands", "list custom markdown commands (reload to re-read)"},
 }
 

@@ -55,6 +55,9 @@ type runResult struct {
 	Passed           bool     `json:"passed"`
 	BehaviorPassed   bool     `json:"behavior_passed"`
 	ToolContract     bool     `json:"tool_contract_passed"`
+	ToolContractNA   bool     `json:"tool_contract_na,omitempty"` // contract needs non-shell tools; not applicable under bash-only
+	RAGBytes         int      `json:"rag_bytes,omitempty"`
+	RAGError         string   `json:"rag_error,omitempty"`
 	Detail           string   `json:"detail"`
 	ToolDetail       string   `json:"tool_detail,omitempty"`
 	ToolsUsed        []string `json:"tools_used,omitempty"`
@@ -83,6 +86,7 @@ type report struct {
 	PassRate         float64       `json:"pass_rate"`
 	ToolContracts    int           `json:"tool_contracts_passed"`
 	ToolContractRate float64       `json:"tool_contract_rate"`
+	ToolContractNA   int           `json:"tool_contracts_na,omitempty"`
 	TotalSteps       int           `json:"total_steps"`
 	TotalCalls       int           `json:"total_calls"`
 	TotalErrors      int           `json:"total_errors"`
@@ -97,6 +101,14 @@ type report struct {
 	P95DurationMS    int64         `json:"p95_duration_ms"`
 	ByTask           []taskSummary `json:"by_task"`
 	Results          []runResult   `json:"results"`
+
+	// Added in harness eval-2 (older files lack these). Headline figures are
+	// outcome-based: pass_rate/passed above stay the strict "outcome AND tool
+	// contract" count for compatibility.
+	OutcomePassed   int       `json:"outcome_passed"`
+	OutcomePassRate float64   `json:"outcome_pass_rate"`
+	Stats           evalStats `json:"stats"`
+	Metadata        *runMeta  `json:"metadata,omitempty"`
 }
 
 // taskSummary aggregates the trials of a single fixture, so multi-sample runs
@@ -109,8 +121,11 @@ type taskSummary struct {
 	PassRate         float64 `json:"pass_rate"`
 	BehaviorPassed   int     `json:"behavior_passed"`
 	ToolContracts    int     `json:"tool_contracts_passed"`
+	ToolContractNA   int     `json:"tool_contracts_na,omitempty"`
 	ToolContractRate float64 `json:"tool_contract_rate"`
 	MeanDurationMS   int64   `json:"mean_duration_ms"`
+	PassAtK          float64 `json:"pass_at_k"`
+	PassHatK         float64 `json:"pass_hat_k"`
 }
 
 func evalTasks() []task {
@@ -392,13 +407,22 @@ func main() {
 	runs := flag.Int("runs", 1, "trials per task")
 	samples := flag.Int("samples", 0, "trials per fixture; alias for -runs, overrides it when > 0")
 	jsonOutput := flag.Bool("json", false, "emit machine-readable JSON")
-	minPass := flag.Float64("min-pass-rate", 1, "minimum passing behavior rate from 0 to 1")
+	minPass := flag.Float64("min-pass-rate", 1, "minimum outcome pass rate from 0 to 1 (see -gate-on)")
 	minTools := flag.Float64("min-tool-rate", 1, "minimum passing tool-contract rate from 0 to 1")
 	tracePath := flag.String("trace", "", "optional redacted JSONL trace path")
 	legacyResults := flag.Bool("legacy-results", false, "use pre-envelope prose tool results for A/B comparison")
 	constrain := flag.Bool("constrain", false, "first-pass schema-constrained tool output (small-model posture; native Ollama only)")
 	taskName := flag.String("task", "", "run only the named fixture")
 	verify := flag.Bool("verify", true, "run the verification gate (targeted tests + build) before a file-changing run may finish, as ocode -p does")
+	compareArg := flag.String("compare", "", "paired comparison of two result files: a.json,b.json (no model needed)")
+	validate := flag.Bool("validate-fixtures", false, "check fixtures are well-formed and fail on the untouched workspace (no model needed)")
+	gateOn := flag.String("gate-on", "point", "what -min-pass-rate gates on: point (outcome pass rate) or lower-bound (lower 95% CI bound)")
+	seed := flag.Int64("seed", -1, "base sampling seed (trial t uses seed+t-1); negative = unseeded")
+	temperature := flag.Float64("temperature", -1, "sampling temperature; negative = model default")
+	numCtx := flag.Int("num-ctx", 0, "num_ctx option; 0 = server default")
+	toolset := flag.String("toolset", "full", "tools offered to the model: full, or bash-only (run_shell alone; contracts needing other tools report n/a)")
+	rag := flag.String("rag", "off", "auto-RAG: on injects retrieved workspace context into the system prompt as the TUI does; off = current behavior")
+	embedModel := flag.String("embed-model", defaultEmbedModel, "embedding model for -rag on")
 	selftest := flag.Bool("selftest", false, "hermetic mode: run fixtures against an in-process scripted model; no Ollama host needed")
 	flag.Parse()
 	if *promoteTrace != "" {
@@ -411,6 +435,41 @@ func main() {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(fixture)
 		return
+	}
+	if *compareArg != "" {
+		os.Exit(runCompare(*compareArg, *jsonOutput, os.Stdout, os.Stderr))
+	}
+	if *validate {
+		if problems := validateFixtures(evalTasks(), os.Stdout); len(problems) > 0 {
+			fmt.Fprintf(os.Stderr, "%d fixture(s) invalid\n", len(problems))
+			os.Exit(1)
+		}
+		fmt.Println("all fixtures valid")
+		return
+	}
+	if *gateOn != "point" && *gateOn != "lower-bound" {
+		fmt.Fprintln(os.Stderr, "-gate-on must be point or lower-bound")
+		os.Exit(2)
+	}
+	if *toolset != "full" && *toolset != "bash-only" {
+		fmt.Fprintln(os.Stderr, "-toolset must be full or bash-only")
+		os.Exit(2)
+	}
+	if *rag != "on" && *rag != "off" {
+		fmt.Fprintln(os.Stderr, "-rag must be on or off")
+		os.Exit(2)
+	}
+	if *selftest && (*toolset != "full" || *rag != "off") {
+		fmt.Fprintln(os.Stderr, "-toolset bash-only and -rag on need a live model; they cannot be combined with -selftest")
+		os.Exit(2)
+	}
+	evalToolset, evalRAG, evalEmbedModel = *toolset, *rag == "on", *embedModel
+	evalSampling = sampling{NumCtx: *numCtx}
+	if *seed >= 0 {
+		evalSampling.Seed = seed
+	}
+	if *temperature >= 0 {
+		evalSampling.Temperature = temperature
 	}
 	trials := resolveTrials(*runs, *samples)
 	if *selftest && *model == "" {
@@ -444,7 +503,11 @@ func main() {
 	} else {
 		printSummary(r)
 	}
-	if r.PassRate < *minPass || r.ToolContractRate < *minTools {
+	gated := r.OutcomePassRate
+	if *gateOn == "lower-bound" {
+		gated = r.Stats.lowerBound()
+	}
+	if gated < *minPass || r.ToolContractRate < *minTools {
 		os.Exit(1)
 	}
 }
@@ -456,6 +519,9 @@ func resolveTrials(runs, samples int) int {
 	}
 	return runs
 }
+
+// evalSampling holds the decoding options for this process, set once by main.
+var evalSampling sampling
 
 func runEvaluation(model, host string, steps, trials int, verbose bool, recorder *tracepkg.Recorder, structured *bool, taskName string, constrain, selftest, verify bool) (report, error) {
 	h := api.OllamaHost{}
@@ -506,6 +572,7 @@ func runEvaluation(model, host string, steps, trials int, verbose bool, recorder
 		}
 	}
 	accumulate(&rep, durations)
+	rep.Metadata = collectMeta(model, host, tasks, evalSampling, steps, constrain && !selftest, verify, selftest, rep.StartedAt)
 	return rep, nil
 }
 
@@ -536,7 +603,32 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 	// Hermetic mode: play the fixture's script back through the real agent
 	// loop and real tools. Every fixture must carry a script so CI can run the
 	// whole set without a model.
+	filter := t.Filter
+	if evalToolset == "bash-only" {
+		filter = bashOnlyFilter
+	}
+	system := evalSystem
+	var ragBytes int
+	var ragErr string
+	if evalRAG && !selftest {
+		block, err := ragBlockFor(host, dir, t.Prompt, evalSampling.NumCtx)
+		if err != nil {
+			ragErr = err.Error()
+		}
+		if block != "" {
+			system += "\n\n" + block
+			ragBytes = len(block)
+		}
+	}
 	var client agent.ChatClient = host
+	if !selftest && (evalSampling.Temperature != nil || evalSampling.Seed != nil) {
+		sc := &samplingClient{OllamaHost: host, temperature: evalSampling.Temperature}
+		if evalSampling.Seed != nil {
+			seed := *evalSampling.Seed + int64(trial-1)
+			sc.seed = &seed
+		}
+		client = sc
+	}
 	if selftest {
 		if len(t.Script) == 0 {
 			return runResult{}, fmt.Errorf("eval task %q has no script; -selftest requires one per fixture", t.Name)
@@ -547,7 +639,7 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	start := time.Now()
 	res, runErr := agent.Run(ctx, client, tools.DefaultRegistry(), t.Prompt, agent.Options{
-		Model: model, System: evalSystem, MaxSteps: steps, ToolFilter: t.Filter, Trace: recorder, StructuredResults: structured,
+		Model: model, System: system, MaxSteps: steps, NumCtx: evalSampling.NumCtx, ToolFilter: filter, Trace: recorder, StructuredResults: structured,
 		ConstrainToolCalls: constrain, Constraints: constraintCache, Verify: verify,
 	})
 	cancel()
@@ -559,7 +651,12 @@ func runTask(host api.OllamaHost, model string, steps, trial int, t task, record
 		behavior, detail = t.Check(dir, res.Output)
 	}
 	contract, toolDetail := checkToolContract(res.ToolsUsed, t.Tools)
+	contractNA := evalToolset == "bash-only" && contractNAUnderBashOnly(t.Tools)
+	if contractNA {
+		contract, toolDetail = true, "n/a under bash-only"
+	}
 	return runResult{
+		ToolContractNA: contractNA, RAGBytes: ragBytes, RAGError: ragErr,
 		Task: t.Name, Trial: trial, Passed: behavior && contract && runErr == nil,
 		BehaviorPassed: behavior, ToolContract: contract, Detail: detail, ToolDetail: toolDetail,
 		ToolsUsed: res.ToolsUsed, Steps: res.Steps, Calls: res.ToolCalls, Errors: res.ToolErrors,
@@ -619,7 +716,12 @@ func accumulate(rep *report, durations []int64) {
 		if r.Passed {
 			rep.Passed++
 		}
-		if r.ToolContract {
+		if outcomeOf(r) {
+			rep.OutcomePassed++
+		}
+		if r.ToolContractNA {
+			rep.ToolContractNA++
+		} else if r.ToolContract {
 			rep.ToolContracts++
 		}
 		rep.TotalSteps += r.Steps
@@ -644,7 +746,9 @@ func accumulate(rep *report, durations []int64) {
 		if r.BehaviorPassed {
 			ts.BehaviorPassed++
 		}
-		if r.ToolContract {
+		if r.ToolContractNA {
+			ts.ToolContractNA++
+		} else if r.ToolContract {
 			ts.ToolContracts++
 		}
 		ts.MeanDurationMS += r.DurationMS
@@ -652,14 +756,17 @@ func accumulate(rep *report, durations []int64) {
 	for _, name := range order {
 		ts := byTask[name]
 		ts.PassRate = float64(ts.Passed) / float64(ts.Trials)
-		ts.ToolContractRate = float64(ts.ToolContracts) / float64(ts.Trials)
+		ts.PassAtK, ts.PassHatK = perTaskK(rep.Results, name)
+		ts.ToolContractRate = rateOrOne(ts.ToolContracts, ts.Trials-ts.ToolContractNA)
 		ts.MeanDurationMS /= int64(ts.Trials)
 		rep.ByTask = append(rep.ByTask, *ts)
 	}
 	if rep.Total > 0 {
 		rep.PassRate = float64(rep.Passed) / float64(rep.Total)
-		rep.ToolContractRate = float64(rep.ToolContracts) / float64(rep.Total)
+		rep.ToolContractRate = rateOrOne(rep.ToolContracts, rep.Total-rep.ToolContractNA)
+		rep.OutcomePassRate = float64(rep.OutcomePassed) / float64(rep.Total)
 	}
+	rep.Stats = computeStats(rep.Results)
 	if len(durations) > 0 {
 		slices.Sort(durations)
 		var sum int64
@@ -679,18 +786,87 @@ func accumulate(rep *report, durations []int64) {
 	}
 }
 
-func printSummary(r report) {
-	if len(r.ByTask) > 0 {
-		fmt.Println("\nPer-fixture pass rates:")
-		for _, ts := range r.ByTask {
-			fmt.Printf("  %-20s %d/%d (%s) · tool contracts %d/%d · mean %dms\n",
-				ts.Task, ts.Passed, ts.Trials, formatRate(ts.PassRate), ts.ToolContracts, ts.Trials, ts.MeanDurationMS)
+// perTaskK returns pass@k and pass^k (k = the task's trial count) for one task.
+func perTaskK(results []runResult, name string) (float64, float64) {
+	var sub []runResult
+	for _, r := range results {
+		if r.Task == name {
+			sub = append(sub, r)
 		}
 	}
-	fmt.Printf("\n%d/%d passed (%s) · tool contracts %d/%d (%s) · calls %d · errors %d · repairs %d/%d · tokens %d in/%d out · mean %dms ±%d · p95 %dms\n",
-		r.Passed, r.Total, formatRate(r.PassRate), r.ToolContracts, r.Total, formatRate(r.ToolContractRate),
+	st := computeStats(sub)
+	return st.PassAtK, st.PassHatK
+}
+
+// rateOrOne is c/n, or 1 when nothing was applicable (all n/a), so an
+// inapplicable axis never trips a gate.
+func rateOrOne(c, n int) float64 {
+	if n <= 0 {
+		return 1
+	}
+	return float64(c) / float64(n)
+}
+
+func printSummary(r report) {
+	if len(r.ByTask) > 0 {
+		fmt.Println("\nPer-fixture (strict pass = outcome AND tool contract):")
+		for _, ts := range r.ByTask {
+			fmt.Printf("  %-20s %d/%d (%s) · tool contracts %d/%d · pass@%d %s pass^%d %s · mean %dms\n",
+				ts.Task, ts.Passed, ts.Trials, formatRate(ts.PassRate), ts.ToolContracts, ts.Trials,
+				ts.Trials, formatRate(ts.PassAtK), ts.Trials, formatRate(ts.PassHatK), ts.MeanDurationMS)
+		}
+	}
+	st := r.Stats
+	fmt.Printf("\nOutcome pass rate (headline): %d/%d = %s  [n = %d tasks, %d trials, k = %d]\n",
+		r.OutcomePassed, r.Total, formatRate(r.OutcomePassRate), st.Tasks, st.Trials, st.K)
+	fmt.Printf("  95%% CI, task-clustered: %s\n", formatInterval(st.Clustered))
+	fmt.Printf("  95%% CI, Wilson (trials treated as independent, optimistic): %s\n", formatInterval(st.Wilson))
+	fmt.Printf("  pass^1 %s · pass@%d %s · pass^%d %s (pass^k = all k trials succeed)\n",
+		formatRate(st.Pass1), st.K, formatRate(st.PassAtK), st.K, formatRate(st.PassHatK))
+	if r.ToolContractNA > 0 {
+		fmt.Printf("Tool contracts: n/a under bash-only for %d/%d trials; applicable trials passed %d/%d\n",
+			r.ToolContractNA, r.Total, r.ToolContracts, r.Total-r.ToolContractNA)
+	}
+	fmt.Printf("Tool contracts (reported separately): %d/%d (%s) · strict pass (outcome AND contract): %d/%d (%s)\n",
+		r.ToolContracts, r.Total, formatRate(r.ToolContractRate), r.Passed, r.Total, formatRate(r.PassRate))
+	fmt.Printf("calls %d · errors %d · repairs %d/%d · tokens %d in/%d out · mean %dms ±%d · p95 %dms\n",
 		r.TotalCalls, r.TotalErrors, r.RepairsSucceeded, r.RepairAttempts,
 		r.PromptTokens, r.CompletionTokens, r.MeanDurationMS, r.DurationStdDevMS, r.P95DurationMS)
+	if evalRAG {
+		got := 0
+		for _, res := range r.Results {
+			if res.RAGBytes > 0 {
+				got++
+			}
+		}
+		fmt.Printf("RAG: context injected in %d/%d trials", got, r.Total)
+		if got < r.Total {
+			fmt.Print(" (embed model unavailable or no hits; see rag_error in -json)")
+		}
+		fmt.Println()
+	}
+	if m := r.Metadata; m != nil {
+		fmt.Printf("meta: model=%s digest=%s quant=%s temp=%s seed=%s num_ctx=%d fixtures=%s harness=%s toolset=%s rag=%v %s/%s %s\n",
+			m.Model, orDash(m.ModelDigest), orDash(m.Quantization), fmtF(m.Temperature), fmtI(m.Seed), m.NumCtx,
+			m.FixtureHash, m.HarnessVer, toolsetOf(m), m.RAG, m.OS, m.Arch, m.GoVersion)
+	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+func formatInterval(iv interval) string {
+	if !iv.Valid {
+		return "n/a (needs at least 2 tasks)"
+	}
+	return fmt.Sprintf("%s to %s", formatRate(iv.Lower), formatRate(iv.Upper))
 }
 
 func formatRate(v float64) string { return strconv.FormatFloat(v*100, 'f', 1, 64) + "%" }

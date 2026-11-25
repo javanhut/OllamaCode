@@ -329,29 +329,60 @@ func (m *Model) undoLast() (string, []string) {
 	}
 	cp := m.ckpt.stack[len(m.ckpt.stack)-1]
 
+	restored, deleted, touched, err := restoreTreeLocked(cp.Tree)
+	if err != nil {
+		return "can't undo — " + err.Error(), nil
+	}
+	m.ckpt.stack = m.ckpt.stack[:len(m.ckpt.stack)-1]
+	m.persistCheckpointsLocked()
+	return fmt.Sprintf("undid %q: %d file(s) restored, %d removed", cp.Label, restored, deleted), touched
+}
+
+// preTurnContent returns path's content in this turn's pre-mutation snapshot.
+// ok=false when there is no snapshot to ask (no mutation yet, or the shadow
+// repo is unusable); existed=false when the file was not in the snapshot.
+func (m *Model) preTurnContent(path string) (content string, existed, ok bool) {
+	m.ckpt.mu.Lock()
+	tree := m.ckpt.pending
+	m.ckpt.mu.Unlock()
+	if tree == "" {
+		return "", false, false
+	}
+	rel := path
+	if filepath.IsAbs(path) {
+		r, err := filepath.Rel(workspaceRoot(), path)
+		if err != nil {
+			return "", false, false
+		}
+		rel = r
+	}
+	out, err := shadowGit("cat-file", "blob", tree+":"+filepath.ToSlash(filepath.Clean(rel)))
+	if err != nil {
+		return "", false, true // not in the tree: the turn created it
+	}
+	return string(out), true, true
+}
+
+// restoreTreeLocked puts the workspace back to tree and reports what changed.
+// Callers must hold m.ckpt.mu.
+func restoreTreeLocked(tree string) (restored, deleted int, touched []string, err error) {
 	// Stage the current state first. It tells read-tree which files the turn
 	// created — in the index, absent from the target tree — so they get
 	// removed, and the blobs it writes leave the state being discarded
 	// recoverable from the shadow repo instead of gone.
 	if _, err := writeWorkspaceTree(); err != nil {
-		return "can't undo — " + err.Error(), nil
+		return 0, 0, nil, err
 	}
 	// --no-renames keeps this to status/path pairs; rename detection would emit
 	// a three-field record and desync the walk below.
-	changed, err := shadowGit("diff", "--name-status", "--no-renames", "-z", "--cached", cp.Tree)
+	changed, err := shadowGit("diff", "--name-status", "--no-renames", "-z", "--cached", tree)
 	if err != nil {
-		return "can't undo — " + err.Error(), nil
+		return 0, 0, nil, err
 	}
-	if _, err := shadowGit("read-tree", "-u", "--reset", cp.Tree); err != nil {
-		return "can't undo — " + err.Error(), nil
+	if _, err := shadowGit("read-tree", "-u", "--reset", tree); err != nil {
+		return 0, 0, nil, err
 	}
-
-	m.ckpt.stack = m.ckpt.stack[:len(m.ckpt.stack)-1]
-	m.persistCheckpointsLocked()
-
 	root := workspaceRoot()
-	restored, deleted := 0, 0
-	var touched []string
 	fields := strings.Split(strings.Trim(string(changed), "\x00"), "\x00")
 	for i := 0; i+1 < len(fields); i += 2 {
 		// The diff runs tree → index, so "A" means the turn added the file and
@@ -363,5 +394,21 @@ func (m *Model) undoLast() (string, []string) {
 		}
 		touched = append(touched, filepath.Join(root, fields[i+1]))
 	}
-	return fmt.Sprintf("undid %q: %d file(s) restored, %d removed", cp.Label, restored, deleted), touched
+	return restored, deleted, touched, nil
+}
+
+// revertTurnToSnapshot restores the workspace to this turn's pre-mutation
+// snapshot without popping the undo stack: the snapshot stays pending, so a
+// later /undo still returns to the same pre-turn state.
+func (m *Model) revertTurnToSnapshot() (string, []string, bool) {
+	m.ckpt.mu.Lock()
+	defer m.ckpt.mu.Unlock()
+	if m.ckpt.off || m.ckpt.pending == "" {
+		return "", nil, false
+	}
+	restored, deleted, touched, err := restoreTreeLocked(m.ckpt.pending)
+	if err != nil {
+		return "", nil, false
+	}
+	return fmt.Sprintf("%d file(s) restored, %d removed", restored, deleted), touched, true
 }

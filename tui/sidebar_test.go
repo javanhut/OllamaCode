@@ -17,7 +17,7 @@ func TestSidebarViewFitsItsBox(t *testing.T) {
 		{Content: "read the layout code", Status: todoCompleted},
 		{Content: "a step whose text is far too long to ever fit in the panel", Status: todoInProgress},
 	})
-	m.dreams = []dream{{summary: "noticed the notes viewport was mis-sized"}}
+	m.dreams = []dreamRecord{{summary: "noticed the notes viewport was mis-sized"}}
 	m.asleep = true
 
 	const h = 30

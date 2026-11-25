@@ -808,8 +808,13 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// batch that the rule now covers, via shouldPromptPermission.
 		i := m.pending.index
 		call := m.pending.calls[i]
-		m.addSessionPermission(tools.PermissionRuleFor(call))
-		m.recordPermission(call, "allowed_for_session")
+		if rule, ok := tools.ScopedPermissionRuleFor(call); ok {
+			m.addSessionPermission(rule)
+			m.recordPermission(call, "allowed_for_session")
+		} else {
+			m.toast = "allowed once — this command is too complex to turn into a reusable rule"
+			m.recordPermission(call, "allowed")
+		}
 		m.pending.started[i] = true
 		m.state = stateChat
 		return m, m.invokeToolCmd(m.pending.gen, i, call)
@@ -819,9 +824,13 @@ func (m *Model) updatePermission(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// in the modal before the key is pressed.
 		i := m.pending.index
 		call := m.pending.calls[i]
-		rule := tools.PermissionRuleFor(call)
-		m.savePermissionRule(rule)
-		m.recordPermission(call, "allowed_by_new_rule")
+		if rule, ok := tools.ScopedPermissionRuleFor(call); ok {
+			m.savePermissionRule(rule)
+			m.recordPermission(call, "allowed_by_new_rule")
+		} else {
+			m.toast = "allowed once — this command is too complex to turn into a reusable rule; nothing saved"
+			m.recordPermission(call, "allowed")
+		}
 		m.pending.started[i] = true
 		m.state = stateChat
 		return m, m.invokeToolCmd(m.pending.gen, i, call)
@@ -984,6 +993,13 @@ func (m *Model) updateChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if val == "/rate" || strings.HasPrefix(val, "/rate ") {
 			m.input.Reset()
 			m.rateCommand(strings.TrimSpace(strings.TrimPrefix(val, "/rate")))
+			return m, nil
+		}
+		if val == "/mcp" || strings.HasPrefix(val, "/mcp ") {
+			m.input.Reset()
+			m.history = append(m.history, api.Message{Role: "system", Content: m.mcpCommand(strings.TrimSpace(strings.TrimPrefix(val, "/mcp")))})
+			m.refreshTranscript()
+			m.viewport.GotoBottom()
 			return m, nil
 		}
 		if val == "/instructions" || strings.HasPrefix(val, "/instructions ") {

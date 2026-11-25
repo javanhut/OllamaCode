@@ -193,6 +193,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.refreshTranscript()
 				return m, m.startStream()
 			}
+			// The gate is an objective the model can game by editing the tests
+			// instead of the code. Once per turn, if the turn touched tests in a
+			// suspicious way, make the model account for it to the user.
+			if !m.integrityCheckedThisTurn {
+				m.integrityCheckedThisTurn = true
+				if warnings := m.testIntegrityWarnings(); len(warnings) > 0 {
+					m.history = append(m.history, advisory(agent.TestIntegrityAdvice(warnings)))
+					m.toast = "verified, but tests were weakened — " + truncatePlain(warnings[0], 60)
+					m.busySince = time.Now()
+					m.refreshTranscript()
+					return m, m.startStream()
+				}
+			}
 			m.toast = "verified ✓ " + m.lastVerification
 			if msg.lint != "" {
 				m.toast += fmt.Sprintf(" · %d lint findings in trace", strings.Count(msg.lint, "\n")+1)
@@ -201,15 +214,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, tea.Batch(cmds...)
 		}
-		m.verifyAttempts++
-		if m.verifyAttempts >= maxVerifyAttempts {
-			m.history = append(m.history, advisory(fmt.Sprintf(
-				"[VERIFICATION STILL FAILING after %d attempts] `%s` does not pass:\n\n%s\n\nStop editing. Explain to the user in plain text what is broken and why you couldn't fix it — do not claim it works.",
-				m.verifyAttempts, msg.label, repairDetail(msg.output, msg.lint))))
-			m.stopForBlockerReport()
-		} else {
-			m.history = append(m.history, advisory(agent.VerificationFailed(msg.label, repairDetail(msg.output, msg.lint))))
-		}
+		m.history = append(m.history, advisory(m.verifyFailureAdvice(msg)))
 		m.busySince = time.Now()
 		cmds = append(cmds, m.startStream())
 		m.refreshTranscript()

@@ -815,11 +815,16 @@ func (m *Model) permissionModal() string {
 		modalMutedStyle.Render("n/esc ")+modalBodyStyle.Render("deny"))
 	// Name the exact rule shift+A would write. "Always allow" is a permanent
 	// widening of the safety boundary, so it should never be a mystery key.
-	footerSection = append(footerSection, modalMutedStyle.Render("s ")+
-		modalBodyStyle.Render("allow for this session ")+
-		modalAccentStyle.Render(tools.PermissionRuleFor(call).String())+
-		modalMutedStyle.Render("   A ")+
-		modalBodyStyle.Render("always (saves it to config)"))
+	if rule, ok := tools.ScopedPermissionRuleFor(call); ok {
+		footerSection = append(footerSection, modalMutedStyle.Render("s ")+
+			modalBodyStyle.Render("allow for this session ")+
+			modalAccentStyle.Render(rule.String())+
+			modalMutedStyle.Render("   A ")+
+			modalBodyStyle.Render("always (saves it to config)"))
+	} else {
+		footerSection = append(footerSection, modalMutedStyle.Render("s / A ")+
+			modalBodyStyle.Render("allow once only — this command is too complex to scope into a reusable rule"))
+	}
 
 	// How many lines are left for arguments and preview?
 	usedLines := len(headerSection) + len(footerSection) + 2

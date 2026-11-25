@@ -43,6 +43,7 @@ You start in **explore** mode (read-only). `shift+tab` cycles to **plan**, then
 | [Training](docs/training.md)               | Export traces as a dataset and LoRA-tune a model on them             |
 | [Evals](docs/eval.md)                      | Running cmd/eval, multi-sample pass rates, and the CI self-test gate |
 | [Research](docs/research.md)               | Guided web research with deduped sources and citations               |
+| [Editor integration (ACP)](docs/acp.md)    | Run `ocode acp` as an agent server for Zed, JetBrains, Neovim, Emacs |
 
 ## What's in it
 
@@ -64,8 +65,9 @@ fuzzy), refuses edits that would break a file's syntax, and returns a diff.
 `multi_edit` applies several replacements to one file atomically, and after
 every edit the language server's errors for that file come straight back in the
 tool result.
-`parallel_edit` splits a large change into independent subtasks, plans each in
-parallel, then applies them serially with conflict detection.
+`parallel_edit` (opt-in, `"parallel_edit": true`) splits a large change into
+independent subtasks, plans each in parallel, then applies them serially with
+conflict detection.
 
 **Model routing.** Bind a model per mode — a big one to plan, a small local one
 to write — and the endpoint, context window and toolset swap with it. Providers
@@ -78,7 +80,7 @@ call; the index refreshes incrementally as files change.
 **Checkpoints and undo.** File changes are snapshotted per turn; `/undo` reverts
 the last one.
 
-**Dream mode.** After three minutes idle it drifts into background reflection —
+**Dream mode** (opt-in, `"dream": true`). After three minutes idle it drifts into background reflection —
 candidate fixes, consolidated notes, promoted memory — and tells you what it
 thought about when you come back.
 

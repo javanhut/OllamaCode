@@ -24,8 +24,15 @@ var toolCallConstraintCache = agent.NewConstraintCache()
 //
 // The schema always includes a {"response": ...} escape branch, so a
 // constrained model can still answer in prose when no tool is needed.
+//
+// Opt-in per model (profile constrained_tool_calls: true). It used to be on
+// for every small model, until cmd/eval measured it: gemma4 (Q4_K_M) lost 54
+// points of outcome pass rate under it (19 tasks x 3, paired 95% CI -70 to
+// -37) — the model routes tool calls into the prose escape in its native
+// syntax — while ornith showed no difference. Turn it on for a model only
+// after `cmd/eval -constrain -compare` says it helps.
 func (m *Model) toolCallFormat(actionTurn bool, defs []tools.Tool) (json.RawMessage, bool) {
-	if !actionTurn || !m.profile.smallModel() || !agent.ConstrainedDecodingSupported(m.host) {
+	if !actionTurn || !m.profile.constrainToolCalls() || !agent.ConstrainedDecodingSupported(m.host) {
 		return nil, false
 	}
 	return toolCallConstraintCache.Format(agent.ConstraintKey(m.host, m.modelName), defs)
@@ -49,8 +56,13 @@ func (m *Model) disableToolCallFormat() {
 // shared rung cache) to a headless child loop, so a small model routed into a
 // sub-agent gets the same first-pass decoding help as the interactive loop.
 func (m *Model) subagentConstraintOptions() (bool, *agent.ConstraintCache) {
-	if !m.profile.smallModel() {
+	if !m.profile.constrainToolCalls() {
 		return false, nil
 	}
 	return true, toolCallConstraintCache
+}
+
+// constrainToolCalls: small-tier models that opted in (see toolCallFormat).
+func (p ModelProfile) constrainToolCalls() bool {
+	return p.ConstrainedToolCalls != nil && *p.ConstrainedToolCalls && p.smallModel()
 }

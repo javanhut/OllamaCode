@@ -79,7 +79,7 @@ secret.
 
 | Field | Meaning |
 |---|---|
-| `trusted` | Required explicit trust decision. An untrusted server is never connected |
+| `trusted` | Required explicit trust decision. An untrusted server is never connected. Trust covers the tools the server offers at first connect: see *Tool pinning* below |
 | `read_only` | Expose tools in Explore and Plan without destructive prompts; only set this when every server tool is actually read-only |
 | `small_model_safe` | Permit the server's tools in the small-model candidate set |
 | `call_timeout_sec` | Per-request deadline; defaults to 120 seconds |
@@ -106,3 +106,20 @@ like a built-in tool call, regardless of transport.
 - A server that exits (stdio) or whose session ends (HTTP) has its tools
   withdrawn immediately; reconnecting happens on the next application start
   rather than spinning on a crashing or compromised server.
+
+## Tool pinning
+
+The first time a trusted server connects, a hash of every tool's name,
+description and input schema is stored in `mcp_pins.json` next to
+`config.json`. On later connects — and whenever the server announces a changed
+tool list mid-session — the hash is compared. On a mismatch the server's tools
+are disabled and a warning names the server.
+
+This closes the "rug pull": a server approved for what it offered yesterday
+silently changing a tool description into instructions for the model today.
+After reviewing the server, run `/mcp repin <name>` and restart; the current
+definitions are approved and pinned. `/mcp` alone lists servers and pin state.
+
+MCP results are treated like fetched web pages: they arrive wrapped in
+untrusted-content markers, and a turn that has read one asks before any
+destructive call, even under a session `s` approval.

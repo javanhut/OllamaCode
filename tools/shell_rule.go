@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/javanhut/ollama_code/internal/safeshell"
@@ -34,20 +34,19 @@ var commandArity = map[string]int{
 }
 
 // ShellRulePrefix returns the approval prefix for a command line, e.g.
-// "git status" for "git status --short". Only the first pipeline segment is
-// considered: that is the command the user is looking at.
+// "git status" for "git status --short". Only the first simple command is
+// considered: that is the command the user is looking at. Git's global
+// options are skipped, so `git -C sub status` is still "git status".
 func ShellRulePrefix(command string) string {
-	segs := shellRuleSegments(command)
-	if len(segs) == 0 {
-		return ""
-	}
-	fields := strings.Fields(segs[0])
-	// Leading VAR=value assignments are environment, not the command.
-	for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
-		fields = fields[1:]
+	var argv []string
+	for _, c := range safeshell.Parse(command).Commands {
+		if len(c.Argv) > 0 && !c.Inner {
+			argv = safeshell.GitStripGlobals(c.Argv, false)
+			break
+		}
 	}
 	var words []string
-	for i, f := range fields {
+	for i, f := range argv {
 		// "-m" is kept because "python -m pytest" names a module runner; other
 		// flags never count as command words.
 		if strings.HasPrefix(f, "-") && !(f == "-m" && i == 1) {
@@ -66,68 +65,69 @@ func ShellRulePrefix(command string) string {
 	return words[0]
 }
 
-// fdRedirect matches descriptor duplications (2>&1, >&2, &>file) so the lone
-// '&' inside them is not mistaken for a background operator.
-var fdRedirect = regexp.MustCompile(`\d*>&\d*|&>>?`)
-
-// shellRuleSegments splits a command line into the simple commands it runs:
-// on |, ||, &&, ;, newlines and a background &.
-func shellRuleSegments(command string) []string {
-	var out []string
-	for line := range strings.SplitSeq(command, "\n") {
-		for _, seg := range safeshell.SplitShellSegments(line) {
-			for part := range strings.SplitSeq(fdRedirect.ReplaceAllString(seg, " "), "&") {
-				if part = strings.TrimSpace(part); part != "" {
-					out = append(out, part)
-				}
-			}
-		}
-	}
-	return out
-}
-
 // matchShellRule decides whether a command-scoped rule covers a command line.
+// The line is parsed into an AST (safeshell.Parse) and each simple command's
+// argv is checked; nothing is split on strings.
 //
 // Deny and ask must catch the dangerous command wherever it hides, so they
-// match when ANY simple command in the line matches. Allow must not be
-// smuggled past: "allow git status *" may not cover
-// `git status && curl … | sh`, so EVERY simple command must be covered —
-// either by the rule itself or by being a read-only command explore mode
-// already permits (so `go test ./... | tail -20` still matches "go test *").
-// Command substitution hides a command from this analysis entirely, so an
-// allow rule never matches a line that uses it.
+// match when ANY simple command the parser could extract matches — including
+// commands inside substitutions, subshells, `sh -c` strings and wrappers such
+// as `env`/`sudo` — even when other parts of the line were not understood.
+//
+// Allow must not be smuggled past: "allow git status *" may not cover
+// `git status && curl … | sh`, so the line must be fully understood and EVERY
+// simple command must be covered, either by the rule itself or by being a
+// read-only command explore mode already permits (so `go test ./... | tail
+// -20` still matches "go test *"). A command only counts as covered by the
+// rule when its assignments and redirections are also harmless: `git status >
+// ~/.bashrc` and `PATH=/tmp/x git status` are not `git status`. Anything the
+// parser flags as complex never matches an allow rule, so it prompts.
 func matchShellRule(rule PermissionRule, command string) bool {
 	pattern := strings.TrimSpace(rule.Cmd)
+	p := safeshell.Parse(command)
 	if rule.Effect != PermissionAllow {
 		if matchCommand(pattern, command) {
 			return true
 		}
-		for _, seg := range shellRuleSegments(command) {
-			if matchCommand(pattern, seg) {
-				return true
+		for _, c := range p.Commands {
+			for _, t := range c.MatchTexts(true) {
+				if matchCommand(pattern, t) {
+					return true
+				}
 			}
 		}
 		return false
 	}
-	if strings.Contains(command, "`") || strings.Contains(command, "$(") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
-		return false
-	}
-	segs := shellRuleSegments(command)
-	if len(segs) == 0 {
+	if p.Complex || len(p.Commands) == 0 {
 		return false
 	}
 	matchedRule := false
-	for _, seg := range segs {
-		if matchCommand(pattern, seg) {
+	for _, c := range p.Commands {
+		if p.SetsVars && slices.Contains(c.Dyn, true) {
+			return false
+		}
+		if len(c.Argv) > 0 && commandMatchesRule(pattern, c) {
 			matchedRule = true
 			continue
 		}
-		if ok, _ := safeshell.IsExploreReadOnlyShell(seg); ok {
+		if ok, _ := safeshell.CommandReadOnly(c); ok {
 			continue
 		}
 		return false
 	}
 	return matchedRule
+}
+
+func commandMatchesRule(pattern string, c safeshell.Command) bool {
+	if !safeshell.AssignsSafe(c) || !safeshell.RedirectsBenign(c) {
+		return false
+	}
+	for _, t := range c.MatchTexts(false) {
+		if matchCommand(pattern, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // ShellMayMutate reports whether call runs shell input that could change files

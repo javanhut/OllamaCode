@@ -25,13 +25,24 @@ func testConstraintDefs(t *testing.T) []tools.Tool {
 // everywhere else. Model names are unique per subtest because the rung cache
 // is process-wide and keyed by host+model.
 func TestToolCallFormatGating(t *testing.T) {
+	yes := true
+	optIn := &yes
+	t.Run("small tier without opt-in stays unconstrained", func(t *testing.T) {
+		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-default", host: api.OllamaHost{}}
+		if raw, ok := m.toolCallFormat(true, testConstraintDefs(t)); ok {
+			t.Fatalf("constrained decoding must be opt-in (cmd/eval: -54 points on gemma4), got %s", raw)
+		}
+		if c, _ := m.subagentConstraintOptions(); c {
+			t.Fatal("subagents must not be constrained without opt-in either")
+		}
+	})
 	defs := testConstraintDefs(t)
 
 	native := api.OllamaHost{}
 	native.SetURI("http://localhost:11434")
 
 	t.Run("small tier action turn is constrained", func(t *testing.T) {
-		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-small", host: native}
+		m := &Model{profile: ModelProfile{ParamsB: 7, ConstrainedToolCalls: optIn}, modelName: "gate-small", host: native}
 		raw, ok := m.toolCallFormat(true, defs)
 		if !ok {
 			t.Fatal("expected a format for a small-tier action turn")
@@ -43,7 +54,7 @@ func TestToolCallFormatGating(t *testing.T) {
 	})
 
 	t.Run("prose turn is never constrained", func(t *testing.T) {
-		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-prose", host: native}
+		m := &Model{profile: ModelProfile{ParamsB: 7, ConstrainedToolCalls: optIn}, modelName: "gate-prose", host: native}
 		if raw, ok := m.toolCallFormat(false, defs); ok {
 			t.Fatalf("tool-less turns must stay unconstrained, got %s", raw)
 		}
@@ -61,14 +72,14 @@ func TestToolCallFormatGating(t *testing.T) {
 	t.Run("openai provider keeps the repair-only path", func(t *testing.T) {
 		host := api.OllamaHost{}
 		host.SetProvider(api.ProviderOpenAI)
-		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-openai", host: host}
+		m := &Model{profile: ModelProfile{ParamsB: 7, ConstrainedToolCalls: optIn}, modelName: "gate-openai", host: host}
 		if raw, ok := m.toolCallFormat(true, defs); ok {
 			t.Fatalf("OpenAI-compatible providers must not get the Ollama grammar schema, got %s", raw)
 		}
 	})
 
 	t.Run("rejection steps the cached rung down", func(t *testing.T) {
-		m := &Model{profile: ModelProfile{ParamsB: 7}, modelName: "gate-ladder", host: native}
+		m := &Model{profile: ModelProfile{ParamsB: 7, ConstrainedToolCalls: optIn}, modelName: "gate-ladder", host: native}
 		first, ok := m.toolCallFormat(true, defs)
 		if !ok || !strings.Contains(string(first), "anyOf") {
 			t.Fatalf("first probe should be the union, got ok=%v %s", ok, first)
@@ -83,7 +94,7 @@ func TestToolCallFormatGating(t *testing.T) {
 	})
 
 	t.Run("subagent options inherit the small-tier posture", func(t *testing.T) {
-		small := &Model{profile: ModelProfile{ParamsB: 7}}
+		small := &Model{profile: ModelProfile{ParamsB: 7, ConstrainedToolCalls: optIn}}
 		constrain, cache := small.subagentConstraintOptions()
 		if !constrain || cache == nil {
 			t.Fatal("small-tier sub-agents should share the constraint posture and cache")

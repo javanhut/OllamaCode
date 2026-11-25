@@ -159,7 +159,7 @@ func TestHTTPExternalServerLifecycleAndToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "echo: hello" {
+	if got != wrapUntrustedContent("echo: hello") {
 		t.Fatalf("unexpected MCP result: %q", got)
 	}
 	if id := fake.sessionOnToolsList(); id != "test-session-1" {

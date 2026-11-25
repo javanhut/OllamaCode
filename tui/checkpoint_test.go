@@ -378,3 +378,86 @@ func TestCheckpointCoversShellMutations(t *testing.T) {
 		t.Fatalf("undo did not restore the shell edit, got %q", got)
 	}
 }
+
+// TestTestIntegrityAgainstSnapshot: the pre-turn snapshot is what a weakened
+// test is compared against — a deleted test case and a removed test file are
+// both reported, an untouched test file and a source edit are not.
+func TestTestIntegrityAgainstSnapshot(t *testing.T) {
+	dir := ckptWorkspace(t)
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a_test.go", "package a\nfunc TestA(t *testing.T) { t.Fatal(1) }\nfunc TestB(t *testing.T) { t.Fatal(2) }\n")
+	write("b_test.go", "package a\nfunc TestC(t *testing.T) { t.Fatal(3) }\n")
+	write("a.go", "package a\n")
+
+	m := &Model{turnChangedPaths: map[string]bool{}}
+	m.snapshotBeforeMutate()
+	write("a_test.go", "package a\nfunc TestA(t *testing.T) { t.Fatal(1) }\n")
+	if err := os.Remove(filepath.Join(dir, "b_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	write("a.go", "package a\nvar X = 1\n")
+	for _, p := range []string{"a_test.go", "b_test.go", "a.go"} {
+		m.turnChangedPaths[p] = true
+	}
+
+	got := strings.Join(m.testIntegrityWarnings(), "\n")
+	if !strings.Contains(got, "a_test.go: test cases went from 2 to 1") || !strings.Contains(got, "b_test.go: test file deleted") {
+		t.Fatalf("missing integrity warnings:\n%s", got)
+	}
+	if strings.Contains(got, "a.go:") {
+		t.Fatalf("a source edit is not a test change:\n%s", got)
+	}
+}
+
+// TestResampleAfterStuckRevertsOnce: with resample_on_stuck, a stuck gate
+// reverts the turn's files to the pre-turn snapshot and retries once; the
+// second time it gives up as usual. Without the option nothing is reverted.
+func TestResampleAfterStuckRevertsOnce(t *testing.T) {
+	dir := ckptWorkspace(t)
+	file := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(file, []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	on := true
+	m := &Model{profile: ModelProfile{ResampleOnStuck: &on}}
+	m.snapshotBeforeMutate()
+	if err := os.WriteFile(file, []byte("package a\nbroken(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fail := func() string {
+		return m.verifyFailureAdvice(verifyDoneMsg{label: "go build", output: "a.go:2:7: syntax error"})
+	}
+	fail()
+	fail()
+	if got := fail(); !strings.Contains(got, "[RESAMPLE]") {
+		t.Fatalf("stuck gate must resample when opted in: %s", got)
+	}
+	if data, _ := os.ReadFile(file); string(data) != "package a\n" {
+		t.Fatalf("the turn's change must be reverted, file is %q", data)
+	}
+	if !m.resampling || m.turnStoppedByGuard {
+		t.Fatal("resampling continues the turn instead of stopping it")
+	}
+	if opts := m.chatOptions(true); opts["temperature"].(float64) < 0.6 {
+		t.Fatalf("a resample must sample hotter, got %v", opts["temperature"])
+	}
+	fail()
+	fail()
+	if got := fail(); !strings.Contains(got, "STUCK") || !m.turnStoppedByGuard {
+		t.Fatalf("the second stuck run must stop, not resample again: %s", got)
+	}
+
+	// Off by default.
+	m2 := &Model{}
+	m2.snapshotBeforeMutate()
+	for range 2 {
+		m2.verifyFailureAdvice(verifyDoneMsg{label: "go build", output: "same"})
+	}
+	if got := m2.verifyFailureAdvice(verifyDoneMsg{label: "go build", output: "same"}); strings.Contains(got, "RESAMPLE") {
+		t.Fatal("resampling must be opt-in")
+	}
+}

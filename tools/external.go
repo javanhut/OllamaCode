@@ -531,7 +531,10 @@ func decodeMCPToolResult(resp json.RawMessage) (string, error) {
 	if result.IsError {
 		return "", fmt.Errorf("%s", text)
 	}
-	return text, nil
+	// An MCP server is third-party code relaying third-party data (issues,
+	// pages, tickets), so its output gets the same untrusted framing as a web
+	// fetch, and the TUI's fetched-content gate keys on that framing.
+	return wrapUntrustedContent(text), nil
 }
 
 func functionFromMCPSchema(name, description string, raw json.RawMessage) (Function, error) {
