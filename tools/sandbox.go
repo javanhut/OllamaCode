@@ -385,12 +385,22 @@ func protectedRoots() []string {
 	return out
 }
 
-func existingSockets() []string {
+func existingSockets() []string { return resolveSockets(dockerSockets) }
+
+// resolveSockets returns the canonical path of each socket that exists, once.
+// bwrap cannot mount over a dangling symlink, nor over a path that crosses a
+// symlink such as /var/run -> /run, so masking the resolved target is the only
+// form that works — and it covers every alias of the socket at once.
+func resolveSockets(paths []string) []string {
 	var out []string
-	for _, s := range dockerSockets {
-		if _, err := os.Lstat(s); err == nil {
-			out = append(out, s)
+	seen := map[string]bool{}
+	for _, s := range paths {
+		real, err := filepath.EvalSymlinks(s)
+		if err != nil || seen[real] {
+			continue
 		}
+		seen[real] = true
+		out = append(out, real)
 	}
 	return out
 }

@@ -454,3 +454,31 @@ func TestWrappedArgvKeepsCommandIntact(t *testing.T) {
 		}
 	}
 }
+
+// bwrap fails every command when asked to mask a dangling symlink or a path
+// through a symlinked directory (/var/run -> /run on Ubuntu), so sockets are
+// resolved, deduplicated, and dropped when they do not exist.
+func TestResolveSocketsCanonicalizes(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "run")
+	if err := os.Mkdir(run, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(run, "docker.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	varRun := filepath.Join(dir, "varrun")
+	if err := os.Symlink(run, varRun); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "dangling.sock")
+	if err := os.Symlink(filepath.Join(dir, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(sock)
+	got := resolveSockets([]string{filepath.Join(varRun, "docker.sock"), sock, dangling, filepath.Join(dir, "absent.sock")})
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("resolveSockets = %v, want [%s]", got, want)
+	}
+}
